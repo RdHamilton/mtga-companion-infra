@@ -1,0 +1,162 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  MTGA Companion — RDS PostgreSQL instance.
+  Private subnet only, pgvector-enabled parameter group, encrypted at rest.
+  Hold deployment until AWS Activate credits are confirmed.
+
+# ---------------------------------------------------------------------------
+# Parameters
+# ---------------------------------------------------------------------------
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC to deploy the RDS instance into
+
+  PrivateSubnet1Id:
+    Type: AWS::EC2::Subnet::Id
+    Description: First private subnet (must be in different AZ from Subnet2)
+
+  PrivateSubnet2Id:
+    Type: AWS::EC2::Subnet::Id
+    Description: Second private subnet (RDS subnet groups require >= 2 AZs)
+
+  EC2SecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: Security group of the EC2 instance — granted access to port 5432
+
+  DBName:
+    Type: String
+    Default: mtga_companion
+    Description: Initial database name
+
+  DBUsername:
+    Type: String
+    Default: mtga_admin
+    Description: Master username for the RDS instance
+
+  DBPassword:
+    Type: String
+    NoEcho: true
+    MinLength: 16
+    Description: Master password (store in AWS Secrets Manager or SSM — never commit)
+
+  Environment:
+    Type: String
+    Default: production
+    AllowedValues: [production, staging]
+
+# ---------------------------------------------------------------------------
+# Resources
+# ---------------------------------------------------------------------------
+Resources:
+
+  # --- Security Group ---------------------------------------------------------
+  RDSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow PostgreSQL access from EC2 only
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          SourceSecurityGroupId: !Ref EC2SecurityGroupId
+      Tags:
+        - Key: Name
+          Value: mtga-companion-rds-sg
+        - Key: Project
+          Value: mtga-companion
+        - Key: Environment
+          Value: !Ref Environment
+
+  # --- Subnet Group -----------------------------------------------------------
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Private subnets for MTGA Companion RDS
+      SubnetIds:
+        - !Ref PrivateSubnet1Id
+        - !Ref PrivateSubnet2Id
+      Tags:
+        - Key: Project
+          Value: mtga-companion
+        - Key: Environment
+          Value: !Ref Environment
+
+  # --- Parameter Group --------------------------------------------------------
+  # pgvector must be listed as a shared_preload_library to activate the extension.
+  DBParameterGroup:
+    Type: AWS::RDS::DBParameterGroup
+    Properties:
+      Description: MTGA Companion PostgreSQL 15 — pgvector enabled
+      Family: postgres15
+      Parameters:
+        shared_preload_libraries: pgvector
+        log_connections: "1"
+        log_disconnections: "1"
+        log_min_duration_statement: "1000"   # log queries > 1s
+      Tags:
+        - Key: Project
+          Value: mtga-companion
+        - Key: Environment
+          Value: !Ref Environment
+
+  # --- RDS Instance -----------------------------------------------------------
+  DBInstance:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot   # take a final snapshot on stack deletion
+    Properties:
+      DBInstanceIdentifier: mtga-companion-postgres
+      DBName: !Ref DBName
+      Engine: postgres
+      EngineVersion: "15.7"
+      DBInstanceClass: db.t3.micro
+      AllocatedStorage: "20"
+      StorageType: gp3
+      StorageEncrypted: true
+      MasterUsername: !Ref DBUsername
+      MasterUserPassword: !Ref DBPassword
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      VPCSecurityGroups:
+        - !Ref RDSSecurityGroup
+      DBParameterGroupName: !Ref DBParameterGroup
+      MultiAZ: false           # single-AZ to minimise cost; upgrade when revenue justifies
+      PubliclyAccessible: false
+      BackupRetentionPeriod: 7
+      PreferredBackupWindow: "03:00-04:00"
+      PreferredMaintenanceWindow: "mon:04:00-mon:05:00"
+      EnablePerformanceInsights: false   # free tier not available on t3.micro
+      AutoMinorVersionUpgrade: true
+      Tags:
+        - Key: Project
+          Value: mtga-companion
+        - Key: Environment
+          Value: !Ref Environment
+
+# ---------------------------------------------------------------------------
+# Outputs
+# ---------------------------------------------------------------------------
+Outputs:
+  DBEndpoint:
+    Description: RDS PostgreSQL endpoint hostname
+    Value: !GetAtt DBInstance.Endpoint.Address
+    Export:
+      Name: !Sub "${AWS::StackName}-DBEndpoint"
+
+  DBPort:
+    Description: RDS PostgreSQL port
+    Value: !GetAtt DBInstance.Endpoint.Port
+    Export:
+      Name: !Sub "${AWS::StackName}-DBPort"
+
+  DBName:
+    Description: Database name
+    Value: !Ref DBName
+    Export:
+      Name: !Sub "${AWS::StackName}-DBName"
+
+  RDSSecurityGroupId:
+    Description: RDS security group ID (reference from EC2 stack if needed)
+    Value: !Ref RDSSecurityGroup
+    Export:
+      Name: !Sub "${AWS::StackName}-RDSSecurityGroupId"
