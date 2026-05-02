@@ -15,11 +15,54 @@ systemd/          — systemd service definitions
 
 Account: 901347789205 — always use `AWS_PROFILE=personal`
 
+## Manual Deployment (GitHub Actions)
+
+Deployments are triggered manually via **Actions → Deploy CloudFormation Stack → Run workflow**.
+
+Select a stack and optionally enable **dry run** to preview the changeset without applying it.
+
+### Required GitHub Secrets
+
+Set these in **Settings → Secrets and variables → Actions**:
+
+| Secret | Description |
+|---|---|
+| `AWS_ACCESS_KEY_ID` | IAM user access key (deploy permissions) |
+| `AWS_SECRET_ACCESS_KEY` | IAM user secret key |
+| `DB_PASSWORD` | RDS master password (min 16 chars) |
+
+### Required IAM permissions for the deploy user
+
+```
+cloudformation:*
+rds:*
+ec2:*  (security groups, subnets)
+iam:PassRole
+```
+
+### Before deploying RDS
+
+Fill in the real resource IDs in `cloudformation/parameters/rds.json`:
+- `VpcId`, `PrivateSubnet1Id`, `PrivateSubnet2Id` — from the VPC stack outputs
+- `EC2SecurityGroupId` — from the EC2 stack outputs
+- `DBPassword` is injected automatically from the `DB_PASSWORD` secret
+
+## Deployment Order
+
+Run stacks in this order — each depends on the previous:
+
+1. `vpc.yml` — VPC, subnets, security groups *(not yet written)*
+2. `rds.yml` — RDS PostgreSQL db.t3.micro ✅
+3. `ec2.yml` — EC2 t3.small *(not yet written)*
+4. `dns.yml` — Route 53 records *(after domain purchase)*
+
+**Hold all deployments until AWS Activate credits are confirmed.**
+
 ## Status
 
-- [ ] VPC + security groups
-- [ ] RDS PostgreSQL (db.t3.micro)
-- [ ] EC2 t3.small
-- [ ] nginx + SSL
-- [ ] systemd service
+- [ ] VPC + security groups (`cloudformation/vpc.yml`)
+- [x] RDS PostgreSQL db.t3.micro (`cloudformation/rds.yml`) — pgvector-enabled, private subnet only
+- [ ] EC2 t3.small (`cloudformation/ec2.yml`)
+- [ ] nginx + SSL (`nginx/mtga-companion.conf`)
+- [ ] systemd service (`systemd/mtga-companion.service`)
 - [ ] GitHub Actions deploy step
