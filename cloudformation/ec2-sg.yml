@@ -1,0 +1,59 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  MTGA Companion — EC2 security group.
+  Deploy this FIRST, then pass its output (EC2SecurityGroupId) into rds.yml.
+  The EC2 instance itself is not created here — only the SG it will use.
+
+# ---------------------------------------------------------------------------
+# Parameters
+# ---------------------------------------------------------------------------
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC to create the security group in
+
+  Environment:
+    Type: String
+    Default: production
+    AllowedValues: [production, staging]
+
+# ---------------------------------------------------------------------------
+# Resources
+# ---------------------------------------------------------------------------
+Resources:
+
+  EC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "MTGA Companion EC2 — HTTP/HTTPS inbound, all outbound"
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: "0.0.0.0/0"
+          Description: "HTTP from Internet (nginx redirect to HTTPS)"
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: "0.0.0.0/0"
+          Description: "HTTPS from Internet"
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: "0.0.0.0/0"
+          Description: "All outbound"
+      Tags:
+        - Key: Name
+          Value: !Sub "mtga-companion-ec2-sg-${Environment}"
+        - Key: Environment
+          Value: !Ref Environment
+
+# ---------------------------------------------------------------------------
+# Outputs
+# ---------------------------------------------------------------------------
+Outputs:
+  EC2SecurityGroupId:
+    Description: EC2 SG ID — pass to rds.yml as EC2SecurityGroupId
+    Value: !Ref EC2SecurityGroup
+    Export:
+      Name: !Sub "mtga-companion-${Environment}-EC2SecurityGroupId"

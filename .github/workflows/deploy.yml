@@ -8,9 +8,10 @@ on:
         required: true
         type: choice
         options:
-          - vpc
+          - ec2-sg
           - rds
           - ec2
+          - vpc
           - dns
       dry_run:
         description: Dry run — validate and show changeset only, do not deploy

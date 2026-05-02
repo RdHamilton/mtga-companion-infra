@@ -1,0 +1,233 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  MTGA Companion — VPC with public subnets (EC2) and private subnets (RDS).
+  No NAT Gateway: EC2 is public-facing, RDS is private and reachable only from within the VPC.
+  Deploy this stack first; pass its outputs into rds.yml and future EC2 stacks.
+
+# ---------------------------------------------------------------------------
+# Parameters
+# ---------------------------------------------------------------------------
+Parameters:
+  Environment:
+    Type: String
+    Default: production
+    AllowedValues: [production, staging]
+
+  VpcCidr:
+    Type: String
+    Default: "10.0.0.0/16"
+    Description: CIDR block for the VPC
+
+  PublicSubnet1Cidr:
+    Type: String
+    Default: "10.0.1.0/24"
+    Description: Public subnet in AZ-a (EC2 lives here)
+
+  PublicSubnet2Cidr:
+    Type: String
+    Default: "10.0.2.0/24"
+    Description: Public subnet in AZ-b (reserved for ALB or future EC2)
+
+  PrivateSubnet1Cidr:
+    Type: String
+    Default: "10.0.11.0/24"
+    Description: Private subnet in AZ-a (RDS primary)
+
+  PrivateSubnet2Cidr:
+    Type: String
+    Default: "10.0.12.0/24"
+    Description: Private subnet in AZ-b (RDS standby — required for DB subnet group)
+
+# ---------------------------------------------------------------------------
+# Resources
+# ---------------------------------------------------------------------------
+Resources:
+
+  # ── VPC ──────────────────────────────────────────────────────────────────
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub "mtga-companion-${Environment}"
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ── Internet Gateway ─────────────────────────────────────────────────────
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub "mtga-companion-igw-${Environment}"
+
+  IGWAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  # ── Subnets ──────────────────────────────────────────────────────────────
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PublicSubnet1Cidr
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub "mtga-companion-public-1-${Environment}"
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PublicSubnet2Cidr
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub "mtga-companion-public-2-${Environment}"
+
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PrivateSubnet1Cidr
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub "mtga-companion-private-1-${Environment}"
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PrivateSubnet2Cidr
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub "mtga-companion-private-2-${Environment}"
+
+  # ── Public Route Table ────────────────────────────────────────────────────
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub "mtga-companion-public-rt-${Environment}"
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: IGWAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: "0.0.0.0/0"
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnet1RouteTableAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnet2RouteTableAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref PublicRouteTable
+
+  # ── Private Route Table (no outbound Internet — RDS doesn't need it) ─────
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub "mtga-companion-private-rt-${Environment}"
+
+  PrivateSubnet1RouteTableAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet1
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateSubnet2RouteTableAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet2
+      RouteTableId: !Ref PrivateRouteTable
+
+  # ── EC2 Security Group ────────────────────────────────────────────────────
+  # Ingress: HTTPS (443) and HTTP (80) from Internet; SSH (22) locked to deployer IP at stack time.
+  # EC2 → RDS access is granted by rds.yml referencing this SG.
+  EC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "MTGA Companion EC2 — allows HTTP/HTTPS inbound, all outbound"
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: "0.0.0.0/0"
+          Description: "HTTP from Internet"
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: "0.0.0.0/0"
+          Description: "HTTPS from Internet"
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: "0.0.0.0/0"
+          Description: "All outbound"
+      Tags:
+        - Key: Name
+          Value: !Sub "mtga-companion-ec2-sg-${Environment}"
+
+# ---------------------------------------------------------------------------
+# Outputs — passed as inputs to rds.yml and future EC2 stack
+# ---------------------------------------------------------------------------
+Outputs:
+  VpcId:
+    Description: VPC ID
+    Value: !Ref VPC
+    Export:
+      Name: !Sub "mtga-companion-${Environment}-VpcId"
+
+  PublicSubnet1Id:
+    Description: Public subnet AZ-a (EC2)
+    Value: !Ref PublicSubnet1
+    Export:
+      Name: !Sub "mtga-companion-${Environment}-PublicSubnet1Id"
+
+  PublicSubnet2Id:
+    Description: Public subnet AZ-b
+    Value: !Ref PublicSubnet2
+    Export:
+      Name: !Sub "mtga-companion-${Environment}-PublicSubnet2Id"
+
+  PrivateSubnet1Id:
+    Description: Private subnet AZ-a (RDS primary)
+    Value: !Ref PrivateSubnet1
+    Export:
+      Name: !Sub "mtga-companion-${Environment}-PrivateSubnet1Id"
+
+  PrivateSubnet2Id:
+    Description: Private subnet AZ-b (RDS standby)
+    Value: !Ref PrivateSubnet2
+    Export:
+      Name: !Sub "mtga-companion-${Environment}-PrivateSubnet2Id"
+
+  EC2SecurityGroupId:
+    Description: EC2 security group ID — pass to rds.yml as EC2SecurityGroupId
+    Value: !Ref EC2SecurityGroup
+    Export:
+      Name: !Sub "mtga-companion-${Environment}-EC2SecurityGroupId"

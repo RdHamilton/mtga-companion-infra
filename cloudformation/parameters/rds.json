@@ -1,9 +1,8 @@
 [
-  { "ParameterKey": "VpcId",              "ParameterValue": "REPLACE_WITH_VPC_ID" },
-  { "ParameterKey": "PrivateSubnet1Id",   "ParameterValue": "REPLACE_WITH_SUBNET_1_ID" },
-  { "ParameterKey": "PrivateSubnet2Id",   "ParameterValue": "REPLACE_WITH_SUBNET_2_ID" },
-  { "ParameterKey": "EC2SecurityGroupId", "ParameterValue": "REPLACE_WITH_EC2_SG_ID" },
-  { "ParameterKey": "DBName",             "ParameterValue": "mtga_companion" },
+  { "ParameterKey": "VpcId",            "ParameterValue": "vpc-01d097c495e941d32" },
+  { "ParameterKey": "PrivateSubnet1Id", "ParameterValue": "subnet-021e2cc715f426da1" },
+  { "ParameterKey": "PrivateSubnet2Id", "ParameterValue": "subnet-0600373b7aab41525" },
+  { "ParameterKey": "DBName",           "ParameterValue": "mtga_companion" },
   { "ParameterKey": "DBUsername",         "ParameterValue": "mtga_admin" },
   { "ParameterKey": "DBPassword",         "ParameterValue": "INJECTED_FROM_SECRET" },
   { "ParameterKey": "Environment",        "ParameterValue": "production" }
