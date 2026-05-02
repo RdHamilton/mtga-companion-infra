@@ -1,0 +1,14 @@
+[
+  {
+    "ParameterKey": "Environment",
+    "ParameterValue": "production"
+  },
+  {
+    "ParameterKey": "DomainName",
+    "ParameterValue": "mtgacompanion.com"
+  },
+  {
+    "ParameterKey": "TTL",
+    "ParameterValue": "300"
+  }
+]

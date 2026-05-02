@@ -1,0 +1,82 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  MTGA Companion - Route 53 DNS records.
+  Points the domain A record at the EC2 Elastic IP.
+  Deploy after ec2 stack is stable and domain is registered in Route 53.
+  Deploy order: ec2-sg -> rds -> ec2 -> dns.
+
+Parameters:
+  Environment:
+    Type: String
+    Default: production
+    AllowedValues: [production, staging]
+    Description: Deployment environment
+
+  DomainName:
+    Type: String
+    Default: mtgacompanion.com
+    Description: >
+      Root domain name (without trailing dot).
+      Must match a hosted zone in Route 53.
+
+  HostedZoneId:
+    Type: AWS::Route53::HostedZone::Id
+    Description: >
+      Route 53 hosted zone ID for the domain (e.g. Z1D633PJN98FT9).
+      Find it in the Route 53 console under Hosted Zones.
+
+  ElasticIP:
+    Type: String
+    Description: >
+      EC2 Elastic IP address to point the domain at.
+      Retrieve from the ec2 stack output PublicIP, then associate an EIP.
+
+  TTL:
+    Type: Number
+    Default: 300
+    MinValue: 60
+    MaxValue: 86400
+    Description: DNS record TTL in seconds (300 for fast initial propagation)
+
+Resources:
+
+  # ---------------------------------------------------------
+  # A record: mtgacompanion.com -> Elastic IP
+  # ---------------------------------------------------------
+  RootARecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Sub "${DomainName}."
+      Type: A
+      TTL: !Ref TTL
+      ResourceRecords:
+        - !Ref ElasticIP
+      Comment: !Sub "MTGA Companion ${Environment} root A record"
+
+  # ---------------------------------------------------------
+  # A record: www.mtgacompanion.com -> Elastic IP
+  # ---------------------------------------------------------
+  WwwARecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Sub "www.${DomainName}."
+      Type: A
+      TTL: !Ref TTL
+      ResourceRecords:
+        - !Ref ElasticIP
+      Comment: !Sub "MTGA Companion ${Environment} www A record"
+
+Outputs:
+  RootDomain:
+    Description: Root domain pointing to EC2
+    Value: !Sub "https://${DomainName}"
+    Export:
+      Name: !Sub "${AWS::StackName}-RootDomain"
+
+  WwwDomain:
+    Description: www subdomain pointing to EC2
+    Value: !Sub "https://www.${DomainName}"
+    Export:
+      Name: !Sub "${AWS::StackName}-WwwDomain"
