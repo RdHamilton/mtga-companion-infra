@@ -1,0 +1,139 @@
+name: Deploy CloudFormation Stack
+
+on:
+  workflow_dispatch:
+    inputs:
+      stack:
+        description: Stack to deploy
+        required: true
+        type: choice
+        options:
+          - vpc
+          - rds
+          - ec2
+          - dns
+      dry_run:
+        description: Dry run — validate and show changeset only, do not deploy
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: cloudformation-deploy
+  cancel-in-progress: false  # never cancel an in-flight deploy
+
+jobs:
+  deploy:
+    name: Deploy ${{ inputs.stack }} (${{ inputs.dry_run && 'dry-run' || 'deploy' }})
+    runs-on: ubuntu-latest
+    environment: production   # requires reviewer approval if configured in repo settings
+
+    env:
+      AWS_REGION: us-east-1
+      STACK_NAME: mtga-companion-${{ inputs.stack }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Validate template
+        run: |
+          aws cloudformation validate-template \
+            --template-body file://cloudformation/${{ inputs.stack }}.yml
+          echo "✓ Template valid"
+
+      - name: Load parameters
+        id: params
+        run: |
+          PARAMS_FILE="cloudformation/parameters/${{ inputs.stack }}.json"
+          if [ -f "$PARAMS_FILE" ]; then
+            echo "params_flag=--parameter-overrides file://$PARAMS_FILE" >> $GITHUB_OUTPUT
+          else
+            echo "params_flag=" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Inject secrets into parameters
+        run: |
+          # Merge GitHub secrets into the parameters file for stacks that need them.
+          # Only runs if a parameters file exists.
+          PARAMS_FILE="cloudformation/parameters/${{ inputs.stack }}.json"
+          if [ ! -f "$PARAMS_FILE" ]; then exit 0; fi
+
+          # RDS: inject DBPassword from secret
+          if [ "${{ inputs.stack }}" = "rds" ]; then
+            jq --arg pw "${{ secrets.DB_PASSWORD }}" \
+              'map(if .ParameterKey == "DBPassword" then .ParameterValue = $pw else . end)' \
+              "$PARAMS_FILE" > /tmp/params_merged.json
+            cp /tmp/params_merged.json "$PARAMS_FILE"
+          fi
+
+      - name: Create changeset
+        id: changeset
+        run: |
+          CHANGESET_NAME="deploy-$(date +%Y%m%d%H%M%S)"
+          echo "changeset_name=$CHANGESET_NAME" >> $GITHUB_OUTPUT
+
+          PARAMS_FILE="cloudformation/parameters/${{ inputs.stack }}.json"
+          PARAMS_ARG=""
+          [ -f "$PARAMS_FILE" ] && PARAMS_ARG="--parameters file://$PARAMS_FILE"
+
+          aws cloudformation create-change-set \
+            --stack-name "${{ env.STACK_NAME }}" \
+            --template-body file://cloudformation/${{ inputs.stack }}.yml \
+            --change-set-name "$CHANGESET_NAME" \
+            --change-set-type "$(aws cloudformation describe-stacks \
+                --stack-name "${{ env.STACK_NAME }}" \
+                --query 'Stacks[0].StackStatus' \
+                --output text 2>/dev/null | grep -q 'COMPLETE\|ROLLBACK' \
+                && echo UPDATE || echo CREATE)" \
+            --capabilities CAPABILITY_IAM \
+            $PARAMS_ARG
+
+          # Wait for changeset to be ready
+          aws cloudformation wait change-set-create-complete \
+            --stack-name "${{ env.STACK_NAME }}" \
+            --change-set-name "$CHANGESET_NAME" || true
+
+      - name: Show changeset
+        run: |
+          aws cloudformation describe-change-set \
+            --stack-name "${{ env.STACK_NAME }}" \
+            --change-set-name "${{ steps.changeset.outputs.changeset_name }}" \
+            --query 'Changes[].{Action:ResourceChange.Action,Resource:ResourceChange.LogicalResourceId,Type:ResourceChange.ResourceType,Replace:ResourceChange.Replacement}' \
+            --output table
+
+      - name: Execute changeset
+        if: ${{ !inputs.dry_run }}
+        run: |
+          aws cloudformation execute-change-set \
+            --stack-name "${{ env.STACK_NAME }}" \
+            --change-set-name "${{ steps.changeset.outputs.changeset_name }}"
+
+          echo "Waiting for stack to stabilise..."
+          aws cloudformation wait stack-update-complete \
+            --stack-name "${{ env.STACK_NAME }}" 2>/dev/null || \
+          aws cloudformation wait stack-create-complete \
+            --stack-name "${{ env.STACK_NAME }}"
+
+      - name: Show stack outputs
+        if: ${{ !inputs.dry_run }}
+        run: |
+          aws cloudformation describe-stacks \
+            --stack-name "${{ env.STACK_NAME }}" \
+            --query 'Stacks[0].Outputs' \
+            --output table
+
+      - name: Delete changeset (dry run cleanup)
+        if: ${{ inputs.dry_run }}
+        run: |
+          aws cloudformation delete-change-set \
+            --stack-name "${{ env.STACK_NAME }}" \
+            --change-set-name "${{ steps.changeset.outputs.changeset_name }}" || true
+          echo "Dry run complete — no changes deployed."

@@ -15,6 +15,38 @@ systemd/          — systemd service definitions
 
 Account: 901347789205 — always use `AWS_PROFILE=personal`
 
+## Manual Deployment (GitHub Actions)
+
+Deployments are triggered manually via **Actions → Deploy CloudFormation Stack → Run workflow**.
+
+Select a stack and optionally enable **dry run** to preview the changeset without applying it.
+
+### Required GitHub Secrets
+
+Set these in **Settings → Secrets and variables → Actions**:
+
+| Secret | Description |
+|---|---|
+| `AWS_ACCESS_KEY_ID` | IAM user access key (deploy permissions) |
+| `AWS_SECRET_ACCESS_KEY` | IAM user secret key |
+| `DB_PASSWORD` | RDS master password (min 16 chars) |
+
+### Required IAM permissions for the deploy user
+
+```
+cloudformation:*
+rds:*
+ec2:*  (security groups, subnets)
+iam:PassRole
+```
+
+### Before deploying RDS
+
+Fill in the real resource IDs in `cloudformation/parameters/rds.json`:
+- `VpcId`, `PrivateSubnet1Id`, `PrivateSubnet2Id` — from the VPC stack outputs
+- `EC2SecurityGroupId` — from the EC2 stack outputs
+- `DBPassword` is injected automatically from the `DB_PASSWORD` secret
+
 ## Deployment Order
 
 Run stacks in this order — each depends on the previous:
