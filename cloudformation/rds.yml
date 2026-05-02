@@ -1,6 +1,6 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
-  MTGA Companion — RDS PostgreSQL instance.
+  MTGA Companion -RDS PostgreSQL instance.
   Private subnet only, pgvector-enabled parameter group, encrypted at rest.
   Hold deployment until AWS Activate credits are confirmed.
 
@@ -34,7 +34,7 @@ Parameters:
     Type: String
     NoEcho: true
     MinLength: 16
-    Description: Master password (store in AWS Secrets Manager or SSM — never commit)
+    Description: Master password (store in AWS Secrets Manager or SSM -never commit)
 
   Environment:
     Type: String
@@ -85,7 +85,7 @@ Resources:
   DBParameterGroup:
     Type: AWS::RDS::DBParameterGroup
     Properties:
-      Description: MTGA Companion PostgreSQL 15 — pgvector enabled
+      Description: MTGA Companion PostgreSQL 15 -pgvector enabled
       Family: postgres15
       Parameters:
         shared_preload_libraries: pgvector

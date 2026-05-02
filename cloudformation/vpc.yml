@@ -1,6 +1,6 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
-  MTGA Companion — VPC with public subnets (EC2) and private subnets (RDS).
+  MTGA Companion -VPC with public subnets (EC2) and private subnets (RDS).
   No NAT Gateway: EC2 is public-facing, RDS is private and reachable only from within the VPC.
   Deploy this stack first; pass its outputs into rds.yml and future EC2 stacks.
 
@@ -36,7 +36,7 @@ Parameters:
   PrivateSubnet2Cidr:
     Type: String
     Default: "10.0.12.0/24"
-    Description: Private subnet in AZ-b (RDS standby — required for DB subnet group)
+    Description: Private subnet in AZ-b (RDS standby -required for DB subnet group)
 
 # ---------------------------------------------------------------------------
 # Resources
@@ -144,7 +144,7 @@ Resources:
       SubnetId: !Ref PublicSubnet2
       RouteTableId: !Ref PublicRouteTable
 
-  # ── Private Route Table (no outbound Internet — RDS doesn't need it) ─────
+  # ── Private Route Table (no outbound Internet -RDS doesn't need it) ─────
   PrivateRouteTable:
     Type: AWS::EC2::RouteTable
     Properties:
@@ -171,7 +171,7 @@ Resources:
   EC2SecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: "MTGA Companion EC2 — allows HTTP/HTTPS inbound, all outbound"
+      GroupDescription: "MTGA Companion EC2 - allows HTTP/HTTPS inbound, all outbound"
       VpcId: !Ref VPC
       SecurityGroupIngress:
         - IpProtocol: tcp
@@ -193,7 +193,7 @@ Resources:
           Value: !Sub "mtga-companion-ec2-sg-${Environment}"
 
 # ---------------------------------------------------------------------------
-# Outputs — passed as inputs to rds.yml and future EC2 stack
+# Outputs -passed as inputs to rds.yml and future EC2 stack
 # ---------------------------------------------------------------------------
 Outputs:
   VpcId:
@@ -227,7 +227,7 @@ Outputs:
       Name: !Sub "mtga-companion-${Environment}-PrivateSubnet2Id"
 
   EC2SecurityGroupId:
-    Description: EC2 security group ID — pass to rds.yml as EC2SecurityGroupId
+    Description: EC2 security group ID -pass to rds.yml as EC2SecurityGroupId
     Value: !Ref EC2SecurityGroup
     Export:
       Name: !Sub "mtga-companion-${Environment}-EC2SecurityGroupId"
