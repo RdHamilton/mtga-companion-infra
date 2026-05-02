@@ -60,21 +60,6 @@ jobs:
             echo "params_flag=" >> $GITHUB_OUTPUT
           fi
 
-      - name: Inject secrets into parameters
-        run: |
-          # Merge GitHub secrets into the parameters file for stacks that need them.
-          # Only runs if a parameters file exists.
-          PARAMS_FILE="cloudformation/parameters/${{ inputs.stack }}.json"
-          if [ ! -f "$PARAMS_FILE" ]; then exit 0; fi
-
-          # RDS: inject DBPassword from secret
-          if [ "${{ inputs.stack }}" = "rds" ]; then
-            jq --arg pw "${{ secrets.DB_PASSWORD }}" \
-              'map(if .ParameterKey == "DBPassword" then .ParameterValue = $pw else . end)' \
-              "$PARAMS_FILE" > /tmp/params_merged.json
-            cp /tmp/params_merged.json "$PARAMS_FILE"
-          fi
-
       - name: Create changeset
         id: changeset
         run: |
