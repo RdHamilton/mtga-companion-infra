@@ -1,5 +1,5 @@
 [Unit]
-Description=MTGA Companion API Server
+Description=MTGA Companion BFF Service
 After=network-online.target
 Wants=network-online.target
 
@@ -7,13 +7,12 @@ Wants=network-online.target
 Type=simple
 User=mtga-companion
 Group=mtga-companion
-WorkingDirectory=/opt/mtga-companion
-ExecStart=/opt/mtga-companion/bin/mtga-companion-linux-amd64
+ExecStart=/usr/local/bin/mtga-bff
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=mtga-companion
+SyslogIdentifier=mtga-bff
 
 # Environment file — populated by setup.sh from Secrets Manager / SSM
 EnvironmentFile=/etc/mtga-companion/env
@@ -21,8 +20,7 @@ EnvironmentFile=/etc/mtga-companion/env
 # Hardening
 NoNewPrivileges=true
 PrivateTmp=true
-ProtectSystem=strict
-ReadWritePaths=/opt/mtga-companion
+ProtectSystem=full
 
 [Install]
 WantedBy=multi-user.target

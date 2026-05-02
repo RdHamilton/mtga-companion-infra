@@ -1,0 +1,5 @@
+[
+  { "ParameterKey": "Environment",  "ParameterValue": "production" },
+  { "ParameterKey": "GitHubOrg",    "ParameterValue": "RdHamilton" },
+  { "ParameterKey": "GitHubRepo",   "ParameterValue": "MTGA-Companion" }
+]
