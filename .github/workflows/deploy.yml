@@ -81,6 +81,21 @@ jobs:
           CHANGESET_NAME="deploy-$(date +%Y%m%d%H%M%S)"
           echo "changeset_name=$CHANGESET_NAME" >> $GITHUB_OUTPUT
 
+          # Determine CREATE vs UPDATE by checking if the stack already exists and is stable.
+          # Save as a step output so the execute step uses the right waiter.
+          STACK_STATUS=$(aws cloudformation describe-stacks \
+            --stack-name "${{ env.STACK_NAME }}" \
+            --query 'Stacks[0].StackStatus' \
+            --output text 2>/dev/null || echo "DOES_NOT_EXIST")
+
+          if echo "$STACK_STATUS" | grep -qE 'COMPLETE|ROLLBACK'; then
+            CHANGE_TYPE="UPDATE"
+          else
+            CHANGE_TYPE="CREATE"
+          fi
+          echo "change_type=$CHANGE_TYPE" >> $GITHUB_OUTPUT
+          echo "Changeset type: $CHANGE_TYPE (stack status: $STACK_STATUS)"
+
           PARAMS_FILE="cloudformation/parameters/${{ inputs.stack }}.json"
           PARAMS_ARG=""
           [ -f "$PARAMS_FILE" ] && PARAMS_ARG="--parameters file://$PARAMS_FILE"
@@ -89,15 +104,11 @@ jobs:
             --stack-name "${{ env.STACK_NAME }}" \
             --template-body file://cloudformation/${{ inputs.stack }}.yml \
             --change-set-name "$CHANGESET_NAME" \
-            --change-set-type "$(aws cloudformation describe-stacks \
-                --stack-name "${{ env.STACK_NAME }}" \
-                --query 'Stacks[0].StackStatus' \
-                --output text 2>/dev/null | grep -q 'COMPLETE\|ROLLBACK' \
-                && echo UPDATE || echo CREATE)" \
+            --change-set-type "$CHANGE_TYPE" \
             --capabilities CAPABILITY_IAM \
             $PARAMS_ARG
 
-          # Wait for changeset to be ready
+          # Wait for changeset to finish computing (FAILED is terminal — e.g. no changes)
           aws cloudformation wait change-set-create-complete \
             --stack-name "${{ env.STACK_NAME }}" \
             --change-set-name "$CHANGESET_NAME" || true
@@ -117,11 +128,14 @@ jobs:
             --stack-name "${{ env.STACK_NAME }}" \
             --change-set-name "${{ steps.changeset.outputs.changeset_name }}"
 
-          echo "Waiting for stack to stabilise..."
-          aws cloudformation wait stack-update-complete \
-            --stack-name "${{ env.STACK_NAME }}" 2>/dev/null || \
-          aws cloudformation wait stack-create-complete \
-            --stack-name "${{ env.STACK_NAME }}"
+          echo "Waiting for stack to stabilise (type: ${{ steps.changeset.outputs.change_type }})..."
+          if [ "${{ steps.changeset.outputs.change_type }}" = "CREATE" ]; then
+            aws cloudformation wait stack-create-complete \
+              --stack-name "${{ env.STACK_NAME }}"
+          else
+            aws cloudformation wait stack-update-complete \
+              --stack-name "${{ env.STACK_NAME }}"
+          fi
 
       - name: Show stack outputs
         if: ${{ !inputs.dry_run }}
