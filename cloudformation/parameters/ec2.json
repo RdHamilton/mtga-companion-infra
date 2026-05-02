@@ -1,0 +1,4 @@
+[
+  { "ParameterKey": "Environment",   "ParameterValue": "production" },
+  { "ParameterKey": "InstanceType",  "ParameterValue": "t3.small" }
+]

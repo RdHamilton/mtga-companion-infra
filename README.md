@@ -29,7 +29,6 @@ Set these in **Settings → Secrets and variables → Actions**:
 |---|---|
 | `AWS_ACCESS_KEY_ID` | IAM user access key (deploy permissions) |
 | `AWS_SECRET_ACCESS_KEY` | IAM user secret key |
-| `DB_PASSWORD` | RDS master password (min 16 chars) |
 
 ### Required IAM permissions for the deploy user
 
@@ -45,15 +44,15 @@ iam:PassRole
 Fill in the real resource IDs in `cloudformation/parameters/rds.json`:
 - `VpcId`, `PrivateSubnet1Id`, `PrivateSubnet2Id` — from the VPC stack outputs
 - `EC2SecurityGroupId` — from the EC2 stack outputs
-- `DBPassword` is injected automatically from the `DB_PASSWORD` secret
+- DB password is managed by AWS Secrets Manager (`ManageMasterUserPassword: true`) — no secret needed
 
 ## Deployment Order
 
 Run stacks in this order — each depends on the previous:
 
-1. `vpc.yml` — VPC, subnets, security groups *(not yet written)*
-2. `rds.yml` — RDS PostgreSQL db.t3.micro ✅
-3. `ec2.yml` — EC2 t3.small *(not yet written)*
+1. `ec2-sg.yml` — EC2 security group
+2. `rds.yml` — RDS PostgreSQL db.t3.micro (imports EC2 SG; exports DBSecretArn)
+3. `ec2.yml` — EC2 t3.small + IAM instance profile (imports DBSecretArn)
 4. `dns.yml` — Route 53 records *(after domain purchase)*
 
 **Hold all deployments until AWS Activate credits are confirmed.**
@@ -62,7 +61,7 @@ Run stacks in this order — each depends on the previous:
 
 - [ ] VPC + security groups (`cloudformation/vpc.yml`)
 - [x] RDS PostgreSQL db.t3.micro (`cloudformation/rds.yml`) — pgvector-enabled, private subnet only
-- [ ] EC2 t3.small (`cloudformation/ec2.yml`)
+- [x] EC2 IAM instance profile + Secrets Manager access (`cloudformation/ec2.yml`) — ready to deploy
 - [ ] nginx + SSL (`nginx/mtga-companion.conf`)
 - [ ] systemd service (`systemd/mtga-companion.service`)
 - [ ] GitHub Actions deploy step
