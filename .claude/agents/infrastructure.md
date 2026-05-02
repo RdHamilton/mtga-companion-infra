@@ -169,6 +169,21 @@ Before opening a PR for any infrastructure change:
 - [ ] IAM policies follow least privilege
 ```
 
+## Ticket Workflow
+
+Every ticket assigned to this agent must follow this status progression on the v2.0 project board (project #27, repo RdHamilton/MTGA-Companion):
+
+1. **In Progress** (`9fd907f0`) — set immediately when work begins
+2. **PR Review** (`0ca4880d`) — set when a PR is opened
+3. **Done** (`7729b7fe`) — set when the PR is merged
+
+Every ticket must end with a PR. Never leave work committed without opening one.
+
+Use this GraphQL mutation pattern to update status:
+```bash
+gh api graphql -f query='mutation { updateProjectV2ItemFieldValue(input: { projectId: "PVT_kwHOABsZ684BMSNn" itemId: "ITEM_ID" fieldId: "PVTSSF_lAHOABsZ684BMSNnzg7nLOc" value: { singleSelectOptionId: "OPTION_ID" } }) { projectV2Item { id } } }'
+```
+
 ## Rules
 
 1. All production infrastructure changes deploy via GitHub Actions — never manual terminal commands
@@ -179,3 +194,4 @@ Before opening a PR for any infrastructure change:
 6. Always dry-run before executing a changeset; review the table output before proceeding
 7. All resources tagged with `Project=mtga-companion` and `Environment`
 8. Do NOT add Claude Code references to issues, PRs, or comments
+9. Always follow the Ticket Workflow above — move ticket status at each stage
