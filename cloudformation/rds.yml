@@ -79,10 +79,10 @@ Resources:
   DBParameterGroup:
     Type: AWS::RDS::DBParameterGroup
     Properties:
-      Description: MTGA Companion PostgreSQL 15 -pgvector enabled
+      Description: MTGA Companion PostgreSQL 15
       Family: postgres15
       Parameters:
-        shared_preload_libraries: pgvector
+        shared_preload_libraries: pg_stat_statements
         log_connections: "1"
         log_disconnections: "1"
         log_min_duration_statement: "1000"   # log queries > 1s
