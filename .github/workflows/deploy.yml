@@ -90,7 +90,7 @@ jobs:
             --template-body file://cloudformation/${{ inputs.stack }}.yml \
             --change-set-name "$CHANGESET_NAME" \
             --change-set-type "$CHANGE_TYPE" \
-            --capabilities CAPABILITY_IAM \
+            --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
             $PARAMS_ARG
 
           # Wait for changeset to finish computing (FAILED is terminal — e.g. no changes)
