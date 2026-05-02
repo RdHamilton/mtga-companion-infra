@@ -58,6 +58,16 @@ Resources:
               - Effect: Allow
                 Action: secretsmanager:GetSecretValue
                 Resource: !ImportValue mtga-companion-rds-DBSecretArn
+        - PolicyName: SSMParameterStoreAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                  - ssm:GetParametersByPath
+                Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/mtga-companion/*"
       Tags:
         - Key: Project
           Value: mtga-companion
@@ -89,6 +99,166 @@ Resources:
           Fn::Sub: "mtga-companion-${Environment}-EC2SecurityGroupId"
       SubnetId: subnet-021e2cc715f426da1
       KeyName: !If [HasKeyName, !Ref KeyName, !Ref "AWS::NoValue"]
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash -xe
+          # Bootstrap: install and configure MTGA Companion on Amazon Linux 2023.
+          # Runs once at instance launch. All output logged to /var/log/mtga-companion-setup.log.
+          exec > >(tee /var/log/mtga-companion-setup.log) 2>&1
+
+          APP_USER="mtga-companion"
+          APP_DIR="/opt/mtga-companion"
+          ENV_DIR="/etc/mtga-companion"
+          SSM_PATH="/mtga-companion/production"
+          REGION="${AWS::Region}"
+
+          log() { echo "[setup] $(date '+%Y-%m-%dT%H:%M:%S') $*"; }
+
+          # ---------------------------------------------------------
+          # 1. System packages
+          # ---------------------------------------------------------
+          log "Updating packages..."
+          dnf update -y --quiet
+          dnf install -y nginx logrotate
+
+          # ---------------------------------------------------------
+          # 2. Application user and directories
+          # ---------------------------------------------------------
+          log "Creating app user..."
+          id "$APP_USER" &>/dev/null || useradd --system --no-create-home --shell /sbin/nologin "$APP_USER"
+          mkdir -p "$APP_DIR/bin" "$ENV_DIR"
+          chown -R "$APP_USER:$APP_USER" "$APP_DIR"
+          chmod 750 "$ENV_DIR"
+
+          # ---------------------------------------------------------
+          # 3. Environment file from SSM Parameter Store
+          # ---------------------------------------------------------
+          log "Fetching config from SSM..."
+          fetch_param() {
+              aws ssm get-parameter \
+                  --region "$REGION" \
+                  --name "${!SSM_PATH}/$1" \
+                  --with-decryption \
+                  --query 'Parameter.Value' \
+                  --output text 2>/dev/null || echo ""
+          }
+          PORT=$(fetch_param "PORT")
+          PORT="${!PORT:-8080}"
+          DB_URL=$(fetch_param "DB_URL")
+
+          cat > "$ENV_DIR/env" <<ENVEOF
+          PORT=${!PORT}
+          DB_URL=${!DB_URL}
+          GIN_MODE=release
+          ENVEOF
+          chmod 640 "$ENV_DIR/env"
+          chown "root:$APP_USER" "$ENV_DIR/env"
+
+          # ---------------------------------------------------------
+          # 4. systemd service
+          # ---------------------------------------------------------
+          log "Installing systemd service..."
+          cat > /etc/systemd/system/mtga-companion.service <<'UNIT'
+          [Unit]
+          Description=MTGA Companion API Server
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=simple
+          User=mtga-companion
+          Group=mtga-companion
+          WorkingDirectory=/opt/mtga-companion
+          ExecStart=/opt/mtga-companion/bin/mtga-companion-linux-amd64
+          Restart=on-failure
+          RestartSec=5
+          StandardOutput=journal
+          StandardError=journal
+          SyslogIdentifier=mtga-companion
+          EnvironmentFile=/etc/mtga-companion/env
+          NoNewPrivileges=true
+          PrivateTmp=true
+          ProtectSystem=strict
+          ReadWritePaths=/opt/mtga-companion
+
+          [Install]
+          WantedBy=multi-user.target
+          UNIT
+
+          systemctl daemon-reload
+          systemctl enable mtga-companion
+
+          # ---------------------------------------------------------
+          # 5. nginx configuration
+          # ---------------------------------------------------------
+          log "Configuring nginx..."
+          cat > /etc/nginx/conf.d/mtga-companion.conf <<'NGINX'
+          limit_req_zone $binary_remote_addr zone=api_limit:10m rate=30r/m;
+
+          server {
+              listen 80;
+              server_name _;
+
+              location /api/ {
+                  limit_req zone=api_limit burst=10 nodelay;
+                  proxy_pass         http://127.0.0.1:8080;
+                  proxy_http_version 1.1;
+                  proxy_set_header   Host              $host;
+                  proxy_set_header   X-Real-IP         $remote_addr;
+                  proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+                  proxy_set_header   X-Forwarded-Proto $scheme;
+                  proxy_connect_timeout 10s;
+                  proxy_read_timeout    30s;
+                  proxy_send_timeout    30s;
+              }
+
+              location /health {
+                  proxy_pass       http://127.0.0.1:8080/health;
+                  proxy_http_version 1.1;
+                  proxy_set_header Host $host;
+                  access_log off;
+              }
+
+              root /var/www/mtga-companion;
+              index index.html;
+
+              location / {
+                  try_files $uri $uri/ /index.html;
+              }
+
+              location ~ /\. {
+                  deny all;
+              }
+          }
+          NGINX
+
+          rm -f /etc/nginx/conf.d/default.conf
+          mkdir -p /var/www/mtga-companion
+          chown -R nginx:nginx /var/www/mtga-companion
+          nginx -t
+          systemctl enable nginx
+          systemctl start nginx
+
+          # ---------------------------------------------------------
+          # 6. Log rotation
+          # ---------------------------------------------------------
+          log "Configuring logrotate..."
+          cat > /etc/logrotate.d/mtga-companion <<'LOGROTATE'
+          /var/log/mtga-companion/*.log {
+              daily
+              rotate 14
+              compress
+              delaycompress
+              missingok
+              notifempty
+              sharedscripts
+              postrotate
+                  systemctl kill -s HUP mtga-companion || true
+              endscript
+          }
+          LOGROTATE
+
+          log "Bootstrap complete. Deploy binary to $APP_DIR/bin/mtga-companion-linux-amd64 then: systemctl start mtga-companion"
       Tags:
         - Key: Name
           Value: !Sub "mtga-companion-bff-${Environment}"
