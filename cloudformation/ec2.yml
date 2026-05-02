@@ -1,0 +1,111 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  MTGA Companion - EC2 instance (BFF).
+  Imports EC2SecurityGroupId from the ec2-sg stack and DBSecretArn from the rds stack.
+  Deploy order: ec2-sg -> rds -> ec2.
+
+Parameters:
+  Environment:
+    Type: String
+    Default: production
+    AllowedValues: [production, staging]
+    Description: Deployment environment
+
+  InstanceType:
+    Type: String
+    Default: t3.small
+    Description: EC2 instance type
+
+  AMI:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+    Description: Amazon Linux 2023 latest AMI (resolved from SSM Parameter Store)
+
+  KeyName:
+    Type: String
+    Default: ""
+    Description: >
+      EC2 key pair name for emergency access only. Leave empty if not needed.
+      Port 22 is never opened - use SSM Session Manager instead.
+
+Conditions:
+  HasKeyName: !Not [!Equals [!Ref KeyName, ""]]
+
+Resources:
+
+  # ---------------------------------------------------------
+  # IAM Role for EC2 instance
+  # ---------------------------------------------------------
+  EC2InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "mtga-companion-ec2-role-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        # SSM Session Manager access - port 22 is never opened
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: SecretsManagerDBAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !ImportValue mtga-companion-rds-DBSecretArn
+      Tags:
+        - Key: Project
+          Value: mtga-companion
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ---------------------------------------------------------
+  # IAM Instance Profile
+  # ---------------------------------------------------------
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub "mtga-companion-ec2-profile-${Environment}"
+      Roles:
+        - !Ref EC2InstanceRole
+
+  # ---------------------------------------------------------
+  # EC2 Instance
+  # ---------------------------------------------------------
+  EC2Instance:
+    Type: AWS::EC2::Instance
+    DeletionPolicy: Retain
+    Properties:
+      ImageId: !Ref AMI
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      SecurityGroupIds:
+        - !ImportValue
+          Fn::Sub: "mtga-companion-${Environment}-EC2SecurityGroupId"
+      SubnetId: subnet-021e2cc715f426da1
+      KeyName: !If [HasKeyName, !Ref KeyName, !Ref "AWS::NoValue"]
+      Tags:
+        - Key: Name
+          Value: !Sub "mtga-companion-bff-${Environment}"
+        - Key: Project
+          Value: mtga-companion
+        - Key: Environment
+          Value: !Ref Environment
+
+Outputs:
+  InstanceId:
+    Description: EC2 instance ID
+    Value: !Ref EC2Instance
+    Export:
+      Name: !Sub "${AWS::StackName}-InstanceId"
+
+  PublicIP:
+    Description: EC2 instance public IP address
+    Value: !GetAtt EC2Instance.PublicIp
+    Export:
+      Name: !Sub "${AWS::StackName}-PublicIP"
