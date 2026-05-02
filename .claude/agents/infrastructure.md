@@ -111,6 +111,7 @@ Cross-stack `!ImportValue` references require strict ordering:
 - Ingress: open only the ports required by the application (80, 443 for EC2; 5432 from EC2 SG for RDS).
 
 ### RDS
+- `pgvector` is **not** a valid `shared_preload_libraries` value in RDS PostgreSQL — enable it at the database level with `CREATE EXTENSION vector;` instead. Allowed preload libraries include `pg_stat_statements`, `pg_cron`, `pgaudit`, etc.
 - `PubliclyAccessible: false` — always.
 - `StorageEncrypted: true` — always.
 - `BackupRetentionPeriod: 7` minimum.
