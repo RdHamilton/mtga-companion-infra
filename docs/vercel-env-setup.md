@@ -44,7 +44,7 @@ environments and prints a verification list at the end.
 
 Once DNS is active (#977), run the workflow again with:
 
-```
+```text
 bff_url_override = https://api.mtga-companion.com/api/v1
 ```
 
@@ -57,7 +57,8 @@ If the workflow cannot run (e.g. Vercel CLI version incompatibility):
 1. Determine the BFF URL:
    - With domain: `https://api.mtga-companion.com/api/v1`
    - Without domain (current): `http://<EC2-public-IP>/api/v1`
-   - Get EC2 IP: `aws ec2 describe-instances --instance-ids i-02477e36503aef863 --region us-east-1 --profile personal --query 'Reservations[0].Instances[0].PublicIpAddress' --output text`
+   - Get EC2 IP: `aws ec2 describe-instances --filters "Name=tag:Project,Values=mtga-companion" "Name=instance-state-name,Values=running" --region us-east-1 --query 'Reservations[0].Instances[0].PublicIpAddress' --output text`
+     _(Substitute your own AWS CLI profile with `--profile <your-profile>` if not using the default.)_
 
 2. Open the Vercel dashboard -> project -> **Settings -> Environment Variables**.
 
@@ -70,7 +71,7 @@ If the workflow cannot run (e.g. Vercel CLI version incompatibility):
    production deployment).
 
 5. Confirm the build log contains:
-   ```
+   ```text
    VITE_BFF_URL=http://...
    ```
 

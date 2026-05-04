@@ -6,7 +6,7 @@ on:
       bff_url_override:
         description: >
           Override BFF URL (e.g. https://api.mtga-companion.com/api/v1).
-          Leave empty to auto-detect from EC2 public IP.
+          Leave empty to auto-detect from EC2 public IP via tag lookup.
         required: false
         type: string
         default: ""
@@ -29,7 +29,7 @@ jobs:
 
     env:
       AWS_REGION: us-east-1
-      EC2_INSTANCE_ID: i-02477e36503aef863
+      VERCEL_CLI_VERSION: "39.3.0"
 
     steps:
       - name: Checkout
@@ -42,31 +42,45 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      # Resolve BFF URL: prefer explicit override, else query EC2 public IP
+      # Resolve BFF URL: prefer explicit override, else query EC2 public IP via tag
       - name: Resolve BFF URL
         id: bff
+        env:
+          BFF_URL_OVERRIDE: ${{ inputs.bff_url_override }}
         run: |
-          if [ -n "${{ inputs.bff_url_override }}" ]; then
-            BFF_URL="${{ inputs.bff_url_override }}"
+          if [ -n "$BFF_URL_OVERRIDE" ]; then
+            BFF_URL="$BFF_URL_OVERRIDE"
             echo "Using override: $BFF_URL"
           else
-            EC2_IP=$(aws ec2 describe-instances \
-              --instance-ids "${{ env.EC2_INSTANCE_ID }}" \
-              --region "${{ env.AWS_REGION }}" \
-              --query 'Reservations[0].Instances[0].PublicIpAddress' \
+            INSTANCE_ID=$(aws ec2 describe-instances \
+              --filters "Name=tag:Project,Values=mtga-companion" \
+                        "Name=instance-state-name,Values=running" \
+              --query 'Reservations[0].Instances[0].InstanceId' \
               --output text)
-            if [ -z "$EC2_IP" ] || [ "$EC2_IP" = "None" ]; then
-              echo "ERROR: Could not resolve EC2 public IP for ${{ env.EC2_INSTANCE_ID }}" >&2
+
+            if [ -z "$INSTANCE_ID" ] || [ "$INSTANCE_ID" = "None" ]; then
+              echo "ERROR: Could not find running EC2 instance with tag Project=mtga-companion" >&2
               exit 1
             fi
+
+            EC2_IP=$(aws ec2 describe-instances \
+              --instance-ids "$INSTANCE_ID" \
+              --query 'Reservations[0].Instances[0].PublicIpAddress' \
+              --output text)
+
+            if [ -z "$EC2_IP" ] || [ "$EC2_IP" = "None" ]; then
+              echo "ERROR: Instance $INSTANCE_ID has no public IP" >&2
+              exit 1
+            fi
+
             BFF_URL="http://${EC2_IP}/api/v1"
-            echo "Auto-resolved EC2 IP: $EC2_IP"
+            echo "Auto-resolved from instance $INSTANCE_ID: $BFF_URL"
           fi
           echo "bff_url=$BFF_URL" >> "$GITHUB_OUTPUT"
           echo "VITE_BFF_URL will be set to: $BFF_URL"
 
       - name: Install Vercel CLI
-        run: npm install --global vercel@latest
+        run: npm install --global "vercel@$VERCEL_CLI_VERSION"
 
       # Vercel env add does not support upsert natively -- remove then re-add.
       # This is idempotent: if the env var does not exist, `remove` exits 0.
@@ -76,9 +90,8 @@ jobs:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
           VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
           VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+          BFF_URL: ${{ steps.bff.outputs.bff_url }}
         run: |
-          BFF_URL="${{ steps.bff.outputs.bff_url }}"
-
           # Remove existing value so we can set the new one (non-fatal if absent)
           echo "" | vercel env rm VITE_BFF_URL production --yes 2>/dev/null || true
 
@@ -93,9 +106,8 @@ jobs:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
           VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
           VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+          BFF_URL: ${{ steps.bff.outputs.bff_url }}
         run: |
-          BFF_URL="${{ steps.bff.outputs.bff_url }}"
-
           # Remove existing value so we can set the new one (non-fatal if absent)
           echo "" | vercel env rm VITE_BFF_URL preview --yes 2>/dev/null || true
 
@@ -106,9 +118,11 @@ jobs:
 
       - name: Dry run summary
         if: ${{ inputs.dry_run }}
+        env:
+          BFF_URL: ${{ steps.bff.outputs.bff_url }}
         run: |
           echo "=== DRY RUN -- No changes made ==="
-          echo "VITE_BFF_URL would be set to: ${{ steps.bff.outputs.bff_url }}"
+          echo "VITE_BFF_URL would be set to: $BFF_URL"
           echo "Environments: Production, Preview"
           echo ""
           echo "Run again with dry_run=false to apply."
@@ -120,5 +134,9 @@ jobs:
           VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
           VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
         run: |
-          echo "Current VITE_BFF_URL values in Vercel project:"
-          vercel env ls VITE_BFF_URL || true
+          vercel env ls production | grep -q VITE_BFF_URL \
+            && echo "VITE_BFF_URL confirmed in production" \
+            || echo "WARNING: VITE_BFF_URL not found in production"
+          vercel env ls preview | grep -q VITE_BFF_URL \
+            && echo "VITE_BFF_URL confirmed in preview" \
+            || echo "WARNING: VITE_BFF_URL not found in preview"
