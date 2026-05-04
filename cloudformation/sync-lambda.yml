@@ -169,6 +169,7 @@ Resources:
                 Action:
                   - lambda:UpdateFunctionConfiguration
                   - lambda:GetFunction
+                  - lambda:GetFunctionConfiguration
                   - iam:PassRole
                 Resource:
                   - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${LambdaFunctionName}"
