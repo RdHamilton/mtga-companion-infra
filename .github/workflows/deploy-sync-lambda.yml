@@ -76,16 +76,37 @@ jobs:
         if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.dry_run) }}
         working-directory: services/sync
         run: |
-          aws lambda update-function-code \
-            --function-name ${{ env.LAMBDA_FUNCTION_NAME }} \
-            --zip-file fileb://sync-lambda.zip \
-            --architectures arm64 \
-            --region ${{ env.AWS_REGION }}
+          if aws lambda get-function --function-name ${{ env.LAMBDA_FUNCTION_NAME }} --region ${{ env.AWS_REGION }} > /dev/null 2>&1; then
+            echo "Function exists — updating code..."
+            aws lambda update-function-code \
+              --function-name ${{ env.LAMBDA_FUNCTION_NAME }} \
+              --zip-file fileb://sync-lambda.zip \
+              --architectures arm64 \
+              --region ${{ env.AWS_REGION }}
 
-          echo "Waiting for Lambda update to complete..."
-          aws lambda wait function-updated \
-            --function-name ${{ env.LAMBDA_FUNCTION_NAME }} \
-            --region ${{ env.AWS_REGION }}
+            echo "Waiting for Lambda update to complete..."
+            aws lambda wait function-updated \
+              --function-name ${{ env.LAMBDA_FUNCTION_NAME }} \
+              --region ${{ env.AWS_REGION }}
+          else
+            echo "Function does not exist — creating..."
+            aws lambda create-function \
+              --function-name ${{ env.LAMBDA_FUNCTION_NAME }} \
+              --runtime provided.al2023 \
+              --architectures arm64 \
+              --handler bootstrap \
+              --role arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/mtga-companion-production-sync-lambda-role \
+              --zip-file fileb://sync-lambda.zip \
+              --timeout 300 \
+              --memory-size 256 \
+              --description "MTGA Companion daily card ratings sync" \
+              --region ${{ env.AWS_REGION }}
+
+            echo "Waiting for Lambda to become active..."
+            aws lambda wait function-active \
+              --function-name ${{ env.LAMBDA_FUNCTION_NAME }} \
+              --region ${{ env.AWS_REGION }}
+          fi
 
           aws lambda get-function-configuration \
             --function-name ${{ env.LAMBDA_FUNCTION_NAME }} \
