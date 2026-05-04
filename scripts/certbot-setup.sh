@@ -41,37 +41,19 @@ log "Verifying nginx status..."
 systemctl is-active nginx || { log "ERROR: nginx is not running. Start it first."; exit 1; }
 
 # ---------------------------------------------------------
-# 3. Obtain certificate (webroot mode via existing nginx)
+# 3. Obtain certificate and configure nginx (--nginx plugin handles both)
 # ---------------------------------------------------------
 log "Requesting certificate for $DOMAIN and www.$DOMAIN..."
-certbot certonly \
-    --webroot \
-    --webroot-path /var/www/certbot \
+mkdir -p /var/www/certbot
+certbot --nginx \
     --email "$EMAIL" \
     --agree-tos \
     --no-eff-email \
     --domains "${DOMAIN},www.${DOMAIN}" \
+    --redirect \
     --non-interactive
 
-log "Certificate obtained."
-
-# ---------------------------------------------------------
-# 4. Switch nginx to HTTPS config
-# ---------------------------------------------------------
-log "Activating HTTPS nginx configuration..."
-
-# The SSL config template must already be on the instance (deployed via setup.sh or manually)
-if [[ ! -f "$SSL_CONF_SRC" ]]; then
-    log "ERROR: $SSL_CONF_SRC not found. Copy nginx/mtga-companion-ssl.conf to the instance first."
-    exit 1
-fi
-
-# Replace the HTTP-only config with the SSL config
-cp "$SSL_CONF_SRC" "$CONF_DIR/mtga-companion.conf"
-
-nginx -t
-systemctl reload nginx
-
+log "Certificate obtained and nginx reconfigured for HTTPS."
 log "HTTPS active. Verify at: https://$DOMAIN"
 
 # ---------------------------------------------------------
