@@ -1,0 +1,8 @@
+[
+  { "ParameterKey": "Environment",        "ParameterValue": "production" },
+  { "ParameterKey": "LambdaFunctionName", "ParameterValue": "mtga-sync" },
+  { "ParameterKey": "RdsStackName",       "ParameterValue": "mtga-companion-rds" },
+  { "ParameterKey": "SubnetIdA",          "ParameterValue": "subnet-021e2cc715f426da1" },
+  { "ParameterKey": "SubnetIdB",          "ParameterValue": "subnet-0600373b7aab41525" },
+  { "ParameterKey": "ScheduleCron",       "ParameterValue": "cron(0 2 * * ? *)" }
+]

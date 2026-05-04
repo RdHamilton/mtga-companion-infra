@@ -14,6 +14,7 @@ on:
           - ec2
           - vpc
           - dns
+          - sync-lambda
       dry_run:
         description: Dry run — validate and show changeset only, do not deploy
         required: false
