@@ -1,0 +1,265 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Sync Lambda VPC placement, IAM execution role, and EventBridge daily schedule
+
+Parameters:
+  Environment:
+    Type: String
+    Default: production
+    AllowedValues: [production, staging]
+    Description: Deployment environment
+  LambdaFunctionName:
+    Type: String
+    Default: mtga-sync
+    Description: Name of the existing sync Lambda function
+  RdsStackName:
+    Type: String
+    Default: mtga-companion-rds
+    Description: Name of the RDS CloudFormation stack for cross-stack imports
+  SubnetIdA:
+    Type: AWS::EC2::Subnet::Id
+    Default: subnet-021e2cc715f426da1
+    Description: VPC subnet in AZ-a for Lambda
+  SubnetIdB:
+    Type: AWS::EC2::Subnet::Id
+    Default: subnet-0600373b7aab41525
+    Description: VPC subnet in AZ-b for Lambda
+  ScheduleCron:
+    Type: String
+    Default: 'cron(0 2 * * ? *)'
+    Description: EventBridge Scheduler cron expression (UTC)
+
+Resources:
+
+  # Security group for the sync Lambda - allows outbound to RDS and AWS APIs
+  LambdaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub "mtga-companion-${Environment} sync Lambda outbound access"
+      VpcId: vpc-01d097c495e941d32
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          DestinationSecurityGroupId: !ImportValue
+            Fn::Sub: "${RdsStackName}-RDSSecurityGroupId"
+          Description: Allow outbound to RDS PostgreSQL
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: Allow outbound HTTPS for AWS API calls and RDS IAM token
+      Tags:
+        - Key: Project
+          Value: mtga-companion
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Name
+          Value: !Sub "mtga-companion-${Environment}-sync-lambda-sg"
+
+  # Inject ingress rule into RDS security group to allow Lambda access
+  RDSIngressFromLambda:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !ImportValue
+        Fn::Sub: "${RdsStackName}-RDSSecurityGroupId"
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      SourceSecurityGroupId: !Ref LambdaSecurityGroup
+      Description: Allow inbound from sync Lambda security group
+
+  # IAM execution role for the Lambda
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "mtga-companion-${Environment}-sync-lambda-role"
+      Description: Execution role for sync Lambda with VPC and RDS IAM auth access
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      Policies:
+        - PolicyName: RdsIamConnect
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: rds-db:connect
+                Resource: !Sub "arn:aws:rds-db:${AWS::Region}:${AWS::AccountId}:dbuser:*/mtga_sync"
+      Tags:
+        - Key: Project
+          Value: mtga-companion
+        - Key: Environment
+          Value: !Ref Environment
+
+  # Custom resource to apply VPC config and execution role to the existing Lambda
+  # (Lambda was created before this stack; we update its configuration here)
+  LambdaVpcConfigFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "mtga-companion-${Environment}-cfn-vpc-config"
+      Description: CloudFormation custom resource to configure VPC placement on sync Lambda
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt LambdaVpcConfigRole.Arn
+      Timeout: 60
+      Code:
+        ZipFile: |
+          import boto3, json, urllib.request
+
+          def send(event, context, status, data={}, reason=''):
+              body = json.dumps({
+                  'Status': status,
+                  'Reason': reason,
+                  'PhysicalResourceId': event.get('PhysicalResourceId', 'sync-vpc-config'),
+                  'StackId': event['StackId'],
+                  'RequestId': event['RequestId'],
+                  'LogicalResourceId': event['LogicalResourceId'],
+                  'Data': data,
+              }).encode()
+              req = urllib.request.Request(event['ResponseURL'], data=body,
+                  method='PUT', headers={'Content-Type': ''})
+              urllib.request.urlopen(req)
+
+          def handler(event, context):
+              try:
+                  props = event['ResourceProperties']
+                  client = boto3.client('lambda')
+                  if event['RequestType'] == 'Delete':
+                      send(event, context, 'SUCCESS')
+                      return
+                  client.update_function_configuration(
+                      FunctionName=props['FunctionName'],
+                      VpcConfig={
+                          'SubnetIds': props['SubnetIds'],
+                          'SecurityGroupIds': props['SecurityGroupIds'],
+                      },
+                      Role=props['ExecutionRoleArn'],
+                  )
+                  waiter = client.get_waiter('function_updated')
+                  waiter.wait(FunctionName=props['FunctionName'])
+                  send(event, context, 'SUCCESS')
+              except Exception as e:
+                  send(event, context, 'FAILED', reason=str(e))
+
+  LambdaVpcConfigRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: Role for the VPC config custom resource Lambda
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: ConfigureSyncLambda
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:UpdateFunctionConfiguration
+                  - lambda:GetFunction
+                  - iam:PassRole
+                Resource:
+                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${LambdaFunctionName}"
+                  - !GetAtt LambdaExecutionRole.Arn
+      Tags:
+        - Key: Project
+          Value: mtga-companion
+        - Key: Environment
+          Value: !Ref Environment
+
+  LambdaVpcConfigCustomResource:
+    Type: Custom::LambdaVpcConfig
+    DependsOn:
+      - RDSIngressFromLambda
+      - LambdaExecutionRole
+    Properties:
+      ServiceToken: !GetAtt LambdaVpcConfigFunction.Arn
+      FunctionName: !Ref LambdaFunctionName
+      SubnetIds:
+        - !Ref SubnetIdA
+        - !Ref SubnetIdB
+      SecurityGroupIds:
+        - !Ref LambdaSecurityGroup
+      ExecutionRoleArn: !GetAtt LambdaExecutionRole.Arn
+
+  # EventBridge Scheduler execution role
+  SchedulerExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "mtga-companion-${Environment}-sync-scheduler-role"
+      Description: Role for EventBridge Scheduler to invoke sync Lambda
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: scheduler.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: InvokeSyncLambda
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${LambdaFunctionName}"
+      Tags:
+        - Key: Project
+          Value: mtga-companion
+        - Key: Environment
+          Value: !Ref Environment
+
+  # Daily EventBridge Scheduler to trigger the sync Lambda at 02:00 UTC
+  DailySyncSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: !Sub "mtga-companion-${Environment}-sync-daily"
+      Description: Daily sync Lambda trigger at 02:00 UTC
+      ScheduleExpression: !Ref ScheduleCron
+      ScheduleExpressionTimezone: UTC
+      FlexibleTimeWindow:
+        Mode: 'OFF'
+      State: ENABLED
+      Target:
+        Arn: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${LambdaFunctionName}"
+        RoleArn: !GetAtt SchedulerExecutionRole.Arn
+
+  # Allow EventBridge Scheduler to invoke the Lambda
+  LambdaPermissionScheduler:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref LambdaFunctionName
+      Action: lambda:InvokeFunction
+      Principal: scheduler.amazonaws.com
+      SourceArn: !GetAtt DailySyncSchedule.Arn
+
+Outputs:
+  LambdaSecurityGroupId:
+    Description: Security group ID for the sync Lambda
+    Value: !Ref LambdaSecurityGroup
+    Export:
+      Name: !Sub "${AWS::StackName}-LambdaSecurityGroupId"
+
+  LambdaExecutionRoleArn:
+    Description: ARN of the sync Lambda execution role
+    Value: !GetAtt LambdaExecutionRole.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-LambdaExecutionRoleArn"
+
+  DailySyncScheduleArn:
+    Description: ARN of the EventBridge daily sync schedule
+    Value: !GetAtt DailySyncSchedule.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-DailySyncScheduleArn"
