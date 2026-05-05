@@ -265,6 +265,37 @@ Resources:
         RetryPolicy:
           MaximumRetryAttempts: 2
 
+  # On-demand schedule for manual card metadata sync triggers
+  # State is DISABLED by default; enable via CLI or console to trigger a one-off sync
+  CardsSyncSchedule:
+    Type: AWS::Scheduler::Schedule
+    DependsOn: SyncDLQ
+    Properties:
+      Name: !Sub "mtga-companion-${Environment}-sync-cards-manual"
+      Description: On-demand schedule for manual card metadata sync - enable to trigger
+      ScheduleExpression: 'rate(1 day)'
+      ScheduleExpressionTimezone: UTC
+      FlexibleTimeWindow:
+        Mode: 'OFF'
+      State: DISABLED
+      Target:
+        Arn: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${LambdaFunctionName}"
+        RoleArn: !GetAtt SchedulerExecutionRole.Arn
+        Input: '{"sync_type":"cards"}'
+        DeadLetterConfig:
+          Arn: !GetAtt SyncDLQ.Arn
+        RetryPolicy:
+          MaximumRetryAttempts: 2
+
+  # Allow EventBridge Scheduler to invoke the Lambda for cards sync
+  LambdaPermissionSchedulerCards:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref LambdaFunctionName
+      Action: lambda:InvokeFunction
+      Principal: scheduler.amazonaws.com
+      SourceArn: !GetAtt CardsSyncSchedule.Arn
+
   # Allow EventBridge Scheduler to invoke the Lambda
   LambdaPermissionScheduler:
     Type: AWS::Lambda::Permission
@@ -331,6 +362,12 @@ Outputs:
     Value: !GetAtt DailySyncSchedule.Arn
     Export:
       Name: !Sub "${AWS::StackName}-DailySyncScheduleArn"
+
+  CardsSyncScheduleArn:
+    Description: ARN of the on-demand cards sync schedule (disabled by default)
+    Value: !GetAtt CardsSyncSchedule.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-CardsSyncScheduleArn"
 
   SyncDLQArn:
     Description: ARN of the SQS dead-letter queue for failed sync invocations
