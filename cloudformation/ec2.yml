@@ -71,6 +71,16 @@ Resources:
                   - ssm:GetParameters
                   - ssm:GetParametersByPath
                 Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/mtga-companion/*"
+              # kms:Decrypt is required to read SecureString parameters (e.g.
+              # /mtga-companion/prod/daemon-jwt-secret) encrypted with the
+              # default SSM KMS key (alias/aws/ssm).
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                Resource: !Sub "arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/*"
+                Condition:
+                  StringEquals:
+                    kms:ViaService: !Sub "ssm.${AWS::Region}.amazonaws.com"
         - PolicyName: S3DeployArtifactsRead
           PolicyDocument:
             Version: "2012-10-17"
@@ -166,6 +176,8 @@ Resources:
           }
           PORT=$(fetch_ssm "${!SSM_PATH}/PORT" || echo "")
           PORT="${!PORT:-8080}"
+          ALLOWED_ORIGINS=$(fetch_ssm "${!SSM_PATH}/ALLOWED_ORIGINS" || echo "")
+          DAEMON_JWT_SECRET=$(fetch_ssm "/mtga-companion/prod/daemon-jwt-secret" || echo "")
 
           # Assemble DATABASE_URL from the RDS Secrets Manager secret
           DB_SECRET_ARN=$(aws cloudformation list-exports \
@@ -189,11 +201,13 @@ Resources:
           cat > "$ENV_DIR/env" <<ENVEOF
           PORT=${!PORT}
           DATABASE_URL=${!DATABASE_URL}
-          ENVIRONMENT=production
+          MTGA_ENV=production
           AWS_REGION=${!REGION}
           GIN_MODE=release
+          ALLOWED_ORIGINS=${!ALLOWED_ORIGINS}
+          DAEMON_JWT_SECRET=${!DAEMON_JWT_SECRET}
           ENVEOF
-          chmod 640 "$ENV_DIR/env"
+          chmod 600 "$ENV_DIR/env"
           chown "root:$APP_USER" "$ENV_DIR/env"
 
           # ---------------------------------------------------------
