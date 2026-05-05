@@ -93,10 +93,10 @@ jobs:
           BFF_URL: ${{ steps.bff.outputs.bff_url }}
         run: |
           # Remove existing value so we can set the new one (non-fatal if absent)
-          echo "" | vercel env rm VITE_BFF_URL production --yes 2>/dev/null || true
+          echo "" | vercel env rm VITE_BFF_URL production --yes --token "$VERCEL_TOKEN" 2>/dev/null || true
 
           # Add new value
-          printf '%s' "$BFF_URL" | vercel env add VITE_BFF_URL production
+          printf '%s' "$BFF_URL" | vercel env add VITE_BFF_URL production --token "$VERCEL_TOKEN"
 
           echo "Set VITE_BFF_URL=$BFF_URL for Production"
 
@@ -109,10 +109,10 @@ jobs:
           BFF_URL: ${{ steps.bff.outputs.bff_url }}
         run: |
           # Remove existing value so we can set the new one (non-fatal if absent)
-          echo "" | vercel env rm VITE_BFF_URL preview --yes 2>/dev/null || true
+          echo "" | vercel env rm VITE_BFF_URL preview --yes --token "$VERCEL_TOKEN" 2>/dev/null || true
 
           # Add new value
-          printf '%s' "$BFF_URL" | vercel env add VITE_BFF_URL preview
+          printf '%s' "$BFF_URL" | vercel env add VITE_BFF_URL preview --token "$VERCEL_TOKEN"
 
           echo "Set VITE_BFF_URL=$BFF_URL for Preview"
 
@@ -134,9 +134,9 @@ jobs:
           VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
           VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
         run: |
-          vercel env ls production | grep -q VITE_BFF_URL \
+          vercel env ls production --token "$VERCEL_TOKEN" | grep -q VITE_BFF_URL \
             && echo "VITE_BFF_URL confirmed in production" \
             || echo "WARNING: VITE_BFF_URL not found in production"
-          vercel env ls preview | grep -q VITE_BFF_URL \
+          vercel env ls preview --token "$VERCEL_TOKEN" | grep -q VITE_BFF_URL \
             && echo "VITE_BFF_URL confirmed in preview" \
             || echo "WARNING: VITE_BFF_URL not found in preview"
