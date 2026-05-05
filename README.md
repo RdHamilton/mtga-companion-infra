@@ -65,3 +65,11 @@ Run stacks in this order — each depends on the previous:
 - [ ] nginx + SSL (`nginx/mtga-companion.conf`)
 - [ ] systemd service (`systemd/mtga-companion.service`)
 - [ ] GitHub Actions deploy step
+
+## Frontend Serving
+
+Production frontend is served by **Vercel** -- see ADR-007 in the main app repo (RdHamilton/MTGA-Companion).
+
+The EC2 nginx static-serve path (`/var/www/mtga-companion/`) is preserved for disaster recovery and preview only. There is intentionally no automatic frontend deploy workflow in this repo. The EC2 frontend deploy workflow lives in the app repo (`.github/workflows/frontend.yml`) and is `workflow_dispatch`-only.
+
+A duplicate `deploy-frontend.yml` that existed in this repo was removed in PR #18 (closes RdHamilton/MTGA-Companion#1211).
