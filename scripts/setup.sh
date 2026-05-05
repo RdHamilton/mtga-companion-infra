@@ -62,6 +62,8 @@ fetch_ssm() {
 
 PORT=$(fetch_ssm "/mtga-companion/${ENVIRONMENT}/PORT" || echo "")
 PORT="${PORT:-8080}"
+ALLOWED_ORIGINS=$(fetch_ssm "/mtga-companion/${ENVIRONMENT}/ALLOWED_ORIGINS" || echo "")
+DAEMON_JWT_SECRET=$(fetch_ssm "/mtga-companion/prod/daemon-jwt-secret" || echo "")
 
 # Assemble DATABASE_URL from the RDS Secrets Manager secret
 DB_SECRET_ARN=$(aws cloudformation list-exports \
@@ -93,11 +95,13 @@ fi
 cat > "$ENV_DIR/env" << ENV_FILE
 PORT=${PORT}
 DATABASE_URL=${DATABASE_URL}
-ENVIRONMENT=${ENVIRONMENT}
+MTGA_ENV=production
 AWS_REGION=${AWS_REGION}
 GIN_MODE=release
+ALLOWED_ORIGINS=${ALLOWED_ORIGINS}
+DAEMON_JWT_SECRET=${DAEMON_JWT_SECRET}
 ENV_FILE
-chmod 640 "$ENV_DIR/env"
+chmod 600 "$ENV_DIR/env"
 chown "root:$APP_USER" "$ENV_DIR/env"
 
 # ---------------------------------------------------------
