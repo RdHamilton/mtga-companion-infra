@@ -71,6 +71,7 @@ Resources:
   # IAM execution role for the Lambda
   LambdaExecutionRole:
     Type: AWS::IAM::Role
+    DependsOn: SyncDLQ
     Properties:
       RoleName: !Sub "mtga-companion-${Environment}-sync-lambda-role"
       Description: Execution role for sync Lambda with VPC and RDS IAM auth access
@@ -91,6 +92,13 @@ Resources:
               - Effect: Allow
                 Action: rds-db:connect
                 Resource: !Sub "arn:aws:rds-db:${AWS::Region}:${AWS::AccountId}:dbuser:*/mtga_sync"
+        - PolicyName: DLQSendMessage
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: sqs:SendMessage
+                Resource: !GetAtt SyncDLQ.Arn
       Tags:
         - Key: Project
           Value: mtga-companion
@@ -205,9 +213,10 @@ Resources:
   # EventBridge Scheduler execution role
   SchedulerExecutionRole:
     Type: AWS::IAM::Role
+    DependsOn: SyncDLQ
     Properties:
       RoleName: !Sub "mtga-companion-${Environment}-sync-scheduler-role"
-      Description: Role for EventBridge Scheduler to invoke sync Lambda
+      Description: Role for EventBridge Scheduler to invoke sync Lambda and write to DLQ
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -223,6 +232,13 @@ Resources:
               - Effect: Allow
                 Action: lambda:InvokeFunction
                 Resource: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${LambdaFunctionName}"
+        - PolicyName: SendToDLQ
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: sqs:SendMessage
+                Resource: !GetAtt SyncDLQ.Arn
       Tags:
         - Key: Project
           Value: mtga-companion
@@ -232,6 +248,7 @@ Resources:
   # Daily EventBridge Scheduler to trigger the sync Lambda at 02:00 UTC
   DailySyncSchedule:
     Type: AWS::Scheduler::Schedule
+    DependsOn: SyncDLQ
     Properties:
       Name: !Sub "mtga-companion-${Environment}-sync-daily"
       Description: Daily sync Lambda trigger at 02:00 UTC
@@ -243,6 +260,10 @@ Resources:
       Target:
         Arn: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${LambdaFunctionName}"
         RoleArn: !GetAtt SchedulerExecutionRole.Arn
+        DeadLetterConfig:
+          Arn: !GetAtt SyncDLQ.Arn
+        RetryPolicy:
+          MaximumRetryAttempts: 2
 
   # Allow EventBridge Scheduler to invoke the Lambda
   LambdaPermissionScheduler:
@@ -252,6 +273,45 @@ Resources:
       Action: lambda:InvokeFunction
       Principal: scheduler.amazonaws.com
       SourceArn: !GetAtt DailySyncSchedule.Arn
+
+  # Dead-letter queue for failed EventBridge Scheduler invocations and Lambda async errors
+  SyncDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "mtga-companion-${Environment}-sync-dlq"
+      MessageRetentionPeriod: 1209600
+      Tags:
+        - Key: Project
+          Value: mtga-companion
+        - Key: Environment
+          Value: !Ref Environment
+
+  # Allow the EventBridge Scheduler role to send failed invocation payloads to the DLQ
+  SchedulerDLQPolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref SyncDLQ
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowSchedulerDLQ
+            Effect: Allow
+            Principal:
+              Service: scheduler.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: !GetAtt SyncDLQ.Arn
+
+  # Lambda async invocation config: 2 retries; failed events land in the DLQ
+  SyncLambdaEventInvokeConfig:
+    Type: AWS::Lambda::EventInvokeConfig
+    Properties:
+      FunctionName: !Ref LambdaFunctionName
+      Qualifier: $LATEST
+      MaximumRetryAttempts: 2
+      DestinationConfig:
+        OnFailure:
+          Destination: !GetAtt SyncDLQ.Arn
 
 Outputs:
   LambdaSecurityGroupId:
@@ -271,3 +331,15 @@ Outputs:
     Value: !GetAtt DailySyncSchedule.Arn
     Export:
       Name: !Sub "${AWS::StackName}-DailySyncScheduleArn"
+
+  SyncDLQArn:
+    Description: ARN of the SQS dead-letter queue for failed sync invocations
+    Value: !GetAtt SyncDLQ.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-SyncDLQArn"
+
+  SyncDLQUrl:
+    Description: URL of the SQS dead-letter queue for failed sync invocations
+    Value: !Ref SyncDLQ
+    Export:
+      Name: !Sub "${AWS::StackName}-SyncDLQUrl"
