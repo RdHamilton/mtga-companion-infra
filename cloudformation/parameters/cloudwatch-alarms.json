@@ -1,0 +1,18 @@
+[
+  {
+    "ParameterKey": "Environment",
+    "ParameterValue": "production"
+  },
+  {
+    "ParameterKey": "AlarmEmail",
+    "ParameterValue": "ray.hamilton@stablekernel.com"
+  },
+  {
+    "ParameterKey": "DiskAlarmThreshold",
+    "ParameterValue": "70"
+  },
+  {
+    "ParameterKey": "RestartCountThreshold",
+    "ParameterValue": "3"
+  }
+]

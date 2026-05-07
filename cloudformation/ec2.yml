@@ -106,6 +106,18 @@ Resources:
               - Effect: Allow
                 Action: cloudformation:ListExports
                 Resource: "*"
+        - PolicyName: CloudWatchMetricsPublish
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # Allows the CloudWatch agent to push disk/mem metrics and allows
+              # the bff-staging restart-metric timer to publish BffStagingRestartCount.
+              - Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                  - cloudwatch:GetMetricStatistics
+                  - cloudwatch:ListMetrics
+                Resource: "*"
       Tags:
         - Key: Project
           Value: mtga-companion

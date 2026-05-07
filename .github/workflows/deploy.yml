@@ -15,6 +15,7 @@ on:
           - vpc
           - dns
           - sync-lambda
+          - cloudwatch-alarms
       dry_run:
         description: Dry run — validate and show changeset only, do not deploy
         required: false
