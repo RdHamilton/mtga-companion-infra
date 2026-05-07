@@ -1,0 +1,169 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: |
+  MTGA Companion - CloudWatch alarms for the staging environment.
+  Monitors disk utilisation and bff-staging service restart loops on the shared EC2 instance.
+  Deploy order: ec2-sg -> rds -> ec2 -> cloudwatch-alarms.
+
+Parameters:
+  Environment:
+    Type: String
+    Description: Deployment environment (production or staging).
+    Default: production
+    AllowedValues: [production, staging]
+
+  AlarmEmail:
+    Type: String
+    Description: E-mail address that receives alarm notifications.
+    Default: ray.hamilton@stablekernel.com
+
+  DiskAlarmThreshold:
+    Type: Number
+    Description: Disk utilisation percentage that triggers the staging disk-fill alarm.
+    Default: 70
+
+  RestartCountThreshold:
+    Type: Number
+    Description: |
+      Number of bff-staging service restarts within the evaluation period that
+      triggers the restart-loop alarm.
+    Default: 3
+
+Resources:
+
+  # ---------------------------------------------------------
+  # SNS topic - alarm notifications
+  # ---------------------------------------------------------
+  AlarmTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "mtga-companion-alarms-${Environment}"
+      DisplayName: MTGA Companion Alarms
+      Subscription:
+        - Protocol: email
+          Endpoint: !Ref AlarmEmail
+      Tags:
+        - Key: Project
+          Value: mtga-companion
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ---------------------------------------------------------
+  # Disk utilisation alarm
+  #
+  # Fires when the root filesystem on the staging EC2 instance
+  # exceeds DiskAlarmThreshold (default 70%).
+  #
+  # Metric source: Amazon CloudWatch Agent (CWAgent namespace).
+  # The agent must be installed and configured on the instance
+  # before this alarm will transition out of INSUFFICIENT_DATA.
+  # Install via the SSM document in scripts/install-cwagent.sh
+  # or by running the AWS-ConfigureAWSPackage SSM document.
+  #
+  # Dimensions match the CWAgent config shipped with this repo
+  # (scripts/cwagent-config.json):
+  #   device  = nvme0n1p1  (root volume on Amazon Linux 2023 t3.small)
+  #   fstype  = xfs
+  #   path    = /
+  # ---------------------------------------------------------
+  DiskFillAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "mtga-companion-${Environment}-disk-fill"
+      AlarmDescription: !Sub |
+        Staging EC2 root disk utilisation has exceeded ${DiskAlarmThreshold}%.
+        Log in via SSM Session Manager and clean up: journalctl --vacuum-size=500M
+        or remove old deploy artifacts from /tmp.
+      Namespace: CWAgent
+      MetricName: disk_used_percent
+      Dimensions:
+        - Name: InstanceId
+          Value: !ImportValue mtga-companion-ec2-InstanceId
+        - Name: path
+          Value: /
+        - Name: device
+          Value: nvme0n1p1
+        - Name: fstype
+          Value: xfs
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: !Ref DiskAlarmThreshold
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      # INSUFFICIENT_DATA while CWAgent is not yet installed -- treat as alarm
+      # so missing-agent is visible rather than silent.
+      TreatMissingData: breaching
+      AlarmActions:
+        - !Ref AlarmTopic
+      OKActions:
+        - !Ref AlarmTopic
+      Tags:
+        - Key: Project
+          Value: mtga-companion
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ---------------------------------------------------------
+  # bff-staging restart-loop alarm
+  #
+  # Fires when the custom metric BffStagingRestartCount exceeds
+  # RestartCountThreshold (default 3) within a 5-minute window.
+  #
+  # Metric source: a systemd oneshot service + timer installed
+  # on the EC2 instance via scripts/install-restart-metric.sh.
+  # The script runs every 60 s, counts bff-staging.service
+  # restarts from journald since the last run, and calls
+  # cloudwatch put-metric-data.
+  #
+  # Namespace : MTGA/Staging
+  # MetricName: BffStagingRestartCount
+  # Dimension : Service=bff-staging
+  # ---------------------------------------------------------
+  BffStagingRestartAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "mtga-companion-${Environment}-bff-staging-restart-loop"
+      AlarmDescription: !Sub |
+        bff-staging.service has restarted more than ${RestartCountThreshold} times
+        in a 5-minute window. Check systemd journal:
+          journalctl -u bff-staging -n 100 --no-pager
+        and inspect the binary at /usr/local/bin/mtga-bff-staging.
+      Namespace: MTGA/Staging
+      MetricName: BffStagingRestartCount
+      Dimensions:
+        - Name: Service
+          Value: bff-staging
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: !Ref RestartCountThreshold
+      ComparisonOperator: GreaterThanThreshold
+      # OK when bff-staging is not running (pre-deploy). Only alarm on actual restarts.
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlarmTopic
+      OKActions:
+        - !Ref AlarmTopic
+      Tags:
+        - Key: Project
+          Value: mtga-companion
+        - Key: Environment
+          Value: !Ref Environment
+
+Outputs:
+  AlarmTopicArn:
+    Description: ARN of the SNS alarm notification topic.
+    Value: !Ref AlarmTopic
+    Export:
+      Name: !Sub "mtga-companion-${Environment}-AlarmTopicArn"
+
+  DiskFillAlarmArn:
+    Description: ARN of the staging disk-fill CloudWatch alarm.
+    Value: !GetAtt DiskFillAlarm.Arn
+    Export:
+      Name: !Sub "mtga-companion-${Environment}-DiskFillAlarmArn"
+
+  BffStagingRestartAlarmArn:
+    Description: ARN of the bff-staging restart-loop CloudWatch alarm.
+    Value: !GetAtt BffStagingRestartAlarm.Arn
+    Export:
+      Name: !Sub "mtga-companion-${Environment}-BffStagingRestartAlarmArn"
