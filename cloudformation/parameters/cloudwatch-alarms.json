@@ -1,7 +1,7 @@
 [
   {
     "ParameterKey": "Environment",
-    "ParameterValue": "production"
+    "ParameterValue": "staging"
   },
   {
     "ParameterKey": "AlarmEmail",
