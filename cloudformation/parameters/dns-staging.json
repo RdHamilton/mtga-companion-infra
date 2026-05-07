@@ -1,0 +1,18 @@
+[
+  {
+    "ParameterKey": "Environment",
+    "ParameterValue": "staging"
+  },
+  {
+    "ParameterKey": "HostedZoneId",
+    "ParameterValue": "Z0998299Z86TCLNNF1LS"
+  },
+  {
+    "ParameterKey": "ElasticIP",
+    "ParameterValue": "3.82.48.206"
+  },
+  {
+    "ParameterKey": "TTL",
+    "ParameterValue": "300"
+  }
+]
