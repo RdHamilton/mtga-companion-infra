@@ -46,11 +46,6 @@ Resources:
       ResourceRecords:
         - !Ref ElasticIP
       Comment: VaultMTG staging API subdomain - points at same EC2 as production
-      Tags:
-        - Key: Project
-          Value: mtga-companion
-        - Key: Environment
-          Value: !Ref Environment
 
 Outputs:
   StagingApiDomain:
