@@ -158,6 +158,7 @@ Resources:
                   - s3:DeleteObject
                   - s3:ListBucket
                   - s3:CreateBucket
+                  - s3:PutBucketVersioning
                 Resource:
                   - !GetAtt StagingDeployArtifactsBucket.Arn
                   - !Sub "${StagingDeployArtifactsBucket.Arn}/*"
