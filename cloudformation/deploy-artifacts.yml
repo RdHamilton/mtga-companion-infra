@@ -1,9 +1,11 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
   MTGA Companion - Deploy artifacts S3 buckets and GitHub Actions OIDC deploy role.
-  Provides the production and staging S3 buckets for BFF binary artifacts and the
-  IAM role that GitHub Actions assumes via OIDC to upload binaries and trigger SSM
-  deployments.
+  Provides the production S3 bucket for BFF binary artifacts and the IAM role
+  that GitHub Actions assumes via OIDC to upload binaries and trigger SSM deploys.
+  The staging bucket (mtga-companion-deploy-artifacts-staging) was created out-of-band
+  by the staging-deploy workflow and is referenced here only by ARN for IAM grants;
+  importing it into this stack is tracked separately.
   Deploy order: deploy-artifacts (standalone, no dependencies).
 
 Parameters:
@@ -22,6 +24,14 @@ Parameters:
     Type: String
     Default: MTGA-Companion
     Description: GitHub repository name (app repo)
+
+  StagingArtifactsBucketName:
+    Type: String
+    Default: mtga-companion-deploy-artifacts-staging
+    Description: >
+      Name of the staging deploy artifacts bucket. The bucket is currently
+      managed out-of-band by the staging-deploy workflow; this template only
+      grants the GitHub Actions deploy role access to it by ARN.
 
 Resources:
 
@@ -55,41 +65,6 @@ Resources:
           Value: mtga-companion
         - Key: Environment
           Value: !Ref Environment
-
-  # ---------------------------------------------------------
-  # S3 bucket for staging BFF binary artifacts
-  # The staging-deploy.yml workflow uploads binaries and scripts here.
-  # The bucket is created by the workflow on first run (idempotent), but
-  # this resource ensures it is managed by CloudFormation with versioning
-  # and lifecycle rules.
-  # ---------------------------------------------------------
-  StagingDeployArtifactsBucket:
-    Type: AWS::S3::Bucket
-    DeletionPolicy: Retain
-    Properties:
-      BucketName: mtga-companion-deploy-artifacts-staging
-      VersioningConfiguration:
-        Status: Enabled
-      LifecycleConfiguration:
-        Rules:
-          - Id: DeleteOldVersions
-            Status: Enabled
-            NoncurrentVersionExpiration:
-              NoncurrentDays: 14
-          - Id: DeleteOldStagingBuilds
-            Status: Enabled
-            Prefix: staging/
-            ExpirationInDays: 30
-      PublicAccessBlockConfiguration:
-        BlockPublicAcls: true
-        BlockPublicPolicy: true
-        IgnorePublicAcls: true
-        RestrictPublicBuckets: true
-      Tags:
-        - Key: Project
-          Value: mtga-companion
-        - Key: Environment
-          Value: staging
 
   # ---------------------------------------------------------
   # GitHub Actions OIDC provider
@@ -148,8 +123,10 @@ Resources:
                   - !GetAtt DeployArtifactsBucket.Arn
                   - !Sub "${DeployArtifactsBucket.Arn}/*"
               # Staging deploy artifacts bucket
-              # Both production and staging deploys use the same role ARN
-              # (stored in the AWS_DEPLOY_ROLE_ARN repo secret).
+              # The bucket is managed out-of-band; grant access by ARN.
+              # PutBucketVersioning/GetBucketVersioning are required because
+              # staging-deploy.yml calls `aws s3api put-bucket-versioning`
+              # to ensure versioning is enabled idempotently.
               - Sid: StagingBucketAccess
                 Effect: Allow
                 Action:
@@ -158,9 +135,11 @@ Resources:
                   - s3:DeleteObject
                   - s3:ListBucket
                   - s3:CreateBucket
+                  - s3:PutBucketVersioning
+                  - s3:GetBucketVersioning
                 Resource:
-                  - !GetAtt StagingDeployArtifactsBucket.Arn
-                  - !Sub "${StagingDeployArtifactsBucket.Arn}/*"
+                  - !Sub "arn:aws:s3:::${StagingArtifactsBucketName}"
+                  - !Sub "arn:aws:s3:::${StagingArtifactsBucketName}/*"
         - PolicyName: SSMSendCommand
           PolicyDocument:
             Version: "2012-10-17"
@@ -218,8 +197,8 @@ Outputs:
       Name: !Sub "${AWS::StackName}-DeployBucketName"
 
   StagingDeployBucketName:
-    Description: S3 bucket name for staging deploy artifacts
-    Value: !Ref StagingDeployArtifactsBucket
+    Description: S3 bucket name for staging deploy artifacts (managed out-of-band)
+    Value: !Ref StagingArtifactsBucketName
     Export:
       Name: !Sub "${AWS::StackName}-StagingDeployBucketName"
 
