@@ -1,8 +1,9 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
-  MTGA Companion - Deploy artifacts S3 bucket and GitHub Actions OIDC deploy role.
-  Provides the S3 bucket for BFF binary artifacts and the IAM role that GitHub Actions
-  assumes via OIDC to upload binaries and trigger SSM deployments.
+  MTGA Companion - Deploy artifacts S3 buckets and GitHub Actions OIDC deploy role.
+  Provides the production and staging S3 buckets for BFF binary artifacts and the
+  IAM role that GitHub Actions assumes via OIDC to upload binaries and trigger SSM
+  deployments.
   Deploy order: deploy-artifacts (standalone, no dependencies).
 
 Parameters:
@@ -25,7 +26,7 @@ Parameters:
 Resources:
 
   # ---------------------------------------------------------
-  # S3 bucket for BFF binary artifacts
+  # S3 bucket for production BFF binary artifacts
   # ---------------------------------------------------------
   DeployArtifactsBucket:
     Type: AWS::S3::Bucket
@@ -56,6 +57,41 @@ Resources:
           Value: !Ref Environment
 
   # ---------------------------------------------------------
+  # S3 bucket for staging BFF binary artifacts
+  # The staging-deploy.yml workflow uploads binaries and scripts here.
+  # The bucket is created by the workflow on first run (idempotent), but
+  # this resource ensures it is managed by CloudFormation with versioning
+  # and lifecycle rules.
+  # ---------------------------------------------------------
+  StagingDeployArtifactsBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Properties:
+      BucketName: mtga-companion-deploy-artifacts-staging
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldVersions
+            Status: Enabled
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 14
+          - Id: DeleteOldStagingBuilds
+            Status: Enabled
+            Prefix: staging/
+            ExpirationInDays: 30
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Project
+          Value: mtga-companion
+        - Key: Environment
+          Value: staging
+
+  # ---------------------------------------------------------
   # GitHub Actions OIDC provider
   # ---------------------------------------------------------
   GitHubOIDCProvider:
@@ -75,6 +111,9 @@ Resources:
 
   # ---------------------------------------------------------
   # IAM role assumed by GitHub Actions via OIDC
+  # Covers both production and staging artifact buckets so that
+  # staging-deploy.yml and release.yml can use the same role ARN
+  # stored in the AWS_DEPLOY_ROLE_ARN repository secret.
   # ---------------------------------------------------------
   GitHubActionsDeployRole:
     Type: AWS::IAM::Role
@@ -97,14 +136,31 @@ Resources:
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
-              - Effect: Allow
+              # Production deploy artifacts bucket
+              - Sid: ProductionBucketAccess
+                Effect: Allow
                 Action:
                   - s3:PutObject
                   - s3:GetObject
+                  - s3:DeleteObject
                   - s3:ListBucket
                 Resource:
                   - !GetAtt DeployArtifactsBucket.Arn
                   - !Sub "${DeployArtifactsBucket.Arn}/*"
+              # Staging deploy artifacts bucket
+              # Both production and staging deploys use the same role ARN
+              # (stored in the AWS_DEPLOY_ROLE_ARN repo secret).
+              - Sid: StagingBucketAccess
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                  - s3:CreateBucket
+                Resource:
+                  - !GetAtt StagingDeployArtifactsBucket.Arn
+                  - !Sub "${StagingDeployArtifactsBucket.Arn}/*"
         - PolicyName: SSMSendCommand
           PolicyDocument:
             Version: "2012-10-17"
@@ -128,9 +184,8 @@ Resources:
                   - ssm:ListCommandInvocations
                 Resource: "*"
         # Grants the deploy runner read access to SSM parameters used during
-        # the deploy pipeline (ALLOWED_ORIGINS, DAEMON_JWT_SECRET). The
-        # daemon-jwt-secret is a SecureString so kms:Decrypt is also required
-        # on the default SSM KMS key.
+        # the deploy pipeline (ALLOWED_ORIGINS, CLERK_SECRET_KEY).
+        # SecureString parameters require kms:Decrypt on the SSM KMS key.
         - PolicyName: SSMParameterRead
           PolicyDocument:
             Version: "2012-10-17"
@@ -140,8 +195,8 @@ Resources:
                   - ssm:GetParameter
                   - ssm:GetParameters
                 Resource:
-                  - !Sub "arn:aws:ssm:us-east-1:${AWS::AccountId}:parameter/mtga-companion/production/ALLOWED_ORIGINS"
-                  - !Sub "arn:aws:ssm:us-east-1:${AWS::AccountId}:parameter/mtga-companion/prod/daemon-jwt-secret"
+                  - !Sub "arn:aws:ssm:us-east-1:${AWS::AccountId}:parameter/mtga-companion/production/*"
+                  - !Sub "arn:aws:ssm:us-east-1:${AWS::AccountId}:parameter/mtga-companion/staging/*"
               - Effect: Allow
                 Action:
                   - kms:Decrypt
@@ -157,10 +212,16 @@ Resources:
 
 Outputs:
   DeployBucketName:
-    Description: S3 bucket name for deploy artifacts
+    Description: S3 bucket name for production deploy artifacts
     Value: !Ref DeployArtifactsBucket
     Export:
       Name: !Sub "${AWS::StackName}-DeployBucketName"
+
+  StagingDeployBucketName:
+    Description: S3 bucket name for staging deploy artifacts
+    Value: !Ref StagingDeployArtifactsBucket
+    Export:
+      Name: !Sub "${AWS::StackName}-StagingDeployBucketName"
 
   GitHubActionsDeployRoleArn:
     Description: IAM role ARN for GitHub Actions to assume via OIDC
