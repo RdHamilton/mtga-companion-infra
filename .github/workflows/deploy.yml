@@ -17,6 +17,7 @@ on:
           - sync-lambda
           - cloudwatch-alarms
           - cdn
+          - iam-gha-roles
       dry_run:
         description: Dry run — validate and show changeset only, do not deploy
         required: false
@@ -45,8 +46,9 @@ jobs:
           # Some stacks use a different name in CloudFormation than the pattern mtga-companion-<input>.
           # Map known exceptions; everything else follows the default naming convention.
           case "${{ inputs.stack }}" in
-            cdn) STACK_NAME="vaultmtg-app-cdn" ;;
-            *)   STACK_NAME="mtga-companion-${{ inputs.stack }}" ;;
+            cdn)           STACK_NAME="vaultmtg-app-cdn" ;;
+            iam-gha-roles) STACK_NAME="mtga-companion-iam-gha-roles" ;;
+            *)             STACK_NAME="mtga-companion-${{ inputs.stack }}" ;;
           esac
           echo "STACK_NAME=$STACK_NAME" >> $GITHUB_ENV
           echo "Resolved stack name: $STACK_NAME"
