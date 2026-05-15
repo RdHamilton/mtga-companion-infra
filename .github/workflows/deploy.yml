@@ -16,6 +16,7 @@ on:
           - dns
           - sync-lambda
           - cloudwatch-alarms
+          - cloudwatch-alarms-staging
           - cdn
           - iam-gha-roles
       dry_run:
@@ -45,13 +46,17 @@ jobs:
         run: |
           # Some stacks use a different name in CloudFormation than the pattern mtga-companion-<input>.
           # Map known exceptions; everything else follows the default naming convention.
+          # TEMPLATE_NAME defaults to inputs.stack but can be overridden when the template filename
+          # differs from the stack input (e.g. cloudwatch-alarms-staging uses cloudwatch-alarms.yml).
           case "${{ inputs.stack }}" in
-            cdn)           STACK_NAME="vaultmtg-app-cdn" ;;
-            iam-gha-roles) STACK_NAME="mtga-companion-iam-gha-roles" ;;
-            *)             STACK_NAME="mtga-companion-${{ inputs.stack }}" ;;
+            cdn)                        STACK_NAME="vaultmtg-app-cdn" ;             TEMPLATE_NAME="${{ inputs.stack }}" ;;
+            iam-gha-roles)              STACK_NAME="mtga-companion-iam-gha-roles" ; TEMPLATE_NAME="${{ inputs.stack }}" ;;
+            cloudwatch-alarms-staging)  STACK_NAME="mtga-companion-cloudwatch-alarms-staging" ; TEMPLATE_NAME="cloudwatch-alarms" ;;
+            *)                          STACK_NAME="mtga-companion-${{ inputs.stack }}" ; TEMPLATE_NAME="${{ inputs.stack }}" ;;
           esac
           echo "STACK_NAME=$STACK_NAME" >> $GITHUB_ENV
-          echo "Resolved stack name: $STACK_NAME"
+          echo "TEMPLATE_NAME=$TEMPLATE_NAME" >> $GITHUB_ENV
+          echo "Resolved stack name: $STACK_NAME (template: $TEMPLATE_NAME)"
 
       - name: Checkout
         uses: actions/checkout@v6
@@ -65,7 +70,7 @@ jobs:
       - name: Validate template
         run: |
           aws cloudformation validate-template \
-            --template-body file://cloudformation/${{ inputs.stack }}.yml
+            --template-body file://cloudformation/${{ env.TEMPLATE_NAME }}.yml
           echo "✓ Template valid"
 
       - name: Load parameters
@@ -105,7 +110,7 @@ jobs:
 
           aws cloudformation create-change-set \
             --stack-name "${{ env.STACK_NAME }}" \
-            --template-body file://cloudformation/${{ inputs.stack }}.yml \
+            --template-body file://cloudformation/${{ env.TEMPLATE_NAME }}.yml \
             --change-set-name "$CHANGESET_NAME" \
             --change-set-type "$CHANGE_TYPE" \
             --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \

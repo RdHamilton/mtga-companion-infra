@@ -1,0 +1,18 @@
+[
+  { "ParameterKey": "Environment",                "ParameterValue": "staging" },
+  { "ParameterKey": "AlarmEmail",                 "ParameterValue": "ray.hamilton@stablekernel.com" },
+  { "ParameterKey": "DiskAlarmThreshold",         "ParameterValue": "85" },
+  { "ParameterKey": "RestartCountThreshold",      "ParameterValue": "5" },
+  { "ParameterKey": "Bff5xxThreshold",            "ParameterValue": "10" },
+  { "ParameterKey": "Bff5xxEvaluationPeriods",    "ParameterValue": "3" },
+  { "ParameterKey": "EC2CpuThreshold",            "ParameterValue": "90" },
+  { "ParameterKey": "EC2CpuEvaluationPeriods",    "ParameterValue": "5" },
+  { "ParameterKey": "EC2MemThreshold",            "ParameterValue": "95" },
+  { "ParameterKey": "EC2MemEvaluationPeriods",    "ParameterValue": "7" },
+  { "ParameterKey": "RdsReadLatencyThreshold",    "ParameterValue": "0.1" },
+  { "ParameterKey": "RdsWriteLatencyThreshold",   "ParameterValue": "0.2" },
+  { "ParameterKey": "RdsLatencyEvaluationPeriods","ParameterValue": "5" },
+  { "ParameterKey": "RdsCpuThreshold",            "ParameterValue": "90" },
+  { "ParameterKey": "RdsCpuEvaluationPeriods",    "ParameterValue": "5" },
+  { "ParameterKey": "RdsInstanceIdentifier",      "ParameterValue": "mtga-companion-postgres-staging" }
+]
