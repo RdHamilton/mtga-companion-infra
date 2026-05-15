@@ -142,7 +142,7 @@ Resources:
   LambdaVpcConfigFunction:
     Type: AWS::Lambda::Function
     Properties:
-      FunctionName: !Sub "mtga-companion-${Environment}-cfn-vpc-config"
+      FunctionName: !Sub "vault-mtg-${Environment}-cfn-vpc-config"
       Description: CloudFormation custom resource to configure VPC placement on sync Lambda
       Runtime: python3.12
       Handler: index.handler
