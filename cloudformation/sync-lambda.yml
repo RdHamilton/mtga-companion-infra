@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: Sync Lambda VPC placement, IAM execution role, and EventBridge daily schedule
+Description: Sync Lambda VPC placement, IAM execution role, EventBridge daily schedule, DLQ, and CloudWatch alarms
 
 Parameters:
   Environment:
@@ -15,6 +15,12 @@ Parameters:
     Type: String
     Default: mtga-companion-rds
     Description: Name of the RDS CloudFormation stack for cross-stack imports
+  AlarmsStackName:
+    Type: String
+    Default: mtga-companion-cloudwatch-alarms
+    Description: |
+      Name of the CloudWatch alarms stack whose SNS topic receives sync alarm notifications.
+      The stack must export mtga-companion-${Environment}-AlarmTopicArn.
   SubnetIdA:
     Type: AWS::EC2::Subnet::Id
     Default: subnet-021e2cc715f426da1
@@ -35,6 +41,24 @@ Parameters:
     Type: String
     Default: 'cron(0 2 * * ? *)'
     Description: EventBridge Scheduler cron expression (UTC)
+  LambdaErrorThreshold:
+    Type: Number
+    Default: 1
+    Description: |
+      Number of Lambda invocation errors within EvaluationPeriods × 300s that triggers
+      the SyncLambdaErrorAlarm. Default 1 means any single failure fires the alarm.
+  LambdaErrorEvaluationPeriods:
+    Type: Number
+    Default: 1
+    Description: |
+      Number of consecutive 5-minute periods used by the SyncLambdaErrorAlarm.
+      With the default of 1 the alarm fires as soon as one error is observed.
+  DLQDepthThreshold:
+    Type: Number
+    Default: 1
+    Description: |
+      Number of visible messages in the DLQ that triggers the SyncDLQDepthAlarm.
+      Default 1 means any message landing in the DLQ fires the alarm.
 
 Resources:
 
@@ -356,6 +380,98 @@ Resources:
         OnFailure:
           Destination: !GetAtt SyncDLQ.Arn
 
+  # ---------------------------------------------------------
+  # CloudWatch alarm: Lambda invocation errors
+  #
+  # Fires when the sync Lambda error count exceeds LambdaErrorThreshold
+  # within LambdaErrorEvaluationPeriods × 5-minute windows. A Lambda error
+  # means a run failed (fetch/upsert failure or consecutive-skip guard trip).
+  # After two EventBridge retries, the failed invocation is routed to the DLQ.
+  #
+  # TreatMissingData=notBreaching: the Lambda only runs once daily; most
+  # evaluation periods will have no data points. Treating missing data as
+  # breaching would cause permanent false-alarm state.
+  # ---------------------------------------------------------
+  SyncLambdaErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    DependsOn: SyncDLQ
+    Properties:
+      AlarmName: !Sub "mtga-companion-${Environment}-sync-lambda-errors"
+      AlarmDescription: !Sub |
+        Sync Lambda (${LambdaFunctionName}) reported invocation errors.
+        Check CloudWatch Logs for the Lambda function and inspect the DLQ:
+          aws sqs receive-message --queue-url ${SyncDLQ} --profile personal
+        The consecutive-skip guard may have tripped (set returning 0 cards for
+        3+ consecutive days), or the upstream 17Lands API may be unreachable.
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref LambdaFunctionName
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: !Ref LambdaErrorEvaluationPeriods
+      Threshold: !Ref LambdaErrorThreshold
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !ImportValue
+          Fn::Sub: "mtga-companion-${Environment}-AlarmTopicArn"
+      OKActions:
+        - !ImportValue
+          Fn::Sub: "mtga-companion-${Environment}-AlarmTopicArn"
+      Tags:
+        - Key: Project
+          Value: mtga-companion
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ---------------------------------------------------------
+  # CloudWatch alarm: DLQ message depth
+  #
+  # Fires when any message lands in the DLQ. Each message represents a
+  # sync invocation that exhausted all EventBridge retries. A non-empty DLQ
+  # is always actionable — inspect the message body for the schedule event
+  # payload and cross-reference with Lambda logs.
+  #
+  # TreatMissingData=notBreaching: SQS only emits the NumberOfMessagesSent
+  # metric when messages are delivered; periods with no DLQ activity have no
+  # data points and should not trigger the alarm.
+  # ---------------------------------------------------------
+  SyncDLQDepthAlarm:
+    Type: AWS::CloudWatch::Alarm
+    DependsOn: SyncDLQ
+    Properties:
+      AlarmName: !Sub "mtga-companion-${Environment}-sync-dlq-depth"
+      AlarmDescription: !Sub |
+        Messages have landed in the sync DLQ (${SyncDLQ}).
+        This means the sync Lambda failed and exhausted all EventBridge retries.
+        Inspect the DLQ messages:
+          aws sqs receive-message --queue-url ${SyncDLQ} --profile personal
+        Then check CloudWatch Logs for the Lambda invocation error.
+      Namespace: AWS/SQS
+      MetricName: NumberOfMessagesSent
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt SyncDLQ.QueueName
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: !Ref DLQDepthThreshold
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !ImportValue
+          Fn::Sub: "mtga-companion-${Environment}-AlarmTopicArn"
+      OKActions:
+        - !ImportValue
+          Fn::Sub: "mtga-companion-${Environment}-AlarmTopicArn"
+      Tags:
+        - Key: Project
+          Value: mtga-companion
+        - Key: Environment
+          Value: !Ref Environment
+
 Outputs:
   LambdaSecurityGroupId:
     Description: Security group ID for the sync Lambda
@@ -392,3 +508,15 @@ Outputs:
     Value: !Ref SyncDLQ
     Export:
       Name: !Sub "${AWS::StackName}-SyncDLQUrl"
+
+  SyncLambdaErrorAlarmArn:
+    Description: ARN of the CloudWatch alarm for sync Lambda invocation errors
+    Value: !GetAtt SyncLambdaErrorAlarm.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-SyncLambdaErrorAlarmArn"
+
+  SyncDLQDepthAlarmArn:
+    Description: ARN of the CloudWatch alarm for DLQ message depth
+    Value: !GetAtt SyncDLQDepthAlarm.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-SyncDLQDepthAlarmArn"
