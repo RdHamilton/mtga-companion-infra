@@ -1,0 +1,321 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  GitHub Actions OIDC IAM roles for mtga-companion-infra CI/CD pipelines.
+  Codifies roles that were provisioned out-of-band and imports them into IaC.
+  These roles already exist in the account — running this template performs
+  an in-place update, not a net-new creation. See PR #36 and PR #39 for
+  the original provisioning context.
+
+  Deploy order: standalone (no stack dependencies).
+
+Parameters:
+  GitHubOrg:
+    Type: String
+    Default: RdHamilton
+    Description: GitHub organization or user that owns the repositories
+
+  InfraRepo:
+    Type: String
+    Default: mtga-companion-infra
+    Description: GitHub repository name for the infra OIDC roles
+
+  OidcProviderArn:
+    Type: String
+    Default: arn:aws:iam::901347789205:oidc-provider/token.actions.githubusercontent.com
+    Description: ARN of the GitHub Actions OIDC provider in this account
+
+  SyncLambdaFunctionArn:
+    Type: String
+    Default: arn:aws:lambda:us-east-1:901347789205:function:vault-mtg-sync
+    Description: ARN of the vault-mtg-sync Lambda function
+
+  SyncLambdaStackArn:
+    Type: String
+    Default: arn:aws:cloudformation:us-east-1:901347789205:stack/mtga-companion-sync-lambda/*
+    Description: ARN pattern for the sync-lambda CloudFormation stack
+
+Resources:
+  # ---------------------------------------------------------------------------
+  # gha-infra-sync-deploy
+  # Assumed by deploy-sync-lambda.yml to update the vault-mtg-sync Lambda
+  # and manage its CloudFormation stack. Scoped to the infra repo only.
+  # ---------------------------------------------------------------------------
+  GhaInfraSyncDeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: gha-infra-sync-deploy
+      Description: >
+        GitHub Actions OIDC role for deploy-sync-lambda.yml.
+        Permits Lambda code/config updates and CloudFormation operations
+        on the mtga-companion-sync-lambda stack.
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Ref OidcProviderArn
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              StringLike:
+                token.actions.githubusercontent.com:sub: !Sub repo:${GitHubOrg}/${InfraRepo}:*
+      Policies:
+        - PolicyName: sync-lambda-deploy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: LambdaDeploy
+                Effect: Allow
+                Action:
+                  - lambda:UpdateFunctionCode
+                  - lambda:UpdateFunctionConfiguration
+                  - lambda:GetFunction
+                  - lambda:GetFunctionConfiguration
+                  - lambda:CreateFunction
+                  - lambda:WaitForFunctionUpdated
+                Resource: !Ref SyncLambdaFunctionArn
+              - Sid: CloudFormationSyncStack
+                Effect: Allow
+                Action: cloudformation:*
+                Resource: !Ref SyncLambdaStackArn
+      Tags:
+        - Key: ManagedBy
+          Value: cloudformation
+        - Key: Stack
+          Value: !Sub mtga-companion-iam-gha-roles
+        - Key: Purpose
+          Value: github-actions-oidc
+
+  # ---------------------------------------------------------------------------
+  # gha-infra-cfn-deploy
+  # Assumed by deploy.yml to provision / update all other CloudFormation stacks
+  # in this repo. Broad CloudFormation + resource permissions scoped to
+  # mtga-companion-* and vaultmtg-* stack name prefixes where possible.
+  # ---------------------------------------------------------------------------
+  GhaInfraCfnDeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: gha-infra-cfn-deploy
+      Description: >
+        GitHub Actions OIDC role for deploy.yml (general CloudFormation deploys).
+        Permits stack CRUD operations across mtga-companion-* and vaultmtg-*
+        stacks, and the AWS resource actions needed to provision those stacks.
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Ref OidcProviderArn
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              StringLike:
+                token.actions.githubusercontent.com:sub: !Sub repo:${GitHubOrg}/${InfraRepo}:*
+      Policies:
+        - PolicyName: cfn-stack-deploy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: CloudFormationStackOperations
+                Effect: Allow
+                Action: cloudformation:*
+                Resource:
+                  - arn:aws:cloudformation:us-east-1:901347789205:stack/mtga-companion-*/*
+                  - arn:aws:cloudformation:us-east-1:901347789205:stack/vaultmtg-*/*
+              - Sid: CloudFormationGlobal
+                Effect: Allow
+                Action:
+                  - cloudformation:ValidateTemplate
+                  - cloudformation:ListStacks
+                  - cloudformation:DescribeStacks
+                Resource: "*"
+              - Sid: IAMPassAndManage
+                Effect: Allow
+                Action:
+                  - iam:PassRole
+                  - iam:CreateRole
+                  - iam:DeleteRole
+                  - iam:GetRole
+                  - iam:UpdateRole
+                  - iam:PutRolePolicy
+                  - iam:DeleteRolePolicy
+                  - iam:GetRolePolicy
+                  - iam:ListRolePolicies
+                  - iam:AttachRolePolicy
+                  - iam:DetachRolePolicy
+                  - iam:ListAttachedRolePolicies
+                  - iam:TagRole
+                  - iam:UntagRole
+                  - iam:CreateInstanceProfile
+                  - iam:DeleteInstanceProfile
+                  - iam:GetInstanceProfile
+                  - iam:AddRoleToInstanceProfile
+                  - iam:RemoveRoleFromInstanceProfile
+                  - iam:CreateOIDCProvider
+                  - iam:DeleteOIDCProvider
+                  - iam:GetOIDCProvider
+                  - iam:UpdateOIDCProvider
+                  - iam:TagOIDCProvider
+                  - iam:ListOIDCProviders
+                Resource: "*"
+              - Sid: EC2
+                Effect: Allow
+                Action: ec2:*
+                Resource: "*"
+              - Sid: RDS
+                Effect: Allow
+                Action: rds:*
+                Resource: "*"
+              - Sid: Lambda
+                Effect: Allow
+                Action: lambda:*
+                Resource: "*"
+              - Sid: S3
+                Effect: Allow
+                Action:
+                  - s3:CreateBucket
+                  - s3:DeleteBucket
+                  - s3:GetBucketLocation
+                  - s3:GetBucketPolicy
+                  - s3:PutBucketPolicy
+                  - s3:DeleteBucketPolicy
+                  - s3:GetBucketVersioning
+                  - s3:PutBucketVersioning
+                  - s3:PutBucketPublicAccessBlock
+                  - s3:GetBucketPublicAccessBlock
+                  - s3:PutBucketEncryption
+                  - s3:GetBucketEncryption
+                  - s3:PutBucketTagging
+                  - s3:GetBucketTagging
+                  - s3:PutLifecycleConfiguration
+                  - s3:GetLifecycleConfiguration
+                  - s3:PutBucketNotification
+                  - s3:GetBucketNotification
+                  - s3:GetBucketCORS
+                  - s3:PutBucketCORS
+                Resource: "*"
+              - Sid: CloudFront
+                Effect: Allow
+                Action: cloudfront:*
+                Resource: "*"
+              - Sid: ACM
+                Effect: Allow
+                Action:
+                  - acm:RequestCertificate
+                  - acm:DescribeCertificate
+                  - acm:DeleteCertificate
+                  - acm:ListCertificates
+                  - acm:AddTagsToCertificate
+                  - acm:ListTagsForCertificate
+                Resource: "*"
+              - Sid: Route53
+                Effect: Allow
+                Action:
+                  - route53:CreateHostedZone
+                  - route53:DeleteHostedZone
+                  - route53:GetHostedZone
+                  - route53:ListHostedZones
+                  - route53:ChangeResourceRecordSets
+                  - route53:GetChange
+                  - route53:ListResourceRecordSets
+                  - route53:CreateHealthCheck
+                  - route53:DeleteHealthCheck
+                  - route53:GetHealthCheck
+                Resource: "*"
+              - Sid: CloudWatch
+                Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricAlarm
+                  - cloudwatch:DeleteAlarms
+                  - cloudwatch:DescribeAlarms
+                  - cloudwatch:ListTagsForResource
+                  - cloudwatch:TagResource
+                Resource: "*"
+              - Sid: SNS
+                Effect: Allow
+                Action:
+                  - sns:CreateTopic
+                  - sns:DeleteTopic
+                  - sns:GetTopicAttributes
+                  - sns:SetTopicAttributes
+                  - sns:Subscribe
+                  - sns:Unsubscribe
+                  - sns:ListSubscriptionsByTopic
+                  - sns:TagResource
+                  - sns:ListTagsForResource
+                Resource: "*"
+              - Sid: SSM
+                Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                  - ssm:PutParameter
+                  - ssm:DeleteParameter
+                  - ssm:DescribeParameters
+                  - ssm:AddTagsToResource
+                  - ssm:ListTagsForResource
+                Resource: "*"
+              - Sid: SecretsManager
+                Effect: Allow
+                Action:
+                  - secretsmanager:CreateSecret
+                  - secretsmanager:DeleteSecret
+                  - secretsmanager:DescribeSecret
+                  - secretsmanager:GetSecretValue
+                  - secretsmanager:PutSecretValue
+                  - secretsmanager:TagResource
+                  - secretsmanager:ListSecrets
+                Resource: "*"
+              - Sid: KMS
+                Effect: Allow
+                Action:
+                  - kms:DescribeKey
+                  - kms:ListKeys
+                  - kms:CreateGrant
+                Resource: "*"
+              - Sid: EventBridge
+                Effect: Allow
+                Action:
+                  - scheduler:CreateSchedule
+                  - scheduler:UpdateSchedule
+                  - scheduler:DeleteSchedule
+                  - scheduler:GetSchedule
+                  - scheduler:ListSchedules
+                  - events:PutRule
+                  - events:DeleteRule
+                  - events:DescribeRule
+                  - events:PutTargets
+                  - events:RemoveTargets
+                Resource: "*"
+              - Sid: SQS
+                Effect: Allow
+                Action:
+                  - sqs:CreateQueue
+                  - sqs:DeleteQueue
+                  - sqs:GetQueueAttributes
+                  - sqs:SetQueueAttributes
+                  - sqs:ListQueueTags
+                  - sqs:TagQueue
+                Resource: "*"
+      Tags:
+        - Key: ManagedBy
+          Value: cloudformation
+        - Key: Stack
+          Value: !Sub mtga-companion-iam-gha-roles
+        - Key: Purpose
+          Value: github-actions-oidc
+
+Outputs:
+  GhaInfraSyncDeployRoleArn:
+    Description: ARN of the gha-infra-sync-deploy OIDC role (used by deploy-sync-lambda.yml)
+    Value: !GetAtt GhaInfraSyncDeployRole.Arn
+    Export:
+      Name: !Sub mtga-companion-iam-gha-roles-SyncDeployRoleArn
+
+  GhaInfraCfnDeployRoleArn:
+    Description: ARN of the gha-infra-cfn-deploy OIDC role (used by deploy.yml)
+    Value: !GetAtt GhaInfraCfnDeployRole.Arn
+    Export:
+      Name: !Sub mtga-companion-iam-gha-roles-CfnDeployRoleArn
