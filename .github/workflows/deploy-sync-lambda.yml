@@ -28,7 +28,7 @@ jobs:
 
     env:
       AWS_REGION: us-east-1
-      LAMBDA_FUNCTION_NAME: mtga-sync
+      LAMBDA_FUNCTION_NAME: vault-mtg-sync
       GONOSUMDB: github.com/RdHamilton/MTGA-Companion
       GOPRIVATE: github.com/RdHamilton/MTGA-Companion
 
@@ -119,11 +119,11 @@ jobs:
               --runtime provided.al2023 \
               --architectures arm64 \
               --handler bootstrap \
-              --role arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/mtga-companion-production-sync-lambda-role \
+              --role arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/vault-mtg-production-sync-lambda-role \
               --zip-file fileb://sync-lambda.zip \
               --timeout 300 \
               --memory-size 256 \
-              --description "MTGA Companion daily card ratings sync" \
+              --description "VaultMTG daily card ratings sync" \
               --region ${{ env.AWS_REGION }}
 
             echo "Waiting for Lambda to become active..."
