@@ -16,6 +16,7 @@ on:
           - dns
           - sync-lambda
           - cloudwatch-alarms
+          - cdn
       dry_run:
         description: Dry run — validate and show changeset only, do not deploy
         required: false
@@ -34,9 +35,19 @@ jobs:
 
     env:
       AWS_REGION: us-east-1
-      STACK_NAME: mtga-companion-${{ inputs.stack }}
 
     steps:
+      - name: Resolve stack name
+        run: |
+          # Some stacks use a different name in CloudFormation than the pattern mtga-companion-<input>.
+          # Map known exceptions; everything else follows the default naming convention.
+          case "${{ inputs.stack }}" in
+            cdn) STACK_NAME="vaultmtg-app-cdn" ;;
+            *)   STACK_NAME="mtga-companion-${{ inputs.stack }}" ;;
+          esac
+          echo "STACK_NAME=$STACK_NAME" >> $GITHUB_ENV
+          echo "Resolved stack name: $STACK_NAME"
+
       - name: Checkout
         uses: actions/checkout@v4
 
