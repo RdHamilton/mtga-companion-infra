@@ -1,18 +1,18 @@
 [
-  {
-    "ParameterKey": "Environment",
-    "ParameterValue": "staging"
-  },
-  {
-    "ParameterKey": "AlarmEmail",
-    "ParameterValue": "ray.hamilton@stablekernel.com"
-  },
-  {
-    "ParameterKey": "DiskAlarmThreshold",
-    "ParameterValue": "70"
-  },
-  {
-    "ParameterKey": "RestartCountThreshold",
-    "ParameterValue": "3"
-  }
+  { "ParameterKey": "Environment",               "ParameterValue": "production" },
+  { "ParameterKey": "AlarmEmail",                "ParameterValue": "ray.hamilton@stablekernel.com" },
+  { "ParameterKey": "DiskAlarmThreshold",        "ParameterValue": "70" },
+  { "ParameterKey": "RestartCountThreshold",     "ParameterValue": "3" },
+  { "ParameterKey": "Bff5xxThreshold",           "ParameterValue": "5" },
+  { "ParameterKey": "Bff5xxEvaluationPeriods",   "ParameterValue": "2" },
+  { "ParameterKey": "EC2CpuThreshold",           "ParameterValue": "85" },
+  { "ParameterKey": "EC2CpuEvaluationPeriods",   "ParameterValue": "3" },
+  { "ParameterKey": "EC2MemThreshold",           "ParameterValue": "90" },
+  { "ParameterKey": "EC2MemEvaluationPeriods",   "ParameterValue": "5" },
+  { "ParameterKey": "RdsReadLatencyThreshold",   "ParameterValue": "0.05" },
+  { "ParameterKey": "RdsWriteLatencyThreshold",  "ParameterValue": "0.1" },
+  { "ParameterKey": "RdsLatencyEvaluationPeriods", "ParameterValue": "3" },
+  { "ParameterKey": "RdsCpuThreshold",           "ParameterValue": "80" },
+  { "ParameterKey": "RdsCpuEvaluationPeriods",   "ParameterValue": "3" },
+  { "ParameterKey": "RdsInstanceIdentifier",     "ParameterValue": "mtga-companion-postgres" }
 ]

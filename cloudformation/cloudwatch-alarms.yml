@@ -1,7 +1,8 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: |
-  VaultMTG - CloudWatch alarms for the staging environment.
-  Monitors disk utilisation and bff-staging service restart loops on the shared EC2 instance.
+  VaultMTG - CloudWatch alarms for the VaultMTG stack.
+  Monitors disk utilisation and bff-staging service restart loops on the shared EC2 instance
+  (staging alarms), and BFF HTTP 5xx rate, EC2 CPU/memory, and RDS latency/CPU for production.
   Deploy order: ec2-sg -> rds -> ec2 -> cloudwatch-alarms.
 
 Parameters:
@@ -16,6 +17,8 @@ Parameters:
     Description: E-mail address that receives alarm notifications.
     Default: ray.hamilton@stablekernel.com
 
+  # ----- Staging-only parameters -----
+
   DiskAlarmThreshold:
     Type: Number
     Description: Disk utilisation percentage that triggers the staging disk-fill alarm.
@@ -27,6 +30,93 @@ Parameters:
       Number of bff-staging service restarts within the evaluation period that
       triggers the restart-loop alarm.
     Default: 3
+
+  # ----- BFF HTTP 5xx alarm -----
+
+  Bff5xxThreshold:
+    Type: Number
+    Description: |
+      Number of HTTP 5xx responses per 5-minute period that triggers the BFF 5xx alarm.
+      Default 5 allows for occasional transient errors without false-positive pages.
+    Default: 5
+
+  Bff5xxEvaluationPeriods:
+    Type: Number
+    Description: |
+      Number of consecutive 5-minute periods with 5xx count above threshold before alarm fires.
+      Default 2 (10 minutes) reduces noise while keeping response time acceptable.
+    Default: 2
+
+  # ----- EC2 CPU alarm -----
+
+  EC2CpuThreshold:
+    Type: Number
+    Description: EC2 CPU utilisation percentage that triggers the alarm (default 85%).
+    Default: 85
+
+  EC2CpuEvaluationPeriods:
+    Type: Number
+    Description: |
+      Number of consecutive 5-minute periods above EC2CpuThreshold before alarm fires.
+      Default 3 (15 minutes) guards against transient spikes during deploys.
+    Default: 3
+
+  # ----- EC2 memory alarm (CWAgent) -----
+
+  EC2MemThreshold:
+    Type: Number
+    Description: EC2 memory utilisation percentage that triggers the alarm (default 90%).
+    Default: 90
+
+  EC2MemEvaluationPeriods:
+    Type: Number
+    Description: |
+      Number of consecutive 1-minute periods above EC2MemThreshold before alarm fires.
+      Memory pressure tends to be sustained rather than spiky, so default 5 (5 minutes)
+      is sufficient.
+    Default: 5
+
+  # ----- RDS latency alarms -----
+
+  RdsReadLatencyThreshold:
+    Type: Number
+    Description: |
+      RDS ReadLatency threshold in seconds (P99 proxy via Average).
+      Default 0.05 s (50 ms) — appropriate for t3.micro with pgvector workloads.
+    Default: 0.05
+
+  RdsWriteLatencyThreshold:
+    Type: Number
+    Description: |
+      RDS WriteLatency threshold in seconds (P99 proxy via Average).
+      Default 0.1 s (100 ms).
+    Default: 0.1
+
+  RdsLatencyEvaluationPeriods:
+    Type: Number
+    Description: |
+      Number of consecutive 5-minute periods above the latency threshold before alarm fires.
+    Default: 3
+
+  # ----- RDS CPU alarm -----
+
+  RdsCpuThreshold:
+    Type: Number
+    Description: RDS CPU utilisation percentage that triggers the alarm (default 80%).
+    Default: 80
+
+  RdsCpuEvaluationPeriods:
+    Type: Number
+    Description: |
+      Number of consecutive 5-minute periods above RdsCpuThreshold before alarm fires.
+    Default: 3
+
+  # ----- RDS identifier -----
+
+  RdsInstanceIdentifier:
+    Type: String
+    Description: RDS DB instance identifier (used to scope the latency and CPU alarms).
+    Default: mtga-companion-postgres
 
 Resources:
 
@@ -48,7 +138,7 @@ Resources:
           Value: !Ref Environment
 
   # ---------------------------------------------------------
-  # Disk utilisation alarm
+  # Disk utilisation alarm (staging)
   #
   # Fires when the root filesystem on the staging EC2 instance
   # exceeds DiskAlarmThreshold (default 70%).
@@ -56,11 +146,10 @@ Resources:
   # Metric source: Amazon CloudWatch Agent (CWAgent namespace).
   # The agent must be installed and configured on the instance
   # before this alarm will transition out of INSUFFICIENT_DATA.
-  # Install via the SSM document in scripts/install-cwagent.sh
-  # or by running the AWS-ConfigureAWSPackage SSM document.
+  # Install via scripts/install-cwagent.sh.
   #
   # Dimensions match the CWAgent config shipped with this repo
-  # (scripts/cwagent-config.json):
+  # (scripts/install-cwagent.sh):
   #   device  = nvme0n1p1  (root volume on Amazon Linux 2023 t3.small)
   #   fstype  = xfs
   #   path    = /
@@ -73,6 +162,7 @@ Resources:
         Staging EC2 root disk utilisation has exceeded ${DiskAlarmThreshold}%.
         Log in via SSM Session Manager and clean up: journalctl --vacuum-size=500M
         or remove old deploy artifacts from /tmp.
+        Runbook: vault_mtg_docs/engineering/runbooks/cloudwatch-alarms-runbook.md
       Namespace: CWAgent
       MetricName: disk_used_percent
       Dimensions:
@@ -103,7 +193,7 @@ Resources:
           Value: !Ref Environment
 
   # ---------------------------------------------------------
-  # bff-staging restart-loop alarm
+  # bff-staging restart-loop alarm (staging)
   #
   # Fires when the custom metric BffStagingRestartCount exceeds
   # RestartCountThreshold (default 3) within a 5-minute window.
@@ -127,6 +217,7 @@ Resources:
         in a 5-minute window. Check systemd journal:
           journalctl -u bff-staging -n 100 --no-pager
         and inspect the binary at /usr/local/bin/mtga-bff-staging.
+        Runbook: vault_mtg_docs/engineering/runbooks/cloudwatch-alarms-runbook.md
       Namespace: MTGA/Staging
       MetricName: BffStagingRestartCount
       Dimensions:
@@ -139,6 +230,268 @@ Resources:
       ComparisonOperator: GreaterThanThreshold
       # OK when bff-staging is not running (pre-deploy). Only alarm on actual restarts.
       TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlarmTopic
+      OKActions:
+        - !Ref AlarmTopic
+      Tags:
+        - Key: Project
+          Value: vault-mtg
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ---------------------------------------------------------
+  # BFF HTTP 5xx rate alarm (AC1)
+  #
+  # Fires when the count of HTTP 5xx responses served by nginx
+  # in front of the BFF exceeds Bff5xxThreshold within a
+  # 5-minute window for Bff5xxEvaluationPeriods consecutive periods.
+  #
+  # Metric source: a systemd timer on the EC2 instance that
+  # tails the nginx access log, counts 5xx lines in the last
+  # 60 s, and publishes the count via cloudwatch put-metric-data.
+  # Install via scripts/install-bff-5xx-metric.sh.
+  #
+  # Namespace : MTGA/BFF
+  # MetricName: Http5xxCount
+  # Dimension : Environment=<environment>
+  #
+  # TreatMissingData=notBreaching: at very low traffic the metric
+  # may not be emitted in every period. No 5xx data == no errors.
+  # ---------------------------------------------------------
+  Bff5xxAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "vault-mtg-${Environment}-bff-5xx-rate"
+      AlarmDescription: !Sub |
+        BFF is returning elevated HTTP 5xx responses (>${Bff5xxThreshold} per 5 min
+        for ${Bff5xxEvaluationPeriods} consecutive windows).
+        1. Check nginx error log: sudo journalctl -u nginx -n 200 --no-pager
+        2. Check BFF service log: sudo journalctl -u mtga-companion -n 200 --no-pager
+        3. Verify database connectivity: check RDS latency alarm state.
+        Runbook: vault_mtg_docs/engineering/runbooks/cloudwatch-alarms-runbook.md
+      Namespace: MTGA/BFF
+      MetricName: Http5xxCount
+      Dimensions:
+        - Name: Environment
+          Value: !Ref Environment
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: !Ref Bff5xxEvaluationPeriods
+      Threshold: !Ref Bff5xxThreshold
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlarmTopic
+      OKActions:
+        - !Ref AlarmTopic
+      Tags:
+        - Key: Project
+          Value: vault-mtg
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ---------------------------------------------------------
+  # EC2 CPU utilisation alarm (AC4)
+  #
+  # Fires when EC2 CPUUtilization exceeds EC2CpuThreshold (default 85%)
+  # for EC2CpuEvaluationPeriods consecutive 5-minute periods.
+  #
+  # Metric source: AWS/EC2 namespace (built-in; no agent required).
+  # The InstanceId dimension is resolved from the ec2 stack export.
+  # ---------------------------------------------------------
+  EC2CpuAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "vault-mtg-${Environment}-ec2-cpu-high"
+      AlarmDescription: !Sub |
+        EC2 instance CPU utilisation has been above ${EC2CpuThreshold}% for
+        ${EC2CpuEvaluationPeriods} consecutive 5-minute periods.
+        1. Check which process is consuming CPU:
+             ssh (or SSM) → top -b -n1 -c | head -20
+        2. Check BFF goroutine/request logs for runaway queries or tight loops:
+             sudo journalctl -u mtga-companion -n 500 --no-pager
+        3. If the instance is undersized, escalate to Ray Hamilton for a resize.
+        Runbook: vault_mtg_docs/engineering/runbooks/cloudwatch-alarms-runbook.md
+      Namespace: AWS/EC2
+      MetricName: CPUUtilization
+      Dimensions:
+        - Name: InstanceId
+          Value: !ImportValue mtga-companion-ec2-InstanceId
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: !Ref EC2CpuEvaluationPeriods
+      Threshold: !Ref EC2CpuThreshold
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: breaching
+      AlarmActions:
+        - !Ref AlarmTopic
+      OKActions:
+        - !Ref AlarmTopic
+      Tags:
+        - Key: Project
+          Value: vault-mtg
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ---------------------------------------------------------
+  # EC2 memory utilisation alarm (AC4)
+  #
+  # Fires when EC2 mem_used_percent exceeds EC2MemThreshold (default 90%)
+  # for EC2MemEvaluationPeriods consecutive 1-minute periods.
+  #
+  # Metric source: Amazon CloudWatch Agent (CWAgent namespace).
+  # Requires install-cwagent.sh to have been run on the instance.
+  # The agent config ships mem_used_percent (see install-cwagent.sh).
+  # ---------------------------------------------------------
+  EC2MemAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "vault-mtg-${Environment}-ec2-memory-high"
+      AlarmDescription: !Sub |
+        EC2 instance memory utilisation has been above ${EC2MemThreshold}% for
+        ${EC2MemEvaluationPeriods} consecutive minutes.
+        1. Identify which process is consuming memory:
+             ssh (or SSM) → ps aux --sort=-%mem | head -15
+        2. Check for BFF memory leaks:
+             sudo journalctl -u mtga-companion -n 500 --no-pager | grep -i "OOM\|out of memory"
+        3. If OOM-killed, the kernel OOM reaper entry will appear in dmesg:
+             sudo dmesg | tail -50
+        Runbook: vault_mtg_docs/engineering/runbooks/cloudwatch-alarms-runbook.md
+      Namespace: CWAgent
+      MetricName: mem_used_percent
+      Dimensions:
+        - Name: InstanceId
+          Value: !ImportValue mtga-companion-ec2-InstanceId
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: !Ref EC2MemEvaluationPeriods
+      Threshold: !Ref EC2MemThreshold
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      # INSUFFICIENT_DATA while CWAgent is not yet installed -- treat as alarm.
+      TreatMissingData: breaching
+      AlarmActions:
+        - !Ref AlarmTopic
+      OKActions:
+        - !Ref AlarmTopic
+      Tags:
+        - Key: Project
+          Value: vault-mtg
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ---------------------------------------------------------
+  # RDS read latency alarm (AC3)
+  #
+  # Fires when the average RDS ReadLatency exceeds
+  # RdsReadLatencyThreshold (default 50 ms) for
+  # RdsLatencyEvaluationPeriods consecutive 5-minute periods.
+  #
+  # Metric source: AWS/RDS namespace (built-in).
+  # Note: CloudWatch exposes Average latency, not true P99.
+  # The Average metric on a t3.micro with low-cardinality queries
+  # is a reliable proxy; a separate X-Ray ticket can add true P99.
+  # ---------------------------------------------------------
+  RdsReadLatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "vault-mtg-${Environment}-rds-read-latency-high"
+      AlarmDescription: !Sub |
+        RDS PostgreSQL read latency (average) has exceeded ${RdsReadLatencyThreshold}s
+        for ${RdsLatencyEvaluationPeriods} consecutive 5-minute periods.
+        1. Check slow query log in RDS Performance Insights or pg_stat_statements.
+        2. Look for missing indexes: run EXPLAIN ANALYZE on suspect queries.
+        3. If CPU is also elevated, check RDS CPU alarm state.
+        4. Consider VACUUM ANALYZE if autovacuum has fallen behind.
+        Runbook: vault_mtg_docs/engineering/runbooks/cloudwatch-alarms-runbook.md
+      Namespace: AWS/RDS
+      MetricName: ReadLatency
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref RdsInstanceIdentifier
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: !Ref RdsLatencyEvaluationPeriods
+      Threshold: !Ref RdsReadLatencyThreshold
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlarmTopic
+      OKActions:
+        - !Ref AlarmTopic
+      Tags:
+        - Key: Project
+          Value: vault-mtg
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ---------------------------------------------------------
+  # RDS write latency alarm (AC3)
+  #
+  # Fires when the average RDS WriteLatency exceeds
+  # RdsWriteLatencyThreshold (default 100 ms) for
+  # RdsLatencyEvaluationPeriods consecutive 5-minute periods.
+  # ---------------------------------------------------------
+  RdsWriteLatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "vault-mtg-${Environment}-rds-write-latency-high"
+      AlarmDescription: !Sub |
+        RDS PostgreSQL write latency (average) has exceeded ${RdsWriteLatencyThreshold}s
+        for ${RdsLatencyEvaluationPeriods} consecutive 5-minute periods.
+        1. Look for hot rows or lock contention: SELECT * FROM pg_locks JOIN pg_stat_activity.
+        2. Check for bloat on high-churn tables; run VACUUM ANALYZE.
+        3. Review recent schema migrations that may have introduced index overhead.
+        Runbook: vault_mtg_docs/engineering/runbooks/cloudwatch-alarms-runbook.md
+      Namespace: AWS/RDS
+      MetricName: WriteLatency
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref RdsInstanceIdentifier
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: !Ref RdsLatencyEvaluationPeriods
+      Threshold: !Ref RdsWriteLatencyThreshold
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlarmTopic
+      OKActions:
+        - !Ref AlarmTopic
+      Tags:
+        - Key: Project
+          Value: vault-mtg
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ---------------------------------------------------------
+  # RDS CPU utilisation alarm (AC4)
+  #
+  # Fires when RDS CPUUtilization exceeds RdsCpuThreshold (default 80%)
+  # for RdsCpuEvaluationPeriods consecutive 5-minute periods.
+  # ---------------------------------------------------------
+  RdsCpuAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "vault-mtg-${Environment}-rds-cpu-high"
+      AlarmDescription: !Sub |
+        RDS PostgreSQL CPU utilisation has been above ${RdsCpuThreshold}% for
+        ${RdsCpuEvaluationPeriods} consecutive 5-minute periods.
+        1. Identify long-running queries via Performance Insights or pg_stat_activity.
+        2. Check for sequential scans on large tables (missing indexes).
+        3. If the instance is undersized, escalate to Ray Hamilton for a resize.
+        Runbook: vault_mtg_docs/engineering/runbooks/cloudwatch-alarms-runbook.md
+      Namespace: AWS/RDS
+      MetricName: CPUUtilization
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref RdsInstanceIdentifier
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: !Ref RdsCpuEvaluationPeriods
+      Threshold: !Ref RdsCpuThreshold
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: breaching
       AlarmActions:
         - !Ref AlarmTopic
       OKActions:
@@ -167,3 +520,39 @@ Outputs:
     Value: !GetAtt BffStagingRestartAlarm.Arn
     Export:
       Name: !Sub "vault-mtg-${Environment}-BffStagingRestartAlarmArn"
+
+  Bff5xxAlarmArn:
+    Description: ARN of the BFF HTTP 5xx rate CloudWatch alarm.
+    Value: !GetAtt Bff5xxAlarm.Arn
+    Export:
+      Name: !Sub "vault-mtg-${Environment}-Bff5xxAlarmArn"
+
+  EC2CpuAlarmArn:
+    Description: ARN of the EC2 CPU utilisation CloudWatch alarm.
+    Value: !GetAtt EC2CpuAlarm.Arn
+    Export:
+      Name: !Sub "vault-mtg-${Environment}-EC2CpuAlarmArn"
+
+  EC2MemAlarmArn:
+    Description: ARN of the EC2 memory utilisation CloudWatch alarm.
+    Value: !GetAtt EC2MemAlarm.Arn
+    Export:
+      Name: !Sub "vault-mtg-${Environment}-EC2MemAlarmArn"
+
+  RdsReadLatencyAlarmArn:
+    Description: ARN of the RDS read latency CloudWatch alarm.
+    Value: !GetAtt RdsReadLatencyAlarm.Arn
+    Export:
+      Name: !Sub "vault-mtg-${Environment}-RdsReadLatencyAlarmArn"
+
+  RdsWriteLatencyAlarmArn:
+    Description: ARN of the RDS write latency CloudWatch alarm.
+    Value: !GetAtt RdsWriteLatencyAlarm.Arn
+    Export:
+      Name: !Sub "vault-mtg-${Environment}-RdsWriteLatencyAlarmArn"
+
+  RdsCpuAlarmArn:
+    Description: ARN of the RDS CPU utilisation CloudWatch alarm.
+    Value: !GetAtt RdsCpuAlarm.Arn
+    Export:
+      Name: !Sub "vault-mtg-${Environment}-RdsCpuAlarmArn"
