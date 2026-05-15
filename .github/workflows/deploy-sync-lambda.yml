@@ -5,6 +5,11 @@ on:
     types: [sync-lambda-deploy]
   workflow_dispatch:
     inputs:
+      app_repo_ref:
+        description: "App repo ref to build from (tag, branch, or SHA). Default: v0.3.0 (pinned stable release). Advance this to the new release tag before deploying."
+        required: false
+        type: string
+        default: "v0.3.0"
       dry_run:
         description: Dry run - build only, do not deploy to Lambda
         required: false
@@ -17,7 +22,7 @@ concurrency:
 
 jobs:
   deploy:
-    name: Deploy sync Lambda (${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && 'dry-run' || 'deploy' }})
+    name: Deploy sync Lambda @ ${{ github.event_name == 'workflow_dispatch' && inputs.app_repo_ref || 'v0.3.0' }} (${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && 'dry-run' || 'deploy' }})
     runs-on: ubuntu-latest
     environment: production
 
@@ -33,6 +38,25 @@ jobs:
         with:
           repository: RdHamilton/MTGA-Companion
           token: ${{ secrets.GH_PAT }}
+          # Pin to a known-good tagged release so Lambda builds are reproducible
+          # and a directory-layout change in the app repo cannot silently break
+          # this workflow.  For repository_dispatch events (automated release
+          # trigger), this defaults to v0.3.0.  Advance this default (and the
+          # workflow_dispatch default above) to the new release tag each time a
+          # release is cut.  Never leave this pointing at a mutable ref (branch
+          # or SHA-less tag alias) in production.
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.app_repo_ref || 'v0.3.0' }}
+
+      - name: Verify sync Lambda source exists
+        # Fail fast — do not silently build a stale or empty binary if the
+        # expected source directory has moved in the app repo.
+        run: |
+          if [ ! -d "services/sync/cmd/lambda" ]; then
+            echo "ERROR: services/sync/cmd/lambda not found in app repo at ref '${{ github.event_name == 'workflow_dispatch' && inputs.app_repo_ref || 'v0.3.0' }}'."
+            echo "The sync Lambda source has moved or the ref is invalid. Update the pinned ref or the build path."
+            exit 1
+          fi
+          echo "Verified: services/sync/cmd/lambda exists."
 
       - name: Set up Go
         uses: actions/setup-go@v5
