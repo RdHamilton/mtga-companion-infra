@@ -132,13 +132,33 @@ jobs:
               --region ${{ env.AWS_REGION }}
           fi
 
+      - name: Enforce Lambda configuration (defense-in-depth)
+        # Re-apply Timeout and MemorySize on every deploy so a CloudFormation
+        # drift event or out-of-band change cannot silently revert these values.
+        # The 3-second AWS default timeout causes every sync run to fail (runs
+        # take >10s); this step ensures the correct values are always in place.
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.dry_run) }}
+        run: |
+          echo "Applying Timeout=300 and MemorySize=256 to ${{ env.LAMBDA_FUNCTION_NAME }}..."
+          aws lambda update-function-configuration \
+            --function-name ${{ env.LAMBDA_FUNCTION_NAME }} \
+            --timeout 300 \
+            --memory-size 256 \
+            --region ${{ env.AWS_REGION }}
+
+          echo "Waiting for configuration update to complete..."
+          aws lambda wait function-updated \
+            --function-name ${{ env.LAMBDA_FUNCTION_NAME }} \
+            --region ${{ env.AWS_REGION }}
+
           aws lambda get-function-configuration \
             --function-name ${{ env.LAMBDA_FUNCTION_NAME }} \
-            --query '{Runtime:Runtime,Arch:Architectures,State:State,LastModified:LastModified}' \
+            --query '{Runtime:Runtime,Arch:Architectures,Timeout:Timeout,MemorySize:MemorySize,State:State,LastModified:LastModified}' \
             --output table
 
       - name: Dry run summary
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
         run: |
           echo "DRY RUN - would deploy sync Lambda binary to ${{ env.LAMBDA_FUNCTION_NAME }}"
+          echo "DRY RUN - would enforce Timeout=300 and MemorySize=256 on ${{ env.LAMBDA_FUNCTION_NAME }}"
           ls -lh services/sync/sync-lambda.zip
