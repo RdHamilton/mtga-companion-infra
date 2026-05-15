@@ -132,12 +132,15 @@ jobs:
               --region ${{ env.AWS_REGION }}
           else
             echo "Function does not exist — creating..."
+            ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+            ROLE_ARN="arn:aws:iam::${ACCOUNT_ID}:role/mtga-companion-production-sync-lambda-role"
+            echo "Resolved execution role ARN: ${ROLE_ARN}"
             aws lambda create-function \
               --function-name ${{ env.LAMBDA_FUNCTION_NAME }} \
               --runtime provided.al2023 \
               --architectures arm64 \
               --handler bootstrap \
-              --role arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/vault-mtg-production-sync-lambda-role \
+              --role "${ROLE_ARN}" \
               --zip-file fileb://sync-lambda.zip \
               --timeout 300 \
               --memory-size 256 \
