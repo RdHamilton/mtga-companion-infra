@@ -23,6 +23,14 @@ Parameters:
     Type: AWS::EC2::Subnet::Id
     Default: subnet-0600373b7aab41525
     Description: VPC subnet in AZ-b for Lambda
+  LambdaTimeout:
+    Type: Number
+    Default: 300
+    Description: Lambda function timeout in seconds (sync runs exceed the 3s AWS default)
+  LambdaMemorySize:
+    Type: Number
+    Default: 256
+    Description: Lambda function memory allocation in MB
   ScheduleCron:
     Type: String
     Default: 'cron(0 2 * * ? *)'
@@ -150,6 +158,8 @@ Resources:
                           'SecurityGroupIds': props['SecurityGroupIds'],
                       },
                       Role=props['ExecutionRoleArn'],
+                      Timeout=int(props['Timeout']),
+                      MemorySize=int(props['MemorySize']),
                   )
                   waiter.wait(FunctionName=props['FunctionName'])
                   send(event, context, 'SUCCESS')
@@ -209,6 +219,8 @@ Resources:
       SecurityGroupIds:
         - !Ref LambdaSecurityGroup
       ExecutionRoleArn: !GetAtt LambdaExecutionRole.Arn
+      Timeout: !Ref LambdaTimeout
+      MemorySize: !Ref LambdaMemorySize
 
   # EventBridge Scheduler execution role
   SchedulerExecutionRole:
