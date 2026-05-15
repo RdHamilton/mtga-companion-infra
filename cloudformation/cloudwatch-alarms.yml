@@ -1,6 +1,6 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: |
-  MTGA Companion - CloudWatch alarms for the staging environment.
+  VaultMTG - CloudWatch alarms for the staging environment.
   Monitors disk utilisation and bff-staging service restart loops on the shared EC2 instance.
   Deploy order: ec2-sg -> rds -> ec2 -> cloudwatch-alarms.
 
@@ -36,14 +36,14 @@ Resources:
   AlarmTopic:
     Type: AWS::SNS::Topic
     Properties:
-      TopicName: !Sub "mtga-companion-alarms-${Environment}"
-      DisplayName: MTGA Companion Alarms
+      TopicName: !Sub "vault-mtg-alarms-${Environment}"
+      DisplayName: VaultMTG Alarms
       Subscription:
         - Protocol: email
           Endpoint: !Ref AlarmEmail
       Tags:
         - Key: Project
-          Value: mtga-companion
+          Value: vault-mtg
         - Key: Environment
           Value: !Ref Environment
 
@@ -68,7 +68,7 @@ Resources:
   DiskFillAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmName: !Sub "mtga-companion-${Environment}-disk-fill"
+      AlarmName: !Sub "vault-mtg-${Environment}-disk-fill"
       AlarmDescription: !Sub |
         Staging EC2 root disk utilisation has exceeded ${DiskAlarmThreshold}%.
         Log in via SSM Session Manager and clean up: journalctl --vacuum-size=500M
@@ -98,7 +98,7 @@ Resources:
         - !Ref AlarmTopic
       Tags:
         - Key: Project
-          Value: mtga-companion
+          Value: vault-mtg
         - Key: Environment
           Value: !Ref Environment
 
@@ -121,7 +121,7 @@ Resources:
   BffStagingRestartAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmName: !Sub "mtga-companion-${Environment}-bff-staging-restart-loop"
+      AlarmName: !Sub "vault-mtg-${Environment}-bff-staging-restart-loop"
       AlarmDescription: !Sub |
         bff-staging.service has restarted more than ${RestartCountThreshold} times
         in a 5-minute window. Check systemd journal:
@@ -145,7 +145,7 @@ Resources:
         - !Ref AlarmTopic
       Tags:
         - Key: Project
-          Value: mtga-companion
+          Value: vault-mtg
         - Key: Environment
           Value: !Ref Environment
 
@@ -154,16 +154,16 @@ Outputs:
     Description: ARN of the SNS alarm notification topic.
     Value: !Ref AlarmTopic
     Export:
-      Name: !Sub "mtga-companion-${Environment}-AlarmTopicArn"
+      Name: !Sub "vault-mtg-${Environment}-AlarmTopicArn"
 
   DiskFillAlarmArn:
     Description: ARN of the staging disk-fill CloudWatch alarm.
     Value: !GetAtt DiskFillAlarm.Arn
     Export:
-      Name: !Sub "mtga-companion-${Environment}-DiskFillAlarmArn"
+      Name: !Sub "vault-mtg-${Environment}-DiskFillAlarmArn"
 
   BffStagingRestartAlarmArn:
     Description: ARN of the bff-staging restart-loop CloudWatch alarm.
     Value: !GetAtt BffStagingRestartAlarm.Arn
     Export:
-      Name: !Sub "mtga-companion-${Environment}-BffStagingRestartAlarmArn"
+      Name: !Sub "vault-mtg-${Environment}-BffStagingRestartAlarmArn"
