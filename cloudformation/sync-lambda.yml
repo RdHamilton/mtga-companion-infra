@@ -194,6 +194,7 @@ Resources:
     Type: AWS::IAM::Role
     Properties:
       Description: Role for the VPC config custom resource Lambda
+      RoleName: !Sub "vault-mtg-${Environment}-vpc-config-lambda-role"
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
