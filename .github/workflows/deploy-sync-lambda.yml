@@ -86,6 +86,22 @@ jobs:
           go build -tags lambda.norpc -trimpath -o bootstrap ./cmd/lambda/
           echo "Built bootstrap binary: $(ls -lh bootstrap)"
 
+      - name: Validate binary architecture
+        # Guard against a silent cross-compilation failure shipping an x86-64
+        # binary to an arm64 Lambda (exit status 126 — "cannot execute binary
+        # file").  The `file` command reports the ELF machine type; fail the
+        # workflow if it is not aarch64 so the bad binary never reaches AWS.
+        working-directory: services/sync
+        run: |
+          BINARY_INFO="$(file bootstrap)"
+          echo "Binary info: ${BINARY_INFO}"
+          if ! echo "${BINARY_INFO}" | grep -q "aarch64"; then
+            echo "ERROR: bootstrap binary is not aarch64. Got: ${BINARY_INFO}"
+            echo "Expected GOARCH=arm64 (aarch64) — cross-compilation may have silently fallen back to the host architecture."
+            exit 1
+          fi
+          echo "Architecture validated: bootstrap is aarch64 (arm64) as required."
+
       - name: Package Lambda zip
         working-directory: services/sync
         run: |
