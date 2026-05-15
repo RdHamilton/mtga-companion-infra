@@ -9,7 +9,7 @@ Parameters:
     Description: Deployment environment
   LambdaFunctionName:
     Type: String
-    Default: mtga-sync
+    Default: vault-mtg-sync
     Description: Name of the existing sync Lambda function
   RdsStackName:
     Type: String
@@ -66,7 +66,7 @@ Resources:
   LambdaSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: !Sub "mtga-companion-${Environment} sync Lambda outbound access"
+      GroupDescription: !Sub "vault-mtg-${Environment} sync Lambda outbound access"
       VpcId: vpc-01d097c495e941d32
       SecurityGroupEgress:
         - IpProtocol: tcp
@@ -86,7 +86,7 @@ Resources:
         - Key: Environment
           Value: !Ref Environment
         - Key: Name
-          Value: !Sub "mtga-companion-${Environment}-sync-lambda-sg"
+          Value: !Sub "vault-mtg-${Environment}-sync-lambda-sg"
 
   # Inject ingress rule into RDS security group to allow Lambda access
   RDSIngressFromLambda:
@@ -105,7 +105,7 @@ Resources:
     Type: AWS::IAM::Role
     DependsOn: SyncDLQ
     Properties:
-      RoleName: !Sub "mtga-companion-${Environment}-sync-lambda-role"
+      RoleName: !Sub "vault-mtg-${Environment}-sync-lambda-role"
       Description: Execution role for sync Lambda with VPC and RDS IAM auth access
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
@@ -251,7 +251,7 @@ Resources:
     Type: AWS::IAM::Role
     DependsOn: SyncDLQ
     Properties:
-      RoleName: !Sub "mtga-companion-${Environment}-sync-scheduler-role"
+      RoleName: !Sub "vault-mtg-${Environment}-sync-scheduler-role"
       Description: Role for EventBridge Scheduler to invoke sync Lambda and write to DLQ
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
@@ -286,7 +286,7 @@ Resources:
     Type: AWS::Scheduler::Schedule
     DependsOn: SyncDLQ
     Properties:
-      Name: !Sub "mtga-companion-${Environment}-sync-daily"
+      Name: !Sub "vault-mtg-${Environment}-sync-daily"
       Description: Daily sync Lambda trigger at 02:00 UTC
       ScheduleExpression: !Ref ScheduleCron
       ScheduleExpressionTimezone: UTC
@@ -307,7 +307,7 @@ Resources:
     Type: AWS::Scheduler::Schedule
     DependsOn: SyncDLQ
     Properties:
-      Name: !Sub "mtga-companion-${Environment}-sync-cards-manual"
+      Name: !Sub "vault-mtg-${Environment}-sync-cards-manual"
       Description: On-demand schedule for manual card metadata sync - enable to trigger
       ScheduleExpression: 'rate(1 day)'
       ScheduleExpressionTimezone: UTC
@@ -345,7 +345,7 @@ Resources:
   SyncDLQ:
     Type: AWS::SQS::Queue
     Properties:
-      QueueName: !Sub "mtga-companion-${Environment}-sync-dlq"
+      QueueName: !Sub "vault-mtg-${Environment}-sync-dlq"
       MessageRetentionPeriod: 1209600
       Tags:
         - Key: Project
@@ -396,7 +396,7 @@ Resources:
     Type: AWS::CloudWatch::Alarm
     DependsOn: SyncDLQ
     Properties:
-      AlarmName: !Sub "mtga-companion-${Environment}-sync-lambda-errors"
+      AlarmName: !Sub "vault-mtg-${Environment}-sync-lambda-errors"
       AlarmDescription: !Sub |
         Sync Lambda (${LambdaFunctionName}) reported invocation errors.
         Check CloudWatch Logs for the Lambda function and inspect the DLQ:
@@ -442,7 +442,7 @@ Resources:
     Type: AWS::CloudWatch::Alarm
     DependsOn: SyncDLQ
     Properties:
-      AlarmName: !Sub "mtga-companion-${Environment}-sync-dlq-depth"
+      AlarmName: !Sub "vault-mtg-${Environment}-sync-dlq-depth"
       AlarmDescription: !Sub |
         Messages have landed in the sync DLQ (${SyncDLQ}).
         This means the sync Lambda failed and exhausted all EventBridge retries.
