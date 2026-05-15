@@ -25,6 +25,9 @@ jobs:
     name: Deploy sync Lambda @ ${{ github.event_name == 'workflow_dispatch' && inputs.app_repo_ref || 'v0.3.0' }} (${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && 'dry-run' || 'deploy' }})
     runs-on: ubuntu-latest
     environment: production
+    permissions:
+      id-token: write
+      contents: read
 
     env:
       AWS_REGION: us-east-1
@@ -92,8 +95,7 @@ jobs:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v6
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Deploy to Lambda
