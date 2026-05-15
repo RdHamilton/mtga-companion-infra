@@ -34,7 +34,7 @@ jobs:
 
     steps:
       - name: Checkout app repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: RdHamilton/MTGA-Companion
           token: ${{ secrets.GH_PAT }}
@@ -59,7 +59,7 @@ jobs:
           echo "Verified: services/sync/cmd/lambda exists."
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version-file: services/sync/go.mod
           cache-dependency-path: services/sync/go.sum
@@ -90,7 +90,7 @@ jobs:
           echo "Zip: $(ls -lh sync-lambda.zip)"
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@v6
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
