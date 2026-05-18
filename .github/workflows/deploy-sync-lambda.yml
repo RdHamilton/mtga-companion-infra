@@ -32,14 +32,14 @@ jobs:
     env:
       AWS_REGION: us-east-1
       LAMBDA_FUNCTION_NAME: vault-mtg-sync
-      GONOSUMDB: github.com/RdHamilton/MTGA-Companion
-      GOPRIVATE: github.com/RdHamilton/MTGA-Companion
+      GONOSUMDB: github.com/RdHamilton/vault-mtg
+      GOPRIVATE: github.com/RdHamilton/vault-mtg
 
     steps:
       - name: Checkout app repo
         uses: actions/checkout@v6
         with:
-          repository: RdHamilton/MTGA-Companion
+          repository: RdHamilton/vault-mtg
           token: ${{ secrets.GH_PAT }}
           # Pin to a known-good tagged release so Lambda builds are reproducible
           # and a directory-layout change in the app repo cannot silently break
