@@ -2,7 +2,8 @@ AWSTemplateFormatVersion: "2010-09-09"
 Description: |
   VaultMTG - CloudWatch alarms for the VaultMTG stack.
   Monitors disk utilisation and bff-staging service restart loops on the shared EC2 instance
-  (staging alarms), and BFF HTTP 5xx rate, EC2 CPU/memory, and RDS latency/CPU for production.
+  (staging alarms), BFF HTTP 5xx rate, BFF-down synthetic health check (Route 53), EC2
+  CPU/memory, RDS latency/CPU, and TLS certificate expiry for production.
   Deploy order: ec2-sg -> rds -> ec2 -> cloudwatch-alarms.
 
 Parameters:
@@ -117,6 +118,40 @@ Parameters:
     Type: String
     Description: RDS DB instance identifier (used to scope the latency and CPU alarms).
     Default: mtga-companion-postgres
+
+  # ----- BFF-down synthetic health check -----
+
+  BffHealthCheckHost:
+    Type: String
+    Description: |
+      Fully-qualified hostname for the BFF Route 53 health check (no protocol prefix).
+      The health checker sends HTTPS GET /healthz to this host on port 443.
+    Default: api.vaultmtg.app
+
+  BffHealthCheckFailureThreshold:
+    Type: Number
+    Description: |
+      Number of consecutive Route 53 health check failures before the alarm fires.
+      Default 3 (~90 s at 30 s interval) balances sensitivity with false-positive avoidance.
+    Default: 3
+
+  # ----- TLS certificate expiry alarm -----
+
+  AcmCertificateArn:
+    Type: String
+    Description: |
+      ARN of the ACM certificate to monitor for impending expiry.
+      The alarm fires when DaysToExpiry drops below TlsExpiryThresholdDays.
+    Default: "arn:aws:acm:us-east-1:901347789205:certificate/a59cef77-0b50-40b7-b6b9-1183e3f3b61f"
+    AllowedPattern: "arn:aws:acm:[a-z0-9-]+:[0-9]{12}:certificate/[a-f0-9-]+"
+    ConstraintDescription: Must be a valid ACM certificate ARN.
+
+  TlsExpiryThresholdDays:
+    Type: Number
+    Description: |
+      Number of days before TLS certificate expiry at which the alarm fires.
+      Default 30 gives one full renewal window to act before the cert expires.
+    Default: 30
 
 Resources:
 
@@ -502,6 +537,136 @@ Resources:
         - Key: Environment
           Value: !Ref Environment
 
+  # ---------------------------------------------------------
+  # BFF-down synthetic health check (R-04 AC2)
+  #
+  # Route 53 HTTPS health check against api.vaultmtg.app/healthz
+  # on port 443. The checker polls every 30 seconds from multiple
+  # AWS health-check regions. When BffHealthCheckFailureThreshold
+  # (default 3) consecutive checks fail the HealthCheckStatus metric
+  # drops to 0 and BffDownAlarm fires.
+  #
+  # Important: Route 53 health check CloudWatch metrics are only
+  # published in us-east-1 regardless of origin region. The stack
+  # must be deployed in us-east-1 (which it is -- see deploy.yml).
+  #
+  # TreatMissingData=breaching: if CloudWatch stops receiving the
+  # metric the BFF is unreachable or the health checker itself is
+  # broken -- both warrant an alert.
+  # ---------------------------------------------------------
+  BffHealthCheck:
+    Type: AWS::Route53::HealthCheck
+    Properties:
+      HealthCheckConfig:
+        Type: HTTPS
+        FullyQualifiedDomainName: !Ref BffHealthCheckHost
+        ResourcePath: /healthz
+        Port: 443
+        RequestInterval: 30
+        FailureThreshold: !Ref BffHealthCheckFailureThreshold
+        EnableSNI: true
+      HealthCheckTags:
+        - Key: Name
+          Value: !Sub "vault-mtg-${Environment}-bff-healthz"
+        - Key: Project
+          Value: vault-mtg
+        - Key: Environment
+          Value: !Ref Environment
+
+  BffDownAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "vault-mtg-${Environment}-bff-down"
+      AlarmDescription: !Sub |
+        BFF health check is failing: api.vaultmtg.app/healthz did not return 200
+        for ${BffHealthCheckFailureThreshold} consecutive Route 53 checks (~90 s).
+        1. Verify the instance is running:
+             aws ec2 describe-instance-status (look for impaired or stopped)
+        2. Check the BFF systemd service:
+             SSM Session Manager -> sudo systemctl status mtga-companion
+        3. Check nginx is forwarding correctly:
+             sudo systemctl status nginx
+             sudo journalctl -u nginx -n 100 --no-pager
+        4. If a deploy just ran, check the deploy workflow run for errors.
+        Runbook: vault_mtg_docs/engineering/runbooks/cloudwatch-alarms-runbook.md
+      Namespace: AWS/Route53
+      MetricName: HealthCheckStatus
+      Dimensions:
+        - Name: HealthCheckId
+          Value: !Ref BffHealthCheck
+      Statistic: Minimum
+      Period: 60
+      EvaluationPeriods: !Ref BffHealthCheckFailureThreshold
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+      AlarmActions:
+        - !Ref AlarmTopic
+      OKActions:
+        - !Ref AlarmTopic
+      Tags:
+        - Key: Project
+          Value: vault-mtg
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ---------------------------------------------------------
+  # TLS certificate expiry alarm (R-04 AC3)
+  #
+  # ACM publishes DaysToExpiry for every managed certificate.
+  # This alarm fires when the metric drops below
+  # TlsExpiryThresholdDays (default 30), giving one full
+  # renewal window before the cert actually expires.
+  #
+  # Metric source: AWS/CertificateManager namespace (built-in).
+  # Dimension: CertificateArn=<AcmCertificateArn parameter>.
+  #
+  # ACM auto-renews certificates at 60 days remaining, so this
+  # alarm should only fire if auto-renewal fails or the cert is
+  # not managed by ACM (e.g. a manually uploaded certbot cert).
+  # It therefore acts as the last-resort safety net.
+  #
+  # TreatMissingData=breaching: DaysToExpiry is emitted daily.
+  # Missing data means ACM has stopped reporting on the cert,
+  # which is itself a signal that something is wrong.
+  # ---------------------------------------------------------
+  TlsCertExpiryAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "vault-mtg-${Environment}-tls-cert-expiry"
+      AlarmDescription: !Sub |
+        TLS certificate expiry warning: fewer than ${TlsExpiryThresholdDays} days remain
+        before the certificate expires.
+        1. Open ACM in the AWS console and check the certificate status.
+        2. If auto-renewal is pending, trigger manual renewal:
+             aws acm renew-certificate --certificate-arn <ARN>
+        3. If the certificate cannot be renewed via ACM (e.g. certbot), run:
+             sudo certbot renew --force-renewal
+             sudo systemctl reload nginx
+        4. Verify the renewed cert is served:
+             echo | openssl s_client -connect api.vaultmtg.app:443 2>/dev/null | openssl x509 -noout -dates
+        Runbook: vault_mtg_docs/engineering/runbooks/cloudwatch-alarms-runbook.md
+      Namespace: AWS/CertificateManager
+      MetricName: DaysToExpiry
+      Dimensions:
+        - Name: CertificateArn
+          Value: !Ref AcmCertificateArn
+      Statistic: Minimum
+      Period: 86400
+      EvaluationPeriods: 1
+      Threshold: !Ref TlsExpiryThresholdDays
+      ComparisonOperator: LessThanOrEqualToThreshold
+      TreatMissingData: breaching
+      AlarmActions:
+        - !Ref AlarmTopic
+      OKActions:
+        - !Ref AlarmTopic
+      Tags:
+        - Key: Project
+          Value: vault-mtg
+        - Key: Environment
+          Value: !Ref Environment
+
 Outputs:
   AlarmTopicArn:
     Description: ARN of the SNS alarm notification topic.
@@ -556,3 +721,21 @@ Outputs:
     Value: !GetAtt RdsCpuAlarm.Arn
     Export:
       Name: !Sub "vault-mtg-${Environment}-RdsCpuAlarmArn"
+
+  BffHealthCheckId:
+    Description: Route 53 health check ID for the BFF /healthz synthetic check.
+    Value: !Ref BffHealthCheck
+    Export:
+      Name: !Sub "vault-mtg-${Environment}-BffHealthCheckId"
+
+  BffDownAlarmArn:
+    Description: ARN of the BFF-down CloudWatch alarm.
+    Value: !GetAtt BffDownAlarm.Arn
+    Export:
+      Name: !Sub "vault-mtg-${Environment}-BffDownAlarmArn"
+
+  TlsCertExpiryAlarmArn:
+    Description: ARN of the TLS certificate expiry CloudWatch alarm.
+    Value: !GetAtt TlsCertExpiryAlarm.Arn
+    Export:
+      Name: !Sub "vault-mtg-${Environment}-TlsCertExpiryAlarmArn"

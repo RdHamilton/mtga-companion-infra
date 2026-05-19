@@ -14,5 +14,9 @@
   { "ParameterKey": "RdsLatencyEvaluationPeriods", "ParameterValue": "3" },
   { "ParameterKey": "RdsCpuThreshold",           "ParameterValue": "80" },
   { "ParameterKey": "RdsCpuEvaluationPeriods",   "ParameterValue": "3" },
-  { "ParameterKey": "RdsInstanceIdentifier",     "ParameterValue": "mtga-companion-postgres" }
+  { "ParameterKey": "RdsInstanceIdentifier",     "ParameterValue": "mtga-companion-postgres" },
+  { "ParameterKey": "BffHealthCheckHost",        "ParameterValue": "api.vaultmtg.app" },
+  { "ParameterKey": "BffHealthCheckFailureThreshold", "ParameterValue": "3" },
+  { "ParameterKey": "AcmCertificateArn",         "ParameterValue": "arn:aws:acm:us-east-1:901347789205:certificate/a59cef77-0b50-40b7-b6b9-1183e3f3b61f" },
+  { "ParameterKey": "TlsExpiryThresholdDays",    "ParameterValue": "30" }
 ]
