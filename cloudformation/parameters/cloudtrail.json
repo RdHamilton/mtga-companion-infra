@@ -1,0 +1,4 @@
+[
+  { "ParameterKey": "Environment",              "ParameterValue": "production" },
+  { "ParameterKey": "DeployArtifactsBucketName","ParameterValue": "mtga-companion-deploy-artifacts-production" }
+]
