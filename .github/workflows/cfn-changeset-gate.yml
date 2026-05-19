@@ -1,0 +1,312 @@
+name: CFN Changeset Gate
+
+# Fires on every PR that touches a CloudFormation template.
+# Creates a dry-run changeset for each modified stack and fails the build
+# if any stateful resource (EC2 instance, RDS instance, Elastic IP) would
+# be replaced — unless ALLOW_REPLACEMENT=true is set on the workflow run.
+#
+# This is the CI / pre-merge layer (P-10).  The complementary runtime guard
+# inside deploy.yml (R-19) is a separate, later item.
+#
+# ALLOW_REPLACEMENT override:
+#   Set the repository variable ALLOW_REPLACEMENT=true (Settings -> Variables)
+#   before merging a PR that intentionally replaces a stateful resource.
+#   The build will print a prominent audit notice and proceed.
+#   Reset ALLOW_REPLACEMENT to false (or delete the variable) immediately after
+#   the PR merges.  Every use is logged in the GitHub Actions run summary.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "cloudformation/**"
+
+concurrency:
+  group: cfn-changeset-gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true  # cancel stale gate runs when new commits are pushed
+
+jobs:
+  changeset-gate:
+    name: Changeset gate — replacement check
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # required for OIDC role assumption
+      contents: read
+      pull-requests: write  # required to post PR comments
+
+    env:
+      AWS_REGION: us-east-1
+      # Stateful resource types that must never be silently replaced.
+      # Pipe-separated for use in grep -E patterns.
+      STATEFUL_TYPES: "AWS::EC2::Instance|AWS::RDS::DBInstance|AWS::EC2::EIP"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0   # needed for git diff against base branch
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ secrets.AWS_CFN_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Detect changed CloudFormation templates
+        id: detect
+        run: |
+          # Diff against the PR base.  List only cloudformation/*.yml files
+          # that were added or modified (A/M); deleted templates have no stack
+          # to inspect.
+          CHANGED=$(git diff --name-only --diff-filter=AM \
+            origin/${{ github.base_ref }}...HEAD \
+            -- 'cloudformation/*.yml' | grep -v 'cloudformation/parameters/' || true)
+
+          if [ -z "$CHANGED" ]; then
+            echo "No CloudFormation templates changed — gate skipped."
+            echo "changed_templates=" >> $GITHUB_OUTPUT
+          else
+            echo "Changed templates:"
+            echo "$CHANGED"
+            # Newlines -> space-separated for the matrix step
+            CHANGED_ONELINE=$(echo "$CHANGED" | tr '\n' ' ' | sed 's/ $//')
+            echo "changed_templates=$CHANGED_ONELINE" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Run changeset gate for each changed template
+        if: steps.detect.outputs.changed_templates != ''
+        id: gate
+        env:
+          ALLOW_REPLACEMENT: ${{ vars.ALLOW_REPLACEMENT }}
+        run: |
+          set -euo pipefail
+
+          TEMPLATES="${{ steps.detect.outputs.changed_templates }}"
+          GATE_FAILED=false
+          VIOLATIONS=""
+          CHANGESETS_TO_CLEAN=()
+
+          # ---------------------------------------------------------------------------
+          # Helper: resolve stack name from template filename.
+          # Mirrors the "Resolve stack name" step in deploy.yml exactly so this gate
+          # evaluates the same stack that would actually be deployed.
+          # ---------------------------------------------------------------------------
+          resolve_stack_name() {
+            local TEMPLATE_FILE="$1"
+            local BASENAME
+            BASENAME=$(basename "$TEMPLATE_FILE" .yml)
+
+            case "$BASENAME" in
+              cdn)                       echo "vaultmtg-app-cdn" ;;
+              iam-gha-roles)             echo "mtga-companion-iam-gha-roles" ;;
+              # cloudwatch-alarms.yml backs both cloudwatch-alarms and
+              # cloudwatch-alarms-staging stacks.  We gate both.
+              cloudwatch-alarms)         echo "cloudwatch-alarms" ;;  # handled specially below
+              *)                         echo "mtga-companion-${BASENAME}" ;;
+            esac
+          }
+
+          # ---------------------------------------------------------------------------
+          # Helper: check one stack + template pair.
+          # Returns 0 if clean, 1 if a replacement violation was found.
+          # ---------------------------------------------------------------------------
+          check_stack() {
+            local STACK_NAME="$1"
+            local TEMPLATE_FILE="$2"
+            local CHANGESET_NAME="gate-pr${{ github.event.pull_request.number }}-$(date +%s%N | cut -c1-16)"
+
+            echo ""
+            echo "=========================================="
+            echo "  Stack:    $STACK_NAME"
+            echo "  Template: $TEMPLATE_FILE"
+            echo "  Changeset: $CHANGESET_NAME"
+            echo "=========================================="
+
+            # Determine CREATE vs UPDATE
+            STACK_STATUS=$(aws cloudformation describe-stacks \
+              --stack-name "$STACK_NAME" \
+              --query 'Stacks[0].StackStatus' \
+              --output text 2>/dev/null || echo "DOES_NOT_EXIST")
+
+            if echo "$STACK_STATUS" | grep -qE 'COMPLETE|ROLLBACK'; then
+              CHANGE_TYPE="UPDATE"
+            else
+              CHANGE_TYPE="CREATE"
+              echo "  Stack does not exist yet (status: $STACK_STATUS) — CREATE changeset."
+              echo "  CREATE changesets have no Replacement field; gate passes automatically."
+              return 0
+            fi
+
+            echo "  Stack status: $STACK_STATUS — running $CHANGE_TYPE changeset."
+
+            # Resolve parameters file (use stack-input name for parameters dir)
+            local STACK_INPUT
+            STACK_INPUT=$(basename "$TEMPLATE_FILE" .yml)
+            PARAMS_ARG=""
+            if [ -f "cloudformation/parameters/${STACK_INPUT}.json" ]; then
+              PARAMS_ARG="--parameters file://cloudformation/parameters/${STACK_INPUT}.json"
+            fi
+
+            # Create the changeset
+            aws cloudformation create-change-set \
+              --stack-name "$STACK_NAME" \
+              --template-body "file://$TEMPLATE_FILE" \
+              --change-set-name "$CHANGESET_NAME" \
+              --change-set-type "$CHANGE_TYPE" \
+              --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
+              $PARAMS_ARG \
+              --description "P-10 pre-merge gate: PR #${{ github.event.pull_request.number }}" \
+              > /dev/null
+
+            # Track for cleanup regardless of outcome
+            CHANGESETS_TO_CLEAN+=("$STACK_NAME|$CHANGESET_NAME")
+
+            # Wait for changeset computation (FAILED is normal when there are no changes)
+            aws cloudformation wait change-set-create-complete \
+              --stack-name "$STACK_NAME" \
+              --change-set-name "$CHANGESET_NAME" 2>/dev/null || true
+
+            # Fetch the changeset status
+            CS_STATUS=$(aws cloudformation describe-change-set \
+              --stack-name "$STACK_NAME" \
+              --change-set-name "$CHANGESET_NAME" \
+              --query 'Status' \
+              --output text)
+
+            if [ "$CS_STATUS" = "FAILED" ]; then
+              CS_REASON=$(aws cloudformation describe-change-set \
+                --stack-name "$STACK_NAME" \
+                --change-set-name "$CHANGESET_NAME" \
+                --query 'StatusReason' \
+                --output text)
+              echo "  Changeset FAILED: $CS_REASON"
+              if echo "$CS_REASON" | grep -qi "no changes"; then
+                echo "  No changes detected — gate passes (no-op update)."
+                return 0
+              fi
+              echo "  Changeset failed for an unexpected reason — treating as gate error."
+              return 1
+            fi
+
+            # Print the changeset summary for the run log
+            echo ""
+            echo "  Changeset summary:"
+            aws cloudformation describe-change-set \
+              --stack-name "$STACK_NAME" \
+              --change-set-name "$CHANGESET_NAME" \
+              --query 'Changes[].{Action:ResourceChange.Action,Resource:ResourceChange.LogicalResourceId,Type:ResourceChange.ResourceType,Replace:ResourceChange.Replacement}' \
+              --output table
+
+            # Extract replacements on stateful types
+            REPLACEMENTS=$(aws cloudformation describe-change-set \
+              --stack-name "$STACK_NAME" \
+              --change-set-name "$CHANGESET_NAME" \
+              --query 'Changes[?ResourceChange.Replacement==`True`].{Resource:ResourceChange.LogicalResourceId,Type:ResourceChange.ResourceType}' \
+              --output json)
+
+            # Filter to stateful types only
+            STATEFUL_HITS=$(echo "$REPLACEMENTS" | python3 -c "
+          import sys, json, re
+          items = json.load(sys.stdin)
+          pattern = r'${STATEFUL_TYPES}'
+          hits = [i for i in items if re.match(pattern, i.get('Type',''))]
+          if hits:
+              for h in hits:
+                  print(f\"  REPLACEMENT: {h['Resource']} ({h['Type']})\")
+          " 2>/dev/null || true)
+
+            if [ -n "$STATEFUL_HITS" ]; then
+              echo ""
+              echo "  !! STATEFUL RESOURCE REPLACEMENT DETECTED !!"
+              echo "$STATEFUL_HITS"
+              return 1
+            else
+              echo ""
+              echo "  No stateful resource replacements detected — gate passes."
+              return 0
+            fi
+          }
+
+          # ---------------------------------------------------------------------------
+          # Iterate over every changed template
+          # ---------------------------------------------------------------------------
+          for TEMPLATE_FILE in $TEMPLATES; do
+            BASENAME=$(basename "$TEMPLATE_FILE" .yml)
+            STACK_NAME=$(resolve_stack_name "$TEMPLATE_FILE")
+
+            # cloudwatch-alarms.yml backs two stacks — check both
+            if [ "$BASENAME" = "cloudwatch-alarms" ]; then
+              for STACK in "mtga-companion-cloudwatch-alarms" "mtga-companion-cloudwatch-alarms-staging"; do
+                if ! check_stack "$STACK" "$TEMPLATE_FILE"; then
+                  GATE_FAILED=true
+                  VIOLATIONS="${VIOLATIONS}\n- Stack \`${STACK}\`: stateful resource replacement detected"
+                fi
+              done
+            else
+              if ! check_stack "$STACK_NAME" "$TEMPLATE_FILE"; then
+                GATE_FAILED=true
+                VIOLATIONS="${VIOLATIONS}\n- Stack \`${STACK_NAME}\`: stateful resource replacement detected"
+              fi
+            fi
+          done
+
+          # ---------------------------------------------------------------------------
+          # Cleanup: delete all gate changesets regardless of outcome
+          # ---------------------------------------------------------------------------
+          echo ""
+          echo "Cleaning up gate changesets..."
+          for ENTRY in "${CHANGESETS_TO_CLEAN[@]:-}"; do
+            if [ -z "$ENTRY" ]; then continue; fi
+            CLEAN_STACK="${ENTRY%%|*}"
+            CLEAN_CS="${ENTRY##*|}"
+            aws cloudformation delete-change-set \
+              --stack-name "$CLEAN_STACK" \
+              --change-set-name "$CLEAN_CS" 2>/dev/null || true
+            echo "  Deleted: $CLEAN_STACK / $CLEAN_CS"
+          done
+
+          # ---------------------------------------------------------------------------
+          # Gate decision
+          # ---------------------------------------------------------------------------
+          echo ""
+          echo "=========================================="
+          if [ "$GATE_FAILED" = "false" ]; then
+            echo "GATE: PASS — no stateful resource replacements detected."
+            echo "gate_result=pass" >> $GITHUB_OUTPUT
+          else
+            echo "GATE: VIOLATIONS FOUND"
+            printf '%b\n' "$VIOLATIONS"
+            echo ""
+            if [ "${ALLOW_REPLACEMENT:-false}" = "true" ]; then
+              echo "=========================================="
+              echo "AUDIT NOTICE: ALLOW_REPLACEMENT=true is set."
+              echo "  This override is intentional and has been logged."
+              echo "  PR: #${{ github.event.pull_request.number }}"
+              echo "  Actor: ${{ github.actor }}"
+              echo "  Timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+              echo "  Violations bypassed:"
+              printf '%b\n' "$VIOLATIONS"
+              echo "=========================================="
+              echo "  Gate BYPASSED by ALLOW_REPLACEMENT=true."
+              echo "  Reset the variable after this PR merges."
+              echo "gate_result=bypassed" >> $GITHUB_OUTPUT
+            else
+              echo "=========================================="
+              echo "GATE: FAIL"
+              echo ""
+              echo "To intentionally replace a stateful resource:"
+              echo "  1. Set repository variable ALLOW_REPLACEMENT=true"
+              echo "     (Settings -> Secrets and variables -> Variables)"
+              echo "  2. Re-run this workflow (push a new commit or re-trigger CI)."
+              echo "  3. Reset ALLOW_REPLACEMENT to false immediately after merge."
+              echo "gate_result=fail" >> $GITHUB_OUTPUT
+              exit 1
+            fi
+          fi
+          echo "=========================================="
+
+      - name: Gate skipped (no CFN template changes)
+        if: steps.detect.outputs.changed_templates == ''
+        run: |
+          echo "No CloudFormation templates changed in this PR."
+          echo "Changeset gate skipped — nothing to inspect."
