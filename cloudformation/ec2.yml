@@ -70,7 +70,11 @@ Resources:
                   - ssm:GetParameter
                   - ssm:GetParameters
                   - ssm:GetParametersByPath
-                Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/mtga-companion/*"
+                Resource:
+                  - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/mtga-companion/*"
+                  # 5a (Phase 5 VaultMTG rename) -- additive expand; mtga-companion entry
+                  # remains and will be removed in step 5d after SSM cutover is verified.
+                  - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/vaultmtg/*"
               # kms:Decrypt is required to read SecureString parameters (e.g.
               # /mtga-companion/prod/daemon-jwt-secret) encrypted with the
               # default SSM KMS key (alias/aws/ssm).
