@@ -1,9 +1,9 @@
 name: CFN Changeset Gate
 
-# Fires on every PR that touches a CloudFormation template.
-# Creates a dry-run changeset for each modified stack and fails the build
-# if any stateful resource (EC2 instance, RDS instance, Elastic IP) would
-# be replaced — unless ALLOW_REPLACEMENT=true is set on the workflow run.
+# Fires on EVERY PR to main so the required status check
+# "Changeset gate -- replacement check" always posts a result.
+# When no cloudformation/** files changed the job exits green immediately.
+# When cloudformation/** files did change, the full dry-run gate runs.
 #
 # This is the CI / pre-merge layer (P-10).  The complementary runtime guard
 # inside deploy.yml (R-19) is a separate, later item.
@@ -14,12 +14,14 @@ name: CFN Changeset Gate
 #   The build will print a prominent audit notice and proceed.
 #   Reset ALLOW_REPLACEMENT to false (or delete the variable) immediately after
 #   the PR merges.  Every use is logged in the GitHub Actions run summary.
+#
+# Path-filter note: a paths: filter was intentionally removed (2026-05-19).
+# A paths-filtered workflow never posts a check on non-matching PRs, which
+# would block every non-CFN PR once this job is a required status check.
 
 on:
   pull_request:
     branches: [main]
-    paths:
-      - "cloudformation/**"
 
 concurrency:
   group: cfn-changeset-gate-${{ github.event.pull_request.number }}
@@ -46,7 +48,32 @@ jobs:
         with:
           fetch-depth: 0   # needed for git diff against base branch
 
+      # Run before AWS credentials so non-CFN PRs never need OIDC.
+      - name: Detect CloudFormation changes (early exit for non-CFN PRs)
+        id: cfn_check
+        run: |
+          CHANGED=$(git diff --name-only --diff-filter=AM \
+            "origin/${{ github.base_ref }}...HEAD" \
+            -- 'cloudformation/*.yml' | grep -v 'cloudformation/parameters/' || true)
+          if [ -z "$CHANGED" ]; then
+            echo "has_cfn_changes=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_cfn_changes=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Posts a green check on non-CFN PRs and exits immediately.
+      # This is required so the job always posts a result regardless of
+      # which files changed — a paths-filtered workflow never posts a check
+      # on non-matching PRs, which would block every non-CFN PR once this
+      # job is marked a required status check.
+      - name: Pass (no CloudFormation changes)
+        if: steps.cfn_check.outputs.has_cfn_changes == 'false'
+        run: |
+          echo "No CloudFormation templates changed in this PR."
+          echo "Changeset gate: PASS (no CFN files touched — nothing to inspect)."
+
       - name: Configure AWS credentials
+        if: steps.cfn_check.outputs.has_cfn_changes == 'true'
         uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ secrets.AWS_CFN_DEPLOY_ROLE_ARN }}
@@ -54,27 +81,28 @@ jobs:
 
       - name: Detect changed CloudFormation templates
         id: detect
+        if: steps.cfn_check.outputs.has_cfn_changes == 'true'
         run: |
           # Diff against the PR base.  List only cloudformation/*.yml files
           # that were added or modified (A/M); deleted templates have no stack
           # to inspect.
           CHANGED=$(git diff --name-only --diff-filter=AM \
-            origin/${{ github.base_ref }}...HEAD \
+            "origin/${{ github.base_ref }}...HEAD" \
             -- 'cloudformation/*.yml' | grep -v 'cloudformation/parameters/' || true)
 
           if [ -z "$CHANGED" ]; then
             echo "No CloudFormation templates changed — gate skipped."
-            echo "changed_templates=" >> $GITHUB_OUTPUT
+            echo "changed_templates=" >> "$GITHUB_OUTPUT"
           else
             echo "Changed templates:"
             echo "$CHANGED"
             # Newlines -> space-separated for the matrix step
             CHANGED_ONELINE=$(echo "$CHANGED" | tr '\n' ' ' | sed 's/ $//')
-            echo "changed_templates=$CHANGED_ONELINE" >> $GITHUB_OUTPUT
+            echo "changed_templates=$CHANGED_ONELINE" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Run changeset gate for each changed template
-        if: steps.detect.outputs.changed_templates != ''
+        if: steps.cfn_check.outputs.has_cfn_changes == 'true' && steps.detect.outputs.changed_templates != ''
         id: gate
         env:
           ALLOW_REPLACEMENT: ${{ vars.ALLOW_REPLACEMENT }}
@@ -306,8 +334,3 @@ jobs:
           fi
           echo "=========================================="
 
-      - name: Gate skipped (no CFN template changes)
-        if: steps.detect.outputs.changed_templates == ''
-        run: |
-          echo "No CloudFormation templates changed in this PR."
-          echo "Changeset gate skipped — nothing to inspect."
