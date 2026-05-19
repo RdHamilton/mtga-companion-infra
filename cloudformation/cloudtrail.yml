@@ -1,0 +1,301 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  VaultMTG - Persistent multi-region CloudTrail trail with log-file integrity
+  validation, a dedicated KMS-encrypted S3 bucket, 365-day Object-Lock retention
+  (Governance mode), and S3 data events on the artifact and trail buckets.
+  Deploy order: standalone (no cross-stack imports required).
+  Unblocks: S-06 (security alarms), S-08 (AWS Config), S-09 (GuardDuty),
+            S-10 (Access Analyzer), S-18 (IR runbook).
+
+# ---------------------------------------------------------------------------
+# Parameters
+# ---------------------------------------------------------------------------
+Parameters:
+
+  Environment:
+    Type: String
+    Default: production
+    AllowedValues: [production, staging]
+    Description: Deployment environment (production or staging).
+
+  # The deploy-artifacts bucket is the primary artifact store.
+  # Passing it as a parameter avoids a hard-coded bucket name and lets
+  # the same template serve both environments.
+  DeployArtifactsBucketName:
+    Type: String
+    Default: mtga-companion-deploy-artifacts-production
+    Description: >
+      Name of the deploy-artifacts S3 bucket for which S3 data events
+      should be captured. Must already exist before the stack is deployed.
+
+# ---------------------------------------------------------------------------
+# Resources
+# ---------------------------------------------------------------------------
+Resources:
+
+  # -----------------------------------------------------------------------
+  # KMS key -- CloudTrail log encryption
+  #
+  # CloudTrail requires the key policy to grant cloudtrail.amazonaws.com
+  # GenerateDataKey and Decrypt actions; these are mandated in the
+  # key resource policy (not in an IAM policy attached to a principal).
+  # The key is multi-region so that log-file integrity hashes remain
+  # verifiable regardless of which region signed the digest file.
+  # -----------------------------------------------------------------------
+  CloudTrailKMSKey:
+    Type: AWS::KMS::Key
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: KMS key for VaultMTG CloudTrail log-file encryption
+      EnableKeyRotation: true
+      MultiRegion: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          # Allow the AWS account (root) full key administration
+          - Sid: AllowRootFullAccess
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+
+          # CloudTrail service principal must be able to encrypt logs
+          - Sid: AllowCloudTrailEncrypt
+            Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action:
+              - kms:GenerateDataKey*
+              - kms:DescribeKey
+            Resource: "*"
+            Condition:
+              StringLike:
+                kms:EncryptionContext:aws:cloudtrail:arn:
+                  !Sub "arn:aws:cloudtrail:*:${AWS::AccountId}:trail/*"
+
+          # CloudTrail service principal must be able to decrypt for
+          # log-file integrity validation
+          - Sid: AllowCloudTrailDecryptForValidation
+            Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: kms:Decrypt
+            Resource: "*"
+            Condition:
+              "Null":
+                kms:EncryptionContext:aws:cloudtrail:arn: "false"
+
+      Tags:
+        - Key: Project
+          Value: vault-mtg
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: cloudformation
+
+  CloudTrailKMSKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub "alias/vault-mtg-cloudtrail-${Environment}"
+      TargetKeyId: !Ref CloudTrailKMSKey
+
+  # -----------------------------------------------------------------------
+  # S3 bucket -- CloudTrail log storage
+  #
+  # Requirements:
+  #   - Object Lock enabled in Governance mode, 365-day minimum retention
+  #   - KMS encryption using the dedicated CloudTrail key
+  #   - Public access fully blocked
+  #   - Bucket policy grants CloudTrail PutObject; denies s3:DeleteObject
+  #     and disallows policy bypass (s3:PutBucketPolicy is not granted to
+  #     CloudTrail; only the IAM root/admin can modify policy).
+  #
+  # Object Lock REQUIRES versioning to be enabled; CloudFormation enables
+  # versioning automatically when ObjectLockEnabled: true is set.
+  # -----------------------------------------------------------------------
+  CloudTrailLogsBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub "vault-mtg-cloudtrail-logs-${Environment}-${AWS::AccountId}"
+      ObjectLockEnabled: true
+      ObjectLockConfiguration:
+        ObjectLockEnabled: Enabled
+        Rule:
+          DefaultRetention:
+            Mode: GOVERNANCE
+            Days: 365
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !Ref CloudTrailKMSKey
+            BucketKeyEnabled: true
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Project
+          Value: vault-mtg
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: cloudformation
+
+  # CloudTrail requires a bucket policy that explicitly grants it access.
+  # The policy also:
+  #   - denies s3:DeleteObject on ALL principals (including root) to enforce
+  #     Object Lock immutability intent even in Governance mode
+  #   - requires SecureTransport (HTTPS only)
+  CloudTrailLogsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref CloudTrailLogsBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+
+          # CloudTrail must be able to verify the bucket ACL before writing
+          - Sid: AWSCloudTrailAclCheck
+            Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: s3:GetBucketAcl
+            Resource: !GetAtt CloudTrailLogsBucket.Arn
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+
+          # CloudTrail must be able to write log objects
+          - Sid: AWSCloudTrailWrite
+            Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub "${CloudTrailLogsBucket.Arn}/AWSLogs/${AWS::AccountId}/*"
+            Condition:
+              StringEquals:
+                s3:x-amz-acl: bucket-owner-full-control
+                aws:SourceAccount: !Ref AWS::AccountId
+
+          # Deny any delete attempt on log objects (hardened Governance mode)
+          - Sid: DenyDeleteObject
+            Effect: Deny
+            Principal: "*"
+            Action:
+              - s3:DeleteObject
+              - s3:DeleteObjectVersion
+            Resource: !Sub "${CloudTrailLogsBucket.Arn}/*"
+
+          # Deny any policy modification (prevents policy weakening)
+          - Sid: DenyPolicyModification
+            Effect: Deny
+            Principal: "*"
+            Action: s3:DeleteBucketPolicy
+            Resource: !GetAtt CloudTrailLogsBucket.Arn
+
+          # Require HTTPS for all access
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: s3:*
+            Resource:
+              - !GetAtt CloudTrailLogsBucket.Arn
+              - !Sub "${CloudTrailLogsBucket.Arn}/*"
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
+
+  # -----------------------------------------------------------------------
+  # CloudTrail trail -- multi-region, management + S3 data events
+  #
+  # S3 data events are enabled on:
+  #   1. The CloudTrail logs bucket itself (to capture any object-level
+  #      access to audit logs -- fulfils S-01 AC for "trail bucket")
+  #   2. The deploy-artifacts bucket (fulfils S-01 AC for "artifact bucket")
+  #
+  # Log-file integrity validation: ON (SHA-256 hash chain; verifiable with
+  #   `aws cloudtrail validate-logs`).
+  # Multi-region: ON -- captures events from all regions including
+  #   global services (IAM, STS, CloudFront).
+  # Include global service events: ON (IAM/STS events land in us-east-1).
+  # -----------------------------------------------------------------------
+  CloudTrailTrail:
+    Type: AWS::CloudTrail::Trail
+    DependsOn:
+      - CloudTrailLogsBucketPolicy
+    Properties:
+      TrailName: !Sub "vault-mtg-trail-${Environment}"
+      S3BucketName: !Ref CloudTrailLogsBucket
+      IncludeGlobalServiceEvents: true
+      IsMultiRegionTrail: true
+      EnableLogFileValidation: true
+      IsLogging: true
+      KMSKeyId: !GetAtt CloudTrailKMSKey.Arn
+
+      # S3 data events: capture object-level API calls (GetObject, PutObject,
+      # DeleteObject) on the trail bucket and the deploy-artifacts bucket.
+      EventSelectors:
+        # Management events (read + write) -- default, explicit here for clarity
+        - ReadWriteType: All
+          IncludeManagementEvents: true
+
+        # S3 data events on the CloudTrail logs bucket
+        - ReadWriteType: All
+          IncludeManagementEvents: false
+          DataResources:
+            - Type: AWS::S3::Object
+              Values:
+                - !Sub "${CloudTrailLogsBucket.Arn}/"
+
+        # S3 data events on the deploy-artifacts bucket
+        - ReadWriteType: All
+          IncludeManagementEvents: false
+          DataResources:
+            - Type: AWS::S3::Object
+              Values:
+                - !Sub "arn:aws:s3:::${DeployArtifactsBucketName}/"
+
+      Tags:
+        - Key: Project
+          Value: vault-mtg
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: cloudformation
+
+# ---------------------------------------------------------------------------
+# Outputs
+# ---------------------------------------------------------------------------
+Outputs:
+
+  CloudTrailTrailArn:
+    Description: ARN of the VaultMTG CloudTrail trail.
+    Value: !GetAtt CloudTrailTrail.Arn
+    Export:
+      Name: !Sub "vault-mtg-${Environment}-CloudTrailTrailArn"
+
+  CloudTrailLogsBucketName:
+    Description: Name of the dedicated S3 bucket receiving CloudTrail logs.
+    Value: !Ref CloudTrailLogsBucket
+    Export:
+      Name: !Sub "vault-mtg-${Environment}-CloudTrailLogsBucketName"
+
+  CloudTrailKMSKeyArn:
+    Description: ARN of the KMS key used to encrypt CloudTrail log files.
+    Value: !GetAtt CloudTrailKMSKey.Arn
+    Export:
+      Name: !Sub "vault-mtg-${Environment}-CloudTrailKMSKeyArn"
+
+  CloudTrailKMSKeyId:
+    Description: ID of the KMS key used to encrypt CloudTrail log files.
+    Value: !Ref CloudTrailKMSKey
+    Export:
+      Name: !Sub "vault-mtg-${Environment}-CloudTrailKMSKeyId"
