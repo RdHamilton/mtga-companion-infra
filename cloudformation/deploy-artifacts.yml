@@ -176,6 +176,10 @@ Resources:
                 Resource:
                   - !Sub "arn:aws:ssm:us-east-1:${AWS::AccountId}:parameter/mtga-companion/production/*"
                   - !Sub "arn:aws:ssm:us-east-1:${AWS::AccountId}:parameter/mtga-companion/staging/*"
+                  # 5a (Phase 5 VaultMTG rename) -- additive expand; mtga-companion entries
+                  # remain and will be removed in step 5d after SSM cutover is verified.
+                  - !Sub "arn:aws:ssm:us-east-1:${AWS::AccountId}:parameter/vaultmtg/production/*"
+                  - !Sub "arn:aws:ssm:us-east-1:${AWS::AccountId}:parameter/vaultmtg/staging/*"
               - Effect: Allow
                 Action:
                   - kms:Decrypt
