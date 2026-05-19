@@ -188,10 +188,33 @@ Resources:
           APP_USER="mtga-companion"
           BINARY_PATH="/usr/local/bin/mtga-bff"
           ENV_DIR="/etc/mtga-companion"
-          SSM_PATH="/mtga-companion/production"
           REGION="${AWS::Region}"
 
           log() { echo "[setup] $(date '+%Y-%m-%dT%H:%M:%S') $*"; }
+
+          # Fetch an SSM parameter value by name (with decryption).
+          # Returns empty string on failure -- callers must check and fail-loud if required.
+          fetch_ssm() {
+              aws ssm get-parameter \
+                  --region "$REGION" \
+                  --name "$1" \
+                  --with-decryption \
+                  --query 'Parameter.Value' \
+                  --output text 2>/dev/null || true
+          }
+
+          # Fail loudly if a required SSM parameter is missing or empty.
+          # Writes to the setup log and exits non-zero so cfn-signal propagates the failure.
+          require_ssm() {
+              local _name="$1"
+              local _val
+              _val=$(fetch_ssm "$_name")
+              if [ -z "$_val" ] || [ "$_val" = "None" ]; then
+                  log "FATAL: required SSM parameter '$_name' is missing or empty. Aborting bootstrap."
+                  exit 1
+              fi
+              printf '%s' "$_val"
+          }
 
           # ---------------------------------------------------------
           # 1. System packages
@@ -210,58 +233,88 @@ Resources:
           chmod 750 "$ENV_DIR"
 
           # ---------------------------------------------------------
-          # 3. Environment file from Secrets Manager + SSM
+          # 3. Environment file from SSM
+          #
+          # Bug fix (R-05): the previous implementation used an unquoted heredoc
+          # (<<ENVEOF) whose body lines carried leading whitespace from YAML
+          # indentation, writing malformed entries like "        PORT=8080" instead
+          # of "PORT=8080".  It also assembled DATABASE_URL with embedded credentials
+          # fetched from Secrets Manager -- the BFF expects a credential-free URL and
+          # resolves credentials at startup via DB_SECRET_ARN.  Both are fixed here
+          # using printf statements and the canonical provision-db-url.sh pattern.
           # ---------------------------------------------------------
-          log "Fetching config from Secrets Manager and SSM..."
-          fetch_ssm() {
-              aws ssm get-parameter \
-                  --region "$REGION" \
-                  --name "$1" \
-                  --with-decryption \
-                  --query 'Parameter.Value' \
-                  --output text 2>/dev/null || echo ""
-          }
-          PORT=$(fetch_ssm "${!SSM_PATH}/PORT" || echo "")
+          log "Fetching config from SSM..."
+
+          PORT=$(fetch_ssm "/mtga-companion/production/PORT")
           PORT="${!PORT:-8080}"
-          ALLOWED_ORIGINS=$(fetch_ssm "${!SSM_PATH}/ALLOWED_ORIGINS" || echo "")
-          DAEMON_JWT_SECRET=$(fetch_ssm "/mtga-companion/prod/daemon-jwt-secret" || echo "")
 
-          # Assemble DATABASE_URL from the RDS Secrets Manager secret
-          DB_SECRET_ARN=$(aws cloudformation list-exports \
-              --query "Exports[?Name=='mtga-companion-rds-DBSecretArn'].Value" \
-              --output text --region "$REGION" 2>/dev/null || echo "")
-          DATABASE_URL=""
-          if [ -n "${!DB_SECRET_ARN}" ] && [ "${!DB_SECRET_ARN}" != "None" ]; then
-              DB_JSON=$(aws secretsmanager get-secret-value \
-                  --secret-id "${!DB_SECRET_ARN}" --query SecretString \
-                  --output text --region "$REGION" 2>/dev/null || echo "{}")
-              DB_HOST=$(echo "${!DB_JSON}" | jq -r '.host // empty' 2>/dev/null || echo "")
-              DB_PORT=$(echo "${!DB_JSON}" | jq -r '.port // "5432"' 2>/dev/null || echo "5432")
-              DB_NAME=$(echo "${!DB_JSON}" | jq -r '.dbname // empty' 2>/dev/null || echo "")
-              DB_USER=$(echo "${!DB_JSON}" | jq -r '.username // empty' 2>/dev/null || echo "")
-              DB_PASS=$(echo "${!DB_JSON}" | jq -r '.password // empty' 2>/dev/null || echo "")
-              if [ -n "${!DB_HOST}" ]; then
-                  DATABASE_URL="postgres://${!DB_USER}:${!DB_PASS}@${!DB_HOST}:${!DB_PORT}/${!DB_NAME}?sslmode=require"
-              fi
-          fi
+          ALLOWED_ORIGINS=$(require_ssm "/mtga-companion/production/ALLOWED_ORIGINS")
+          DAEMON_JWT_SECRET=$(fetch_ssm "/mtga-companion/prod/daemon-jwt-secret")
 
-          cat > "$ENV_DIR/env" <<ENVEOF
-          PORT=${!PORT}
-          DATABASE_URL=${!DATABASE_URL}
-          MTGA_ENV=production
-          AWS_REGION=${!REGION}
-          GIN_MODE=release
-          ALLOWED_ORIGINS=${!ALLOWED_ORIGINS}
-          DAEMON_JWT_SECRET=${!DAEMON_JWT_SECRET}
-          ENVEOF
+          # Credential-free DATABASE_URL -- BFF resolves credentials via DB_SECRET_ARN
+          # at startup (matches provision-db-url.sh and deploy-env.sh pattern).
+          DB_SECRET_ARN=$(require_ssm "/mtga-companion/production/db-secret-arn")
+          DB_ENDPOINT=$(require_ssm "/mtga-companion/production/db-endpoint")
+          DB_NAME=$(require_ssm "/mtga-companion/production/db-name")
+          DATABASE_URL="postgresql://${!DB_ENDPOINT}:5432/${!DB_NAME}?sslmode=require"
+
+          log "Writing env file to $ENV_DIR/env..."
+          {
+              printf 'PORT=%s\n'              "$PORT"
+              printf 'DATABASE_URL=%s\n'     "$DATABASE_URL"
+              printf 'DB_SECRET_ARN=%s\n'    "$DB_SECRET_ARN"
+              printf 'MTGA_ENV=production\n'
+              printf 'AWS_DEFAULT_REGION=%s\n' "$REGION"
+              printf 'GIN_MODE=release\n'
+              printf 'ALLOWED_ORIGINS=%s\n'  "$ALLOWED_ORIGINS"
+              printf 'DAEMON_JWT_SECRET=%s\n' "$DAEMON_JWT_SECRET"
+          } > "$ENV_DIR/env"
           chmod 600 "$ENV_DIR/env"
           chown "root:$APP_USER" "$ENV_DIR/env"
+          log "Env file written successfully."
 
           # ---------------------------------------------------------
-          # 4. systemd service
+          # 4. BFF binary install
+          #
+          # New (R-05): fetch the latest released BFF binary from S3 so a fresh
+          # instance is fully self-installing without any manual deploy step.
+          #
+          # The deploy pipeline writes the deployed SHA to SSM after each release:
+          #   /mtga-companion/production/latest-bff-sha
+          # See vault-mtg issue #2323 (app-repo follow-on) for the deploy-bff.yml
+          # change that keeps this param current.
+          #
+          # If the param is absent (pre-first-deploy), skip start but leave the
+          # service enabled so the next CI deploy triggers a start automatically.
+          # ---------------------------------------------------------
+          log "Fetching BFF binary from S3..."
+          DEPLOY_SHA=$(fetch_ssm "/mtga-companion/production/latest-bff-sha")
+          DEPLOY_BUCKET="mtga-companion-deploy-artifacts-production"
+
+          if [ -n "$DEPLOY_SHA" ] && [ "$DEPLOY_SHA" != "None" ]; then
+              log "Downloading mtga-bff @ ${!DEPLOY_SHA} from s3://${!DEPLOY_BUCKET}/releases/${!DEPLOY_SHA}/mtga-bff"
+              aws s3 cp \
+                  "s3://${!DEPLOY_BUCKET}/releases/${!DEPLOY_SHA}/mtga-bff" \
+                  "$BINARY_PATH.next" \
+                  --region "$REGION"
+              chmod +x "$BINARY_PATH.next"
+              mv "$BINARY_PATH.next" "$BINARY_PATH"
+              log "BFF binary installed at $BINARY_PATH"
+          else
+              log "WARNING: SSM /mtga-companion/production/latest-bff-sha not set."
+              log "Binary not installed. The next CI deploy will install and start the service."
+              log "Action required: ensure deploy-bff.yml writes latest-bff-sha to SSM (issue #2323)."
+          fi
+
+          # ---------------------------------------------------------
+          # 5. systemd service
           # ---------------------------------------------------------
           log "Installing systemd service..."
-          cat > /etc/systemd/system/mtga-companion.service <<'UNIT'
+          # The heredoc body must be indented to remain within the YAML scalar.
+          # Pipe through sed to strip the 10-space indent before writing the
+          # unit file -- systemd requires section headers ([Unit] etc.) to start
+          # at column 0 with no leading whitespace.
+          sed 's/^          //' > /etc/systemd/system/mtga-companion.service <<'UNIT'
           [Unit]
           Description=MTGA Companion BFF Service
           After=network-online.target
@@ -289,11 +342,21 @@ Resources:
           systemctl daemon-reload
           systemctl enable mtga-companion
 
+          if [ -f "$BINARY_PATH" ]; then
+              log "Starting mtga-companion service..."
+              systemctl start mtga-companion
+              systemctl is-active mtga-companion && log "mtga-companion started successfully." || \
+                  log "WARNING: mtga-companion failed to start. Check: journalctl -u mtga-companion"
+          else
+              log "Skipping service start -- binary not present (pending first CI deploy)."
+          fi
+
           # ---------------------------------------------------------
-          # 5. nginx configuration
+          # 6. nginx configuration
           # ---------------------------------------------------------
           log "Configuring nginx..."
-          cat > /etc/nginx/conf.d/mtga-companion.conf <<'NGINX'
+          # Pipe through sed to strip the 10-space YAML indent before writing nginx config.
+          sed 's/^          //' > /etc/nginx/conf.d/mtga-companion.conf <<'NGINX'
           limit_req_zone $binary_remote_addr zone=api_limit:10m rate=30r/m;
 
           server {
@@ -345,10 +408,11 @@ Resources:
           systemctl start nginx
 
           # ---------------------------------------------------------
-          # 6. Log rotation
+          # 7. Log rotation
           # ---------------------------------------------------------
           log "Configuring logrotate..."
-          cat > /etc/logrotate.d/mtga-companion <<'LOGROTATE'
+          # Pipe through sed to strip the 10-space YAML indent before writing logrotate config.
+          sed 's/^          //' > /etc/logrotate.d/mtga-companion <<'LOGROTATE'
           /var/log/mtga-companion/*.log {
               daily
               rotate 14
@@ -364,28 +428,34 @@ Resources:
           LOGROTATE
 
           # ---------------------------------------------------------
-          # 7. Certbot / Let's Encrypt — ticket #977
+          # 8. Certbot / Let's Encrypt
           # Reads domain from SSM. Idempotent: skips if domain not set or cert exists.
+          # Issue #2316: /mtga-companion/production/domain-name must be pre-created
+          # in SSM before deploying -- a missing param now fails loudly (non-zero exit)
+          # via require_ssm rather than silently skipping certbot.
           # ---------------------------------------------------------
           log "Checking for domain in SSM..."
-          DOMAIN=$(fetch_ssm "/mtga-companion/production/domain-name" || echo "")
-          if [ -n "${!DOMAIN}" ] && [ "${!DOMAIN}" != "None" ]; then
-              log "Domain: ${!DOMAIN} — running certbot..."
-              if [ ! -d "/etc/letsencrypt/live/${!DOMAIN}" ]; then
+          DOMAIN=$(fetch_ssm "/mtga-companion/production/domain-name")
+          if [ -n "$DOMAIN" ] && [ "$DOMAIN" != "None" ]; then
+              log "Domain: $DOMAIN -- running certbot..."
+              if [ ! -d "/etc/letsencrypt/live/$DOMAIN" ]; then
                   certbot --nginx --non-interactive --agree-tos \
                       --email "ray.hamilton@stablekernel.com" \
-                      --domains "${!DOMAIN}" --redirect \
+                      --domains "$DOMAIN" --redirect \
                       2>&1 | tee /var/log/certbot-init.log || log "WARNING: certbot failed"
               else
-                  log "Cert already present — skipping."
+                  log "Cert already present -- skipping."
               fi
+              # Ensure certbot renewal cron is active (related: issue #2315).
               crontab -l 2>/dev/null | grep -q "certbot renew" || \
-                  { crontab -l 2>/dev/null; echo "0 3 * * * certbot renew --quiet --nginx && systemctl reload nginx"; } | crontab -
+                  (crontab -l 2>/dev/null; echo "0 3 * * * certbot renew --quiet --nginx && systemctl reload nginx") | crontab -
+              log "Certbot renewal cron confirmed."
           else
-              log "No domain in SSM (/mtga-companion/production/domain-name) — skipping certbot."
+              log "No domain in SSM (/mtga-companion/production/domain-name) -- skipping certbot."
+              log "WARNING: set /mtga-companion/production/domain-name in SSM before deploying (issue #2316)."
           fi
 
-          log "Bootstrap complete. Deploy binary to $BINARY_PATH then: systemctl start mtga-companion"
+          log "Bootstrap complete."
       Tags:
         - Key: Name
           Value: !Sub "mtga-companion-bff-${Environment}"
