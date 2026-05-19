@@ -22,7 +22,7 @@ Parameters:
 
   GitHubRepo:
     Type: String
-    Default: MTGA-Companion
+    Default: vault-mtg
     Description: GitHub repository name (app repo)
 
   StagingArtifactsBucketName:
