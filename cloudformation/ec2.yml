@@ -17,9 +17,34 @@ Parameters:
     Description: EC2 instance type
 
   AMI:
-    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
-    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
-    Description: Amazon Linux 2023 latest AMI (resolved from SSM Parameter Store)
+    Type: AWS::EC2::Image::Id
+    # Pinned 2026-05-19. Previously used the SSM /aws/service/ami-amazon-linux-latest/...
+    # dynamic pointer, which resolved to a different AMI on each stack update and risked
+    # deploying an unverified OS version during instance replacement.
+    #
+    # Pinned value: ami-0236922087fa98b6e
+    #   Name:    al2023-ami-2023.11.20260514.0-kernel-6.1-x86_64
+    #   OS:      Amazon Linux 2023 (kernel 6.1, x86_64 HVM)
+    #   Created: 2026-05-15
+    #
+    # AMI Rotation Procedure:
+    #   1. Identify the new target AMI via:
+    #        aws ec2 describe-images --owners amazon \
+    #          --filters "Name=name,Values=al2023-ami-*-x86_64" \
+    #                    "Name=state,Values=available" \
+    #          --query 'sort_by(Images,&CreationDate)[-1].[ImageId,Name]' \
+    #          --output table --profile personal
+    #   2. Update this Default value to the new AMI ID.
+    #   3. Commit, open a PR, and deploy via the deploy.yml GitHub Actions workflow.
+    #      A CloudFormation changeset will show the AMI diff before execution.
+    #   4. After deployment, verify the new instance is healthy via
+    #        curl https://api.vaultmtg.app/healthz
+    #      then update this comment with the new AMI ID, name, and pin date.
+    Default: ami-0236922087fa98b6e
+    Description: >
+      Amazon Linux 2023 AMI pinned to ami-0236922087fa98b6e
+      (al2023-ami-2023.11.20260514.0-kernel-6.1-x86_64, pinned 2026-05-19).
+      See rotation procedure in the comment above.
 
   KeyName:
     Type: String
