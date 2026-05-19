@@ -657,32 +657,6 @@ jobs:
             exit 1
           fi
 
-      # -------------------------------------------------------
-      # SMOKE-4: Tim's Playwright suite
-      # This step is a documented hook for Tim's Playwright tests.
-      # It is currently a passing no-op stub so the smoke gate is
-      # green immediately. Tim must replace this stub with a real
-      # workflow_call to the Playwright smoke suite in vault-mtg.
-      #
-      # CONTRACT FOR TIM (see ## TIM SPEC below this workflow):
-      #   - Target URL: ${{ env.STAGING_BFF_HOST }} (BFF)
-      #   - SPA URL:    https://stg-app.vaultmtg.app (SPA)
-      #   - Tim must use the existing e2e-smoke.yml / staging-auth-smoke.sh
-      #     infrastructure as the basis -- do not build a new framework.
-      #   - The Playwright suite runs as a reusable workflow called here.
-      #   - Required assertions: see ## TIM SPEC section below.
-      # -------------------------------------------------------
-      - name: "SMOKE-4 -- Playwright suite (TIM STUB: replace with reusable workflow call)"
-        id: playwright-stub
-        run: |
-          echo "SMOKE-4: Playwright suite stub -- Tim must implement."
-          echo "Target BFF:  ${{ env.STAGING_BFF_HOST }}"
-          echo "Target SPA:  https://stg-app.vaultmtg.app"
-          echo "SMOKE-4 PASS (stub -- not yet implemented by Tim)"
-          # TODO (Tim): replace this run step with a uses: step that calls
-          # the reusable Playwright smoke workflow in vault-mtg.
-          # See ## TIM SPEC at the bottom of this file for the exact contract.
-
       - name: Record smoke gate complete
         id: record-smoke
         run: |
@@ -691,12 +665,29 @@ jobs:
           echo "Smoke gate complete at $(date -u --iso-8601=seconds)"
 
   # ============================================================
-  # JOB 5: RTO measurement and report
+  # JOB 5: SMOKE-4 -- Playwright suite (R-17)
+  # Reusable workflow call to vault-mtg's e2e-smoke-staging.yml.
+  # Runs after SMOKE-1/2/3 pass in the smoke-gate job.
+  # GitHub Actions only allows workflow_call at the job level (not step level),
+  # so SMOKE-4 is implemented as its own job that needs smoke-gate to succeed.
+  # ============================================================
+  smoke-gate-playwright:
+    name: SMOKE-4 -- Playwright suite (R-17)
+    needs: [smoke-gate]
+    if: ${{ needs.smoke-gate.result == 'success' }}
+    uses: RdHamilton/vault-mtg/.github/workflows/e2e-smoke-staging.yml@main
+    with:
+      base_url: https://stg-app.vaultmtg.app
+      bff_url: https://staging-api.vaultmtg.app
+    secrets: inherit
+
+  # ============================================================
+  # JOB 6: RTO measurement and report
   # ============================================================
   measure-rto:
     name: Measure RTO and write report
-    needs: [replace-instance, wait-for-instance, deploy-staging-bff, smoke-gate]
-    if: ${{ always() && needs.smoke-gate.result == 'success' }}
+    needs: [replace-instance, wait-for-instance, deploy-staging-bff, smoke-gate, smoke-gate-playwright]
+    if: ${{ always() && needs.smoke-gate.result == 'success' && needs.smoke-gate-playwright.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
 
