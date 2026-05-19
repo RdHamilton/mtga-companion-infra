@@ -2,9 +2,16 @@ AWSTemplateFormatVersion: "2010-09-09"
 Description: >
   GitHub Actions OIDC IAM roles for mtga-companion-infra CI/CD pipelines.
   Codifies roles that were provisioned out-of-band and imports them into IaC.
-  These roles already exist in the account — running this template performs
+  These roles already exist in the account -- running this template performs
   an in-place update, not a net-new creation. See PR #36 and PR #39 for
   the original provisioning context.
+
+  S-04: GhaCfnDeployPermissionsBoundary added (2026-05-19). Attached to
+  gha-infra-cfn-deploy to cap its effective permissions. The boundary removes
+  secretsmanager:GetSecretValue and secretsmanager:PutSecretValue (EC2 role
+  reads secrets at runtime; CFN only manages secret lifecycle). All other
+  permissions match the inline policy one-for-one so the boundary never
+  tightens currently-required operations. See RdHamilton/vault-mtg#2325.
 
   Deploy order: standalone (no stack dependencies).
 
@@ -35,6 +42,324 @@ Parameters:
     Description: ARN pattern for the sync-lambda CloudFormation stack
 
 Resources:
+  # ---------------------------------------------------------------------------
+  # Permissions boundary for gha-infra-cfn-deploy (S-04)
+  #
+  # This managed policy acts as a ceiling on the effective permissions of the
+  # gha-infra-cfn-deploy role. A permissions boundary is evaluated alongside
+  # the identity policy (logical AND): both must Allow an action for it to be
+  # granted. The boundary closes two over-grant categories from Sarah's S-07
+  # review:
+  #
+  #   1. secretsmanager:GetSecretValue -- removed. The deploy role manages
+  #      secret lifecycle (create/delete/describe/tag) for RDS-managed secrets
+  #      but never needs to read plaintext values. The EC2 instance role
+  #      (mtga-companion-ec2-role-*) reads secrets at runtime.
+  #
+  #   2. secretsmanager:PutSecretValue -- removed. RDS ManageMasterUserPassword
+  #      has AWS rotate the secret value directly; the deploy role is not in
+  #      the rotation path.
+  #
+  # All other actions in the inline policy are mirrored here so the boundary
+  # does not silently block legitimate operations. When the inline policy is
+  # narrowed in a future PR (e.g., IAM actions scoped to project-prefix ARNs),
+  # this boundary can be tightened in the same PR.
+  #
+  # Boundary does NOT allow:
+  #   - secretsmanager:GetSecretValue
+  #   - secretsmanager:PutSecretValue
+  #   - iam:* (wildcard) -- never granted; specific actions only
+  #   - Any action not explicitly listed
+  # ---------------------------------------------------------------------------
+  GhaCfnDeployPermissionsBoundary:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: gha-cfn-deploy-permissions-boundary
+      Description: >
+        Permissions boundary for gha-infra-cfn-deploy. Caps effective permissions
+        to exclude secretsmanager:GetSecretValue and secretsmanager:PutSecretValue
+        which are not required by the CFN deploy workflow. See vault-mtg#2325.
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          # CloudFormation stack operations (scoped to project prefixes)
+          - Sid: CloudFormationStackOperations
+            Effect: Allow
+            Action: cloudformation:*
+            Resource:
+              - arn:aws:cloudformation:us-east-1:901347789205:stack/mtga-companion-*/*
+              - arn:aws:cloudformation:us-east-1:901347789205:stack/vaultmtg-*/*
+
+          # CloudFormation global read-only (validate, list, describe)
+          - Sid: CloudFormationGlobal
+            Effect: Allow
+            Action:
+              - cloudformation:ValidateTemplate
+              - cloudformation:ListStacks
+              - cloudformation:DescribeStacks
+            Resource: "*"
+
+          # IAM: specific actions needed to manage roles created by the CFN
+          # stacks (EC2 instance role, Lambda execution role, scheduler role,
+          # OIDC provider, instance profiles). Wildcard resource is retained
+          # here to match the current inline policy; ARN scoping to
+          # project-prefix role names is tracked as a follow-on hardening item.
+          # iam:* (wildcard action) is intentionally excluded.
+          - Sid: IAMManage
+            Effect: Allow
+            Action:
+              - iam:PassRole
+              - iam:CreateRole
+              - iam:DeleteRole
+              - iam:GetRole
+              - iam:UpdateRole
+              - iam:PutRolePolicy
+              - iam:DeleteRolePolicy
+              - iam:GetRolePolicy
+              - iam:ListRolePolicies
+              - iam:AttachRolePolicy
+              - iam:DetachRolePolicy
+              - iam:ListAttachedRolePolicies
+              - iam:TagRole
+              - iam:UntagRole
+              - iam:CreateInstanceProfile
+              - iam:DeleteInstanceProfile
+              - iam:GetInstanceProfile
+              - iam:AddRoleToInstanceProfile
+              - iam:RemoveRoleFromInstanceProfile
+              - iam:CreateOIDCProvider
+              - iam:DeleteOIDCProvider
+              - iam:GetOIDCProvider
+              - iam:UpdateOIDCProvider
+              - iam:TagOIDCProvider
+              - iam:ListOIDCProviders
+              # Required for CFN to attach this boundary to roles it creates
+              - iam:PutRolePermissionsBoundary
+              # Required to manage the boundary policy itself
+              - iam:CreatePolicy
+              - iam:CreatePolicyVersion
+              - iam:DeletePolicy
+              - iam:DeletePolicyVersion
+              - iam:GetPolicy
+              - iam:GetPolicyVersion
+              - iam:ListPolicies
+              - iam:ListPolicyVersions
+            Resource: "*"
+
+          # EC2: full set needed to manage instances, security groups, EIPs,
+          # subnets, VPC resources created by the ec2 and ec2-sg stacks.
+          - Sid: EC2
+            Effect: Allow
+            Action:
+              - ec2:*
+            Resource: "*"
+
+          # RDS: full set needed to manage the PostgreSQL instance, subnet
+          # groups, parameter groups, and security group ingress rules.
+          - Sid: RDS
+            Effect: Allow
+            Action:
+              - rds:*
+            Resource: "*"
+
+          # Lambda: full set needed to create/update the sync Lambda function,
+          # VPC config custom resource Lambda, and Lambda permissions.
+          - Sid: Lambda
+            Effect: Allow
+            Action:
+              - lambda:*
+            Resource: "*"
+
+          # S3: bucket lifecycle management for deploy-artifacts, CDN, and
+          # CloudTrail log buckets. Object-level actions are intentionally
+          # excluded (the deploy role does not read/write bucket objects).
+          - Sid: S3
+            Effect: Allow
+            Action:
+              - s3:CreateBucket
+              - s3:DeleteBucket
+              - s3:GetBucketLocation
+              - s3:GetBucketPolicy
+              - s3:PutBucketPolicy
+              - s3:DeleteBucketPolicy
+              - s3:GetBucketVersioning
+              - s3:PutBucketVersioning
+              - s3:PutBucketPublicAccessBlock
+              - s3:GetBucketPublicAccessBlock
+              - s3:PutBucketEncryption
+              - s3:GetBucketEncryption
+              - s3:PutBucketTagging
+              - s3:GetBucketTagging
+              - s3:PutLifecycleConfiguration
+              - s3:GetLifecycleConfiguration
+              - s3:PutBucketNotification
+              - s3:GetBucketNotification
+              - s3:GetBucketCORS
+              - s3:PutBucketCORS
+              - s3:GetBucketObjectLockConfiguration
+              - s3:PutBucketObjectLockConfiguration
+              - s3:PutBucketAcl
+              - s3:GetBucketAcl
+            Resource: "*"
+
+          # CloudFront: distributions and OAC for CDN stack.
+          - Sid: CloudFront
+            Effect: Allow
+            Action:
+              - cloudfront:*
+            Resource: "*"
+
+          # ACM: certificate management for CDN/HTTPS stacks.
+          - Sid: ACM
+            Effect: Allow
+            Action:
+              - acm:RequestCertificate
+              - acm:DescribeCertificate
+              - acm:DeleteCertificate
+              - acm:ListCertificates
+              - acm:AddTagsToCertificate
+              - acm:ListTagsForCertificate
+            Resource: "*"
+
+          # Route 53: DNS records and health checks.
+          - Sid: Route53
+            Effect: Allow
+            Action:
+              - route53:CreateHostedZone
+              - route53:DeleteHostedZone
+              - route53:GetHostedZone
+              - route53:ListHostedZones
+              - route53:ChangeResourceRecordSets
+              - route53:GetChange
+              - route53:ListResourceRecordSets
+              - route53:CreateHealthCheck
+              - route53:DeleteHealthCheck
+              - route53:GetHealthCheck
+              - route53:UpdateHealthCheck
+              - route53:ListHealthChecks
+            Resource: "*"
+
+          # CloudWatch: alarms for production/staging monitoring stacks.
+          - Sid: CloudWatch
+            Effect: Allow
+            Action:
+              - cloudwatch:PutMetricAlarm
+              - cloudwatch:DeleteAlarms
+              - cloudwatch:DescribeAlarms
+              - cloudwatch:ListTagsForResource
+              - cloudwatch:TagResource
+            Resource: "*"
+
+          # SNS: alarm notification topics.
+          - Sid: SNS
+            Effect: Allow
+            Action:
+              - sns:CreateTopic
+              - sns:DeleteTopic
+              - sns:GetTopicAttributes
+              - sns:SetTopicAttributes
+              - sns:Subscribe
+              - sns:Unsubscribe
+              - sns:ListSubscriptionsByTopic
+              - sns:TagResource
+              - sns:ListTagsForResource
+            Resource: "*"
+
+          # SSM: parameter management for deploy pipeline config.
+          - Sid: SSM
+            Effect: Allow
+            Action:
+              - ssm:GetParameter
+              - ssm:GetParameters
+              - ssm:PutParameter
+              - ssm:DeleteParameter
+              - ssm:DescribeParameters
+              - ssm:AddTagsToResource
+              - ssm:ListTagsForResource
+            Resource: "*"
+
+          # Secrets Manager: lifecycle management only. GetSecretValue and
+          # PutSecretValue are explicitly excluded -- the deploy role manages
+          # secret metadata but never reads or writes plaintext secret values.
+          # RDS ManageMasterUserPassword has AWS rotate values directly.
+          # The EC2 instance role reads secrets at runtime.
+          - Sid: SecretsManagerLifecycle
+            Effect: Allow
+            Action:
+              - secretsmanager:CreateSecret
+              - secretsmanager:DeleteSecret
+              - secretsmanager:DescribeSecret
+              - secretsmanager:TagResource
+              - secretsmanager:ListSecrets
+            Resource: "*"
+
+          # KMS: key describe/list for CloudTrail encryption; CreateGrant
+          # is required when CFN creates the CloudTrail KMS key policy.
+          - Sid: KMS
+            Effect: Allow
+            Action:
+              - kms:DescribeKey
+              - kms:ListKeys
+              - kms:CreateGrant
+              - kms:CreateKey
+              - kms:EnableKeyRotation
+              - kms:GetKeyPolicy
+              - kms:PutKeyPolicy
+              - kms:TagResource
+              - kms:CreateAlias
+              - kms:DeleteAlias
+              - kms:ListAliases
+              - kms:ScheduleKeyDeletion
+            Resource: "*"
+
+          # EventBridge Scheduler and Events: daily sync schedule.
+          - Sid: EventBridge
+            Effect: Allow
+            Action:
+              - scheduler:CreateSchedule
+              - scheduler:UpdateSchedule
+              - scheduler:DeleteSchedule
+              - scheduler:GetSchedule
+              - scheduler:ListSchedules
+              - events:PutRule
+              - events:DeleteRule
+              - events:DescribeRule
+              - events:PutTargets
+              - events:RemoveTargets
+            Resource: "*"
+
+          # SQS: dead-letter queue for sync Lambda.
+          - Sid: SQS
+            Effect: Allow
+            Action:
+              - sqs:CreateQueue
+              - sqs:DeleteQueue
+              - sqs:GetQueueAttributes
+              - sqs:SetQueueAttributes
+              - sqs:ListQueueTags
+              - sqs:TagQueue
+              - sqs:SetQueueAttributes
+              - sqs:GetQueueUrl
+            Resource: "*"
+
+          # CloudTrail: trail management for the cloudtrail stack.
+          - Sid: CloudTrail
+            Effect: Allow
+            Action:
+              - cloudtrail:CreateTrail
+              - cloudtrail:DeleteTrail
+              - cloudtrail:DescribeTrails
+              - cloudtrail:GetTrail
+              - cloudtrail:GetTrailStatus
+              - cloudtrail:UpdateTrail
+              - cloudtrail:StartLogging
+              - cloudtrail:StopLogging
+              - cloudtrail:PutEventSelectors
+              - cloudtrail:GetEventSelectors
+              - cloudtrail:AddTags
+              - cloudtrail:ListTags
+            Resource: "*"
+
   # ---------------------------------------------------------------------------
   # gha-infra-sync-deploy
   # Assumed by deploy-sync-lambda.yml to update the vault-mtg-sync Lambda
@@ -92,6 +417,11 @@ Resources:
   # Assumed by deploy.yml to provision / update all other CloudFormation stacks
   # in this repo. Broad CloudFormation + resource permissions scoped to
   # mtga-companion-* and vaultmtg-* stack name prefixes where possible.
+  #
+  # S-04: PermissionsBoundary attached. Closes secretsmanager:GetSecretValue
+  # and secretsmanager:PutSecretValue over-grants confirmed by Sarah's S-07
+  # review. The boundary and inline policy are maintained in parallel -- when
+  # the inline policy is tightened, tighten the boundary in the same PR.
   # ---------------------------------------------------------------------------
   GhaInfraCfnDeployRole:
     Type: AWS::IAM::Role
@@ -101,6 +431,9 @@ Resources:
         GitHub Actions OIDC role for deploy.yml (general CloudFormation deploys).
         Permits stack CRUD operations across mtga-companion-* and vaultmtg-*
         stacks, and the AWS resource actions needed to provision those stacks.
+        PermissionsBoundary (gha-cfn-deploy-permissions-boundary) excludes
+        secretsmanager:GetSecretValue and secretsmanager:PutSecretValue.
+      PermissionsBoundary: !Ref GhaCfnDeployPermissionsBoundary
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
@@ -159,6 +492,15 @@ Resources:
                   - iam:UpdateOIDCProvider
                   - iam:TagOIDCProvider
                   - iam:ListOIDCProviders
+                  - iam:PutRolePermissionsBoundary
+                  - iam:CreatePolicy
+                  - iam:CreatePolicyVersion
+                  - iam:DeletePolicy
+                  - iam:DeletePolicyVersion
+                  - iam:GetPolicy
+                  - iam:GetPolicyVersion
+                  - iam:ListPolicies
+                  - iam:ListPolicyVersions
                 Resource: "*"
               - Sid: EC2
                 Effect: Allow
@@ -257,14 +599,19 @@ Resources:
                   - ssm:AddTagsToResource
                   - ssm:ListTagsForResource
                 Resource: "*"
-              - Sid: SecretsManager
+              # Secrets Manager: lifecycle management only.
+              # secretsmanager:GetSecretValue removed -- the deploy role does
+              # not read secret values. The EC2 instance role reads secrets at
+              # runtime. secretsmanager:PutSecretValue removed -- RDS
+              # ManageMasterUserPassword has AWS rotate the credential directly.
+              # The permissions boundary (GhaCfnDeployPermissionsBoundary)
+              # enforces these exclusions as a hard ceiling.
+              - Sid: SecretsManagerLifecycle
                 Effect: Allow
                 Action:
                   - secretsmanager:CreateSecret
                   - secretsmanager:DeleteSecret
                   - secretsmanager:DescribeSecret
-                  - secretsmanager:GetSecretValue
-                  - secretsmanager:PutSecretValue
                   - secretsmanager:TagResource
                   - secretsmanager:ListSecrets
                 Resource: "*"
@@ -274,6 +621,15 @@ Resources:
                   - kms:DescribeKey
                   - kms:ListKeys
                   - kms:CreateGrant
+                  - kms:CreateKey
+                  - kms:EnableKeyRotation
+                  - kms:GetKeyPolicy
+                  - kms:PutKeyPolicy
+                  - kms:TagResource
+                  - kms:CreateAlias
+                  - kms:DeleteAlias
+                  - kms:ListAliases
+                  - kms:ScheduleKeyDeletion
                 Resource: "*"
               - Sid: EventBridge
                 Effect: Allow
@@ -299,6 +655,22 @@ Resources:
                   - sqs:ListQueueTags
                   - sqs:TagQueue
                 Resource: "*"
+              - Sid: CloudTrail
+                Effect: Allow
+                Action:
+                  - cloudtrail:CreateTrail
+                  - cloudtrail:DeleteTrail
+                  - cloudtrail:DescribeTrails
+                  - cloudtrail:GetTrail
+                  - cloudtrail:GetTrailStatus
+                  - cloudtrail:UpdateTrail
+                  - cloudtrail:StartLogging
+                  - cloudtrail:StopLogging
+                  - cloudtrail:PutEventSelectors
+                  - cloudtrail:GetEventSelectors
+                  - cloudtrail:AddTags
+                  - cloudtrail:ListTags
+                Resource: "*"
       Tags:
         - Key: ManagedBy
           Value: cloudformation
@@ -319,3 +691,9 @@ Outputs:
     Value: !GetAtt GhaInfraCfnDeployRole.Arn
     Export:
       Name: !Sub mtga-companion-iam-gha-roles-CfnDeployRoleArn
+
+  GhaCfnDeployPermissionsBoundaryArn:
+    Description: ARN of the permissions boundary policy for gha-infra-cfn-deploy
+    Value: !Ref GhaCfnDeployPermissionsBoundary
+    Export:
+      Name: !Sub mtga-companion-iam-gha-roles-CfnDeployBoundaryArn
