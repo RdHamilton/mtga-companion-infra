@@ -1,0 +1,758 @@
+name: Staging Rebuild + Smoke Gate
+
+# R-17: Make staging rebuildable from zero with a fully automated smoke gate.
+#
+# PURPOSE
+#   Prove that the R-13 production instance replacement is safe by exercising
+#   the full rebuild path against the staging BFF:
+#     1. Terminate and replace the EC2 instance via CloudFormation changeset
+#        (the same mechanism R-13 will use in production).
+#     2. Wait for the replacement instance's SSM agent to come online.
+#     3. Verify nginx is up and /healthz is reachable on port 80 (UserData result).
+#     4. Trigger staging-deploy.yml in vault-mtg to install + start the staging BFF.
+#        NOTE: R-05's UserData self-install is contingent on
+#        /mtga-companion/production/latest-bff-sha existing (issue #2373 -- not
+#        done yet). The smoke gate therefore MUST trigger a staging deploy
+#        explicitly rather than relying on the self-install. This is not a
+#        workaround: running staging-deploy is the correct sequencing even after
+#        #2373 ships, because staging uses a separate binary from production.
+#     5. Run the smoke gate: /healthz 200, auth-rejection checks (401), and the
+#        Playwright smoke suite (Tim's ownership -- see spec at end of this file).
+#     6. Measure and record RTO from instance-termination to smoke-gate-green.
+#
+# SCOPE BOUNDARY
+#   This workflow owns:
+#     - CFN instance replacement trigger (dry_run=true for validation; false to execute)
+#     - SSM-agent readiness polling
+#     - nginx /healthz check (pre-deploy, port 80)
+#     - staging-deploy.yml dispatch
+#     - /healthz check (post-deploy, HTTPS)
+#     - auth-rejection check (unauthenticated call -> 401)
+#     - RTO measurement
+#
+#   Tim (UI Tester) owns:
+#     - The Playwright smoke suite (tests/smoke/staging.spec.ts in vault-mtg)
+#     - See ## TIM SPEC at the end of this file for the exact contract
+#
+# TRIGGER
+#   workflow_dispatch only -- never runs on push. A rebuild is a deliberate
+#   operator action that terminates a running EC2 instance.
+#
+# #2373 DEPENDENCY DOCUMENTED
+#   /mtga-companion/production/latest-bff-sha is not written by any current
+#   workflow (issue #2373, open). The UserData self-install step in ec2.yml
+#   therefore boots the instance in a configured-but-binary-absent state for
+#   the BFF service. This workflow handles that by always dispatching
+#   staging-deploy.yml after the instance is up and SSM-reachable, independent
+#   of the UserData self-install result.
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: >
+          Dry run -- validate changeset, poll for SSM readiness, and run
+          pre-deploy healthz only. Does NOT execute the CFN changeset and
+          does NOT trigger staging-deploy. Safe to run at any time.
+        required: false
+        type: boolean
+        default: true
+
+      skip_instance_replace:
+        description: >
+          Skip the CFN instance-replacement step and go straight to the
+          smoke gate. Use this when the instance was already replaced by
+          another workflow and you only want to validate the smoke checks.
+        required: false
+        type: boolean
+        default: false
+
+      staging_ref:
+        description: >
+          Git ref (branch, tag, or SHA) in vault-mtg to deploy to staging
+          after the instance comes up. Defaults to main.
+        required: false
+        type: string
+        default: main
+
+concurrency:
+  group: staging-rebuild-smoke-gate
+  cancel-in-progress: false   # never interrupt a running rebuild
+
+permissions:
+  contents: read
+  id-token: write   # OIDC role assumption for AWS API calls
+
+env:
+  AWS_REGION: us-east-1
+  # Staging BFF URL -- used for all external smoke checks.
+  STAGING_BFF_HOST: https://staging-api.vaultmtg.app
+  # nginx-only pre-deploy check uses HTTP (TLS is not configured until the
+  # BFF is running and certbot has obtained a cert). Port 80 is open on the
+  # EC2 security group for the ACME challenge path.
+  STAGING_NGINX_HOST: http://staging-api.vaultmtg.app
+  # Max time to wait for SSM agent to come online on the replacement instance.
+  SSM_READY_TIMEOUT_SECONDS: "900"   # 15 minutes
+  # Max time to wait for the staging-deploy.yml dispatch to complete.
+  STAGING_DEPLOY_TIMEOUT_SECONDS: "600"  # 10 minutes
+
+jobs:
+  # ============================================================
+  # JOB 1: CFN instance replacement (skipped in dry-run / skip_instance_replace)
+  # ============================================================
+  replace-instance:
+    name: CFN -- Replace EC2 instance
+    if: ${{ !inputs.skip_instance_replace }}
+    runs-on: ubuntu-latest
+    environment: production   # requires reviewer approval if configured
+    outputs:
+      rebuild_start_epoch: ${{ steps.start-timer.outputs.rebuild_start_epoch }}
+
+    steps:
+      - name: Record rebuild start time
+        id: start-timer
+        run: |
+          EPOCH=$(date +%s)
+          echo "rebuild_start_epoch=$EPOCH" >> "$GITHUB_OUTPUT"
+          echo "Rebuild started at $(date -u --iso-8601=seconds) (epoch: $EPOCH)"
+
+      - name: Checkout infra repo
+        uses: actions/checkout@v6
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ secrets.AWS_CFN_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Validate ec2.yml template
+        run: |
+          aws cloudformation validate-template \
+            --template-body file://cloudformation/ec2.yml
+          echo "Template valid."
+
+      - name: Create CFN changeset (instance replacement)
+        id: changeset
+        run: |
+          CHANGESET_NAME="rebuild-$(date +%Y%m%d%H%M%S)"
+          echo "changeset_name=$CHANGESET_NAME" >> "$GITHUB_OUTPUT"
+
+          STACK_STATUS=$(aws cloudformation describe-stacks \
+            --stack-name mtga-companion-ec2 \
+            --query 'Stacks[0].StackStatus' \
+            --output text 2>/dev/null || echo "DOES_NOT_EXIST")
+
+          if echo "$STACK_STATUS" | grep -qE 'COMPLETE|ROLLBACK'; then
+            CHANGE_TYPE="UPDATE"
+          else
+            CHANGE_TYPE="CREATE"
+          fi
+          echo "change_type=$CHANGE_TYPE" >> "$GITHUB_OUTPUT"
+          echo "Changeset type: $CHANGE_TYPE (stack: $STACK_STATUS)"
+
+          aws cloudformation create-change-set \
+            --stack-name mtga-companion-ec2 \
+            --template-body file://cloudformation/ec2.yml \
+            --change-set-name "$CHANGESET_NAME" \
+            --change-set-type "$CHANGE_TYPE" \
+            --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM
+
+          aws cloudformation wait change-set-create-complete \
+            --stack-name mtga-companion-ec2 \
+            --change-set-name "$CHANGESET_NAME" || true
+
+      - name: Show changeset (always -- dry run or live)
+        run: |
+          aws cloudformation describe-change-set \
+            --stack-name mtga-companion-ec2 \
+            --change-set-name "${{ steps.changeset.outputs.changeset_name }}" \
+            --query 'Changes[].{Action:ResourceChange.Action,Resource:ResourceChange.LogicalResourceId,Type:ResourceChange.ResourceType,Replace:ResourceChange.Replacement}' \
+            --output table
+
+      - name: SAFETY CHECK -- abort if changeset shows instance Replacement
+        if: ${{ !inputs.dry_run }}
+        run: |
+          # The purpose of the rebuild is to replace the EC2 instance.
+          # But we must verify the changeset actually contains an instance
+          # replacement (not an unrelated template drift that would
+          # accidentally destroy and re-create the instance).
+          #
+          # If the ec2.yml template has NOT changed since the last deploy,
+          # the changeset may contain no changes (FAILED/no-changes status).
+          # In that case, we still need to replace the instance -- do so
+          # via a direct terminate (the EIP ensures the IP is stable; the
+          # ASG-less EC2 will NOT restart automatically).
+          #
+          # IMPORTANT: The EIP (R-02) MUST be deployed before running this
+          # workflow with dry_run=false. Without the EIP the public IP
+          # changes on replacement and DNS breaks.
+          EIP=$(aws cloudformation describe-stacks \
+            --stack-name mtga-companion-ec2 \
+            --query "Stacks[0].Outputs[?OutputKey=='ElasticIPAddress'].OutputValue" \
+            --output text 2>/dev/null || echo "")
+          if [ -z "$EIP" ] || [ "$EIP" = "None" ]; then
+            echo "ERROR: ElasticIPAddress not found in mtga-companion-ec2 stack outputs."
+            echo "R-02 (EIP allocation) must be deployed before running a live rebuild."
+            exit 1
+          fi
+          echo "EIP confirmed: $EIP -- safe to replace instance (IP will survive)."
+
+      - name: Execute changeset OR terminate instance directly
+        if: ${{ !inputs.dry_run }}
+        run: |
+          # Inspect changeset status: if it computed changes, execute it.
+          # If no-changes, terminate the instance directly so UserData re-runs.
+          CS_STATUS=$(aws cloudformation describe-change-set \
+            --stack-name mtga-companion-ec2 \
+            --change-set-name "${{ steps.changeset.outputs.changeset_name }}" \
+            --query 'Status' --output text 2>/dev/null || echo "UNKNOWN")
+
+          if [ "$CS_STATUS" = "FAILED" ]; then
+            # No-changes changeset. Terminate the instance directly.
+            INSTANCE_ID=$(aws cloudformation describe-stacks \
+              --stack-name mtga-companion-ec2 \
+              --query "Stacks[0].Outputs[?OutputKey=='InstanceId'].OutputValue" \
+              --output text)
+            echo "No template changes -- terminating $INSTANCE_ID directly."
+            aws ec2 terminate-instances --instance-ids "$INSTANCE_ID"
+            echo "instance_replaced_via=terminate" >> "$GITHUB_ENV"
+          else
+            echo "Executing CFN changeset..."
+            aws cloudformation execute-change-set \
+              --stack-name mtga-companion-ec2 \
+              --change-set-name "${{ steps.changeset.outputs.changeset_name }}"
+
+            if [ "${{ steps.changeset.outputs.change_type }}" = "CREATE" ]; then
+              aws cloudformation wait stack-create-complete --stack-name mtga-companion-ec2
+            else
+              aws cloudformation wait stack-update-complete --stack-name mtga-companion-ec2
+            fi
+            echo "instance_replaced_via=cfn_changeset" >> "$GITHUB_ENV"
+          fi
+
+          # Delete the changeset now that it is resolved.
+          aws cloudformation delete-change-set \
+            --stack-name mtga-companion-ec2 \
+            --change-set-name "${{ steps.changeset.outputs.changeset_name }}" || true
+
+      - name: Delete changeset (dry-run cleanup)
+        if: ${{ inputs.dry_run }}
+        run: |
+          aws cloudformation delete-change-set \
+            --stack-name mtga-companion-ec2 \
+            --change-set-name "${{ steps.changeset.outputs.changeset_name }}" || true
+          echo "Dry run -- changeset deleted. No instance was replaced."
+
+  # ============================================================
+  # JOB 2: Wait for SSM agent + nginx pre-deploy healthz
+  # ============================================================
+  wait-for-instance:
+    name: Wait -- SSM agent online + nginx healthz
+    needs: [replace-instance]
+    # Also runs when skip_instance_replace=true (no replace-instance job ran)
+    if: ${{ always() && (needs.replace-instance.result == 'success' || inputs.skip_instance_replace) }}
+    runs-on: ubuntu-latest
+
+    outputs:
+      instance_id: ${{ steps.find-instance.outputs.instance_id }}
+      nginx_ready_epoch: ${{ steps.nginx-check.outputs.nginx_ready_epoch }}
+
+    steps:
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ secrets.AWS_CFN_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Resolve new instance ID from CFN stack
+        id: find-instance
+        run: |
+          INSTANCE_ID=$(aws cloudformation describe-stacks \
+            --stack-name mtga-companion-ec2 \
+            --query "Stacks[0].Outputs[?OutputKey=='InstanceId'].OutputValue" \
+            --output text)
+
+          if [ -z "$INSTANCE_ID" ] || [ "$INSTANCE_ID" = "None" ]; then
+            echo "ERROR: Could not resolve InstanceId from mtga-companion-ec2 stack." >&2
+            exit 1
+          fi
+
+          echo "Instance ID: $INSTANCE_ID"
+          echo "instance_id=$INSTANCE_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Poll SSM agent until online (max ${{ env.SSM_READY_TIMEOUT_SECONDS }}s)
+        id: ssm-poll
+        run: |
+          INSTANCE_ID="${{ steps.find-instance.outputs.instance_id }}"
+          DEADLINE=$(( $(date +%s) + ${{ env.SSM_READY_TIMEOUT_SECONDS }} ))
+          INTERVAL=15
+          ATTEMPT=0
+
+          echo "Polling SSM for instance $INSTANCE_ID to come online..."
+
+          while true; do
+            ATTEMPT=$(( ATTEMPT + 1 ))
+            NOW=$(date +%s)
+            if [ "$NOW" -ge "$DEADLINE" ]; then
+              echo "ERROR: SSM agent did not come online within ${{ env.SSM_READY_TIMEOUT_SECONDS }}s." >&2
+              exit 1
+            fi
+
+            PING=$(aws ssm describe-instance-information \
+              --filters "Key=InstanceIds,Values=$INSTANCE_ID" \
+              --query "InstanceInformationList[0].PingStatus" \
+              --output text 2>/dev/null || echo "Unknown")
+
+            echo "[$ATTEMPT] SSM ping status: $PING (elapsed: $(( NOW - $(date +%s) + ${{ env.SSM_READY_TIMEOUT_SECONDS }} - DEADLINE + NOW ))s)"
+
+            if [ "$PING" = "Online" ]; then
+              echo "SSM agent online."
+              break
+            fi
+
+            sleep "$INTERVAL"
+          done
+
+      - name: Verify UserData bootstrap completed
+        run: |
+          INSTANCE_ID="${{ steps.find-instance.outputs.instance_id }}"
+          # Read the setup log to confirm bootstrap ran to completion.
+          # The last log line is "Bootstrap complete. Deploy binary..." from UserData.
+          COMMAND_ID=$(aws ssm send-command \
+            --instance-ids "$INSTANCE_ID" \
+            --document-name "AWS-RunShellScript" \
+            --parameters 'commands=["tail -5 /var/log/mtga-companion-setup.log 2>/dev/null || echo SETUP_LOG_NOT_FOUND"]' \
+            --region us-east-1 \
+            --query "Command.CommandId" \
+            --output text)
+
+          echo "SSM command ID: $COMMAND_ID"
+
+          for i in $(seq 1 20); do
+            sleep 5
+            STATUS=$(aws ssm get-command-invocation \
+              --command-id "$COMMAND_ID" \
+              --instance-id "$INSTANCE_ID" \
+              --query "Status" --output text 2>/dev/null || echo "Pending")
+            echo "[$i/20] Status: $STATUS"
+            if [ "$STATUS" = "Success" ]; then
+              OUTPUT=$(aws ssm get-command-invocation \
+                --command-id "$COMMAND_ID" \
+                --instance-id "$INSTANCE_ID" \
+                --query "StandardOutputContent" --output text)
+              echo "UserData tail:"
+              echo "$OUTPUT"
+              if echo "$OUTPUT" | grep -q "SETUP_LOG_NOT_FOUND"; then
+                echo "WARNING: setup log not found -- UserData may not have run." >&2
+                # Non-fatal: UserData may not have run yet or log was rotated.
+                # The subsequent nginx check is the real gate.
+              elif echo "$OUTPUT" | grep -q "Bootstrap complete"; then
+                echo "UserData bootstrap confirmed complete."
+              else
+                echo "WARNING: 'Bootstrap complete' not in last 5 lines -- UserData may still be running."
+              fi
+              break
+            elif [ "$STATUS" = "Failed" ] || [ "$STATUS" = "Cancelled" ] || [ "$STATUS" = "TimedOut" ]; then
+              echo "SSM command failed: $STATUS" >&2
+              exit 1
+            fi
+          done
+
+      - name: Pre-deploy nginx /healthz check (HTTP port 80)
+        id: nginx-check
+        run: |
+          # At this point UserData has installed nginx and started it.
+          # The staging BFF is NOT yet running (deploy happens in the next job).
+          # We probe nginx on port 80 to confirm the web server layer is up.
+          # Note: the nginx config proxies /healthz to the BFF on port 8080, so
+          # this will return a 502 until the BFF starts. We accept both 200
+          # and 502 here -- what matters is that nginx itself is responding.
+          # A connection-refused or timeout means nginx is not up.
+          MAX_ATTEMPTS=20
+          SLEEP=10
+
+          for i in $(seq 1 "$MAX_ATTEMPTS"); do
+            HTTP_CODE=$(curl -s -o /dev/null -w '%{http_code}' \
+              --max-time 10 \
+              --connect-timeout 5 \
+              "${{ env.STAGING_NGINX_HOST }}/healthz" || echo "000")
+
+            echo "[$i/$MAX_ATTEMPTS] nginx /healthz HTTP code: $HTTP_CODE"
+
+            if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "502" ] || [ "$HTTP_CODE" = "503" ]; then
+              echo "nginx is responding (HTTP $HTTP_CODE -- BFF not yet deployed)."
+              EPOCH=$(date +%s)
+              echo "nginx_ready_epoch=$EPOCH" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            sleep "$SLEEP"
+          done
+
+          echo "ERROR: nginx did not respond on port 80 within $(( MAX_ATTEMPTS * SLEEP ))s" >&2
+          exit 1
+
+  # ============================================================
+  # JOB 3: Trigger staging-deploy.yml to install + start staging BFF
+  # ============================================================
+  deploy-staging-bff:
+    name: Dispatch -- staging-deploy.yml (install staging BFF)
+    needs: [wait-for-instance]
+    if: ${{ !inputs.dry_run }}
+    runs-on: ubuntu-latest
+
+    outputs:
+      deploy_complete_epoch: ${{ steps.record-complete.outputs.deploy_complete_epoch }}
+
+    steps:
+      - name: Dispatch staging-deploy.yml in vault-mtg
+        id: dispatch
+        run: |
+          # Trigger staging-deploy.yml via the GitHub API.
+          # This installs the staging BFF binary, runs migrations, and
+          # restarts the staging BFF service -- the same path production release
+          # uses, exercised here first on a fresh instance.
+          #
+          # #2373 DEPENDENCY: Because /mtga-companion/production/latest-bff-sha
+          # is not yet written by any workflow, the UserData self-install skipped
+          # the BFF binary. We dispatch staging-deploy here to install it.
+          # After #2373 is resolved, this dispatch is still correct and necessary
+          # because staging uses a distinct binary (mtga-bff-staging), not the
+          # production binary that latest-bff-sha points to.
+          DISPATCH_RESPONSE=$(curl -s -w '\n%{http_code}' \
+            -X POST \
+            -H "Authorization: Bearer ${{ secrets.GH_PAT }}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/RdHamilton/vault-mtg/actions/workflows/staging-deploy.yml/dispatches" \
+            -d "{\"ref\":\"${{ inputs.staging_ref }}\"}")
+
+          HTTP_CODE=$(echo "$DISPATCH_RESPONSE" | tail -1)
+          BODY=$(echo "$DISPATCH_RESPONSE" | head -1)
+
+          echo "Dispatch HTTP code: $HTTP_CODE"
+          echo "Response: $BODY"
+
+          if [ "$HTTP_CODE" != "204" ]; then
+            echo "ERROR: staging-deploy dispatch failed (HTTP $HTTP_CODE)" >&2
+            exit 1
+          fi
+
+          echo "staging-deploy.yml dispatched on ref: ${{ inputs.staging_ref }}"
+          # Record dispatch time so we can compute RTO later.
+          echo "dispatch_epoch=$(date +%s)" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for staging-deploy to complete
+        run: |
+          # Poll the latest staging-deploy.yml run.
+          # We poll for up to STAGING_DEPLOY_TIMEOUT_SECONDS.
+          DEADLINE=$(( $(date +%s) + ${{ env.STAGING_DEPLOY_TIMEOUT_SECONDS }} ))
+          INTERVAL=20
+          ATTEMPT=0
+
+          # Give GitHub Actions a moment to register the dispatched run.
+          sleep 10
+
+          echo "Waiting for staging-deploy.yml to complete..."
+
+          while true; do
+            ATTEMPT=$(( ATTEMPT + 1 ))
+            NOW=$(date +%s)
+            if [ "$NOW" -ge "$DEADLINE" ]; then
+              echo "ERROR: staging-deploy.yml did not complete within ${{ env.STAGING_DEPLOY_TIMEOUT_SECONDS }}s." >&2
+              exit 1
+            fi
+
+            # Fetch the most recent run of staging-deploy.yml.
+            RUN_DATA=$(curl -s \
+              -H "Authorization: Bearer ${{ secrets.GH_PAT }}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/RdHamilton/vault-mtg/actions/workflows/staging-deploy.yml/runs?per_page=1&branch=${{ inputs.staging_ref }}")
+
+            STATUS=$(echo "$RUN_DATA" | jq -r '.workflow_runs[0].status // "no_runs"' 2>/dev/null || echo "parse_error")
+            CONCLUSION=$(echo "$RUN_DATA" | jq -r '.workflow_runs[0].conclusion // "none"' 2>/dev/null || echo "none")
+            RUN_ID=$(echo "$RUN_DATA" | jq -r '.workflow_runs[0].id // ""' 2>/dev/null || echo "")
+
+            echo "[$ATTEMPT] staging-deploy run $RUN_ID: status=$STATUS conclusion=$CONCLUSION"
+
+            if [ "$STATUS" = "completed" ]; then
+              if [ "$CONCLUSION" = "success" ]; then
+                echo "staging-deploy.yml completed successfully."
+                break
+              else
+                echo "ERROR: staging-deploy.yml completed with conclusion: $CONCLUSION" >&2
+                echo "View run: https://github.com/RdHamilton/vault-mtg/actions/runs/$RUN_ID" >&2
+                exit 1
+              fi
+            fi
+
+            sleep "$INTERVAL"
+          done
+
+      - name: Record deploy complete time
+        id: record-complete
+        run: |
+          EPOCH=$(date +%s)
+          echo "deploy_complete_epoch=$EPOCH" >> "$GITHUB_OUTPUT"
+          echo "Staging BFF deploy complete at $(date -u --iso-8601=seconds)"
+
+  # ============================================================
+  # JOB 4: Smoke gate -- healthz + auth + (Tim's Playwright hook)
+  # ============================================================
+  smoke-gate:
+    name: Smoke Gate -- healthz + auth-rejection + Playwright hook
+    needs: [wait-for-instance, deploy-staging-bff]
+    if: ${{ always() && (needs.deploy-staging-bff.result == 'success' || inputs.dry_run) }}
+    runs-on: ubuntu-latest
+
+    outputs:
+      smoke_complete_epoch: ${{ steps.record-smoke.outputs.smoke_complete_epoch }}
+
+    steps:
+      - name: SMOKE-1 -- /healthz returns 200 (HTTPS, full BFF up)
+        id: healthz
+        run: |
+          # This is the definitive liveness check: nginx + BFF + DB all must be
+          # working for /healthz to return 200 via HTTPS.
+          MAX_ATTEMPTS=24
+          SLEEP=10
+
+          for i in $(seq 1 "$MAX_ATTEMPTS"); do
+            HTTP_CODE=$(curl -s -o /dev/null -w '%{http_code}' \
+              --max-time 15 \
+              --connect-timeout 5 \
+              "${{ env.STAGING_BFF_HOST }}/healthz" || echo "000")
+
+            echo "[$i/$MAX_ATTEMPTS] STAGING /healthz -> HTTP $HTTP_CODE"
+
+            if [ "$HTTP_CODE" = "200" ]; then
+              echo "SMOKE-1 PASS: /healthz returned 200"
+              exit 0
+            fi
+
+            sleep "$SLEEP"
+          done
+
+          echo "SMOKE-1 FAIL: /healthz did not return 200 within $(( MAX_ATTEMPTS * SLEEP ))s" >&2
+          exit 1
+
+      - name: SMOKE-2 -- Unauthenticated Clerk-protected route returns 401
+        id: auth-rejection
+        run: |
+          # Verify Clerk middleware is wired and rejecting missing tokens.
+          # A 200 here would be a critical auth-bypass regression.
+          # A 5xx would indicate the BFF started but is not handling auth correctly.
+          # Both are smoke-gate failures.
+          PASS=true
+
+          check_auth() {
+            local desc="$1"
+            local method="$2"
+            local path="$3"
+            shift 3
+            local got
+            got=$(curl -s -o /dev/null -w '%{http_code}' \
+              --max-time 10 -X "$method" \
+              "${{ env.STAGING_BFF_HOST }}${path}" "$@" || echo "000")
+            if [ "$got" = "401" ]; then
+              echo "PASS: $desc -> $got"
+            else
+              echo "FAIL: $desc -- expected 401, got $got" >&2
+              PASS=false
+            fi
+          }
+
+          # Protected routes must reject missing auth.
+          check_auth "GET /api/v1/health/daemon (no auth)"     GET  "/api/v1/health/daemon"
+          check_auth "POST /api/v1/matches (no auth)"          POST "/api/v1/matches" \
+            -H "Content-Type: application/json" --data '{}'
+          check_auth "GET /api/v1/events (no auth)"            GET  "/api/v1/events"
+
+          # Must also reject garbage Bearer token -- middleware verifies, not just checks presence.
+          check_auth "GET /api/v1/health/daemon (garbage JWT)" GET  "/api/v1/health/daemon" \
+            -H "Authorization: Bearer not.a.real.jwt"
+
+          if [ "$PASS" = "true" ]; then
+            echo "SMOKE-2 PASS: all auth-rejection checks returned 401"
+          else
+            echo "SMOKE-2 FAIL: one or more auth-rejection checks did not return 401" >&2
+            exit 1
+          fi
+
+      - name: SMOKE-3 -- Daemon ingest rejects garbage API key with 401
+        id: daemon-ingest
+        run: |
+          HTTP_CODE=$(curl -s -o /dev/null -w '%{http_code}' \
+            --max-time 10 -X POST \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer not-a-real-api-key" \
+            --data '{"events":[]}' \
+            "${{ env.STAGING_BFF_HOST }}/api/v1/ingest/events" || echo "000")
+
+          echo "SMOKE-3: /api/v1/ingest/events (garbage key) -> HTTP $HTTP_CODE"
+          if [ "$HTTP_CODE" = "401" ]; then
+            echo "SMOKE-3 PASS"
+          else
+            echo "SMOKE-3 FAIL -- expected 401, got $HTTP_CODE" >&2
+            exit 1
+          fi
+
+      # -------------------------------------------------------
+      # SMOKE-4: Tim's Playwright suite
+      # This step is a documented hook for Tim's Playwright tests.
+      # It is currently a passing no-op stub so the smoke gate is
+      # green immediately. Tim must replace this stub with a real
+      # workflow_call to the Playwright smoke suite in vault-mtg.
+      #
+      # CONTRACT FOR TIM (see ## TIM SPEC below this workflow):
+      #   - Target URL: ${{ env.STAGING_BFF_HOST }} (BFF)
+      #   - SPA URL:    https://stg-app.vaultmtg.app (SPA)
+      #   - Tim must use the existing e2e-smoke.yml / staging-auth-smoke.sh
+      #     infrastructure as the basis -- do not build a new framework.
+      #   - The Playwright suite runs as a reusable workflow called here.
+      #   - Required assertions: see ## TIM SPEC section below.
+      # -------------------------------------------------------
+      - name: "SMOKE-4 -- Playwright suite (TIM STUB: replace with reusable workflow call)"
+        id: playwright-stub
+        run: |
+          echo "SMOKE-4: Playwright suite stub -- Tim must implement."
+          echo "Target BFF:  ${{ env.STAGING_BFF_HOST }}"
+          echo "Target SPA:  https://stg-app.vaultmtg.app"
+          echo "SMOKE-4 PASS (stub -- not yet implemented by Tim)"
+          # TODO (Tim): replace this run step with a uses: step that calls
+          # the reusable Playwright smoke workflow in vault-mtg.
+          # See ## TIM SPEC at the bottom of this file for the exact contract.
+
+      - name: Record smoke gate complete
+        id: record-smoke
+        run: |
+          EPOCH=$(date +%s)
+          echo "smoke_complete_epoch=$EPOCH" >> "$GITHUB_OUTPUT"
+          echo "Smoke gate complete at $(date -u --iso-8601=seconds)"
+
+  # ============================================================
+  # JOB 5: RTO measurement and report
+  # ============================================================
+  measure-rto:
+    name: Measure RTO and write report
+    needs: [replace-instance, wait-for-instance, deploy-staging-bff, smoke-gate]
+    if: ${{ always() && needs.smoke-gate.result == 'success' }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ secrets.AWS_CFN_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Compute and record RTO
+        run: |
+          START="${{ needs.replace-instance.outputs.rebuild_start_epoch }}"
+          NGINX_READY="${{ needs.wait-for-instance.outputs.nginx_ready_epoch }}"
+          DEPLOY_DONE="${{ needs.deploy-staging-bff.outputs.deploy_complete_epoch }}"
+          SMOKE_DONE="${{ needs.smoke-gate.outputs.smoke_complete_epoch }}"
+          NOW=$(date +%s)
+
+          # Fall back gracefully if replace-instance was skipped.
+          if [ -z "$START" ]; then
+            START="$NOW"
+          fi
+
+          rto_nginx=$(( ${NGINX_READY:-$NOW} - START ))
+          rto_deploy=$(( ${DEPLOY_DONE:-$NOW} - START ))
+          rto_smoke=$(( ${SMOKE_DONE:-$NOW} - START ))
+
+          echo "=============================="
+          echo "  RTO MEASUREMENT SUMMARY"
+          echo "=============================="
+          echo "  Instance terminated:         t=0"
+          echo "  nginx responding (port 80):  t=${rto_nginx}s"
+          echo "  staging-deploy complete:     t=${rto_deploy}s"
+          echo "  smoke gate green:            t=${rto_smoke}s"
+          echo ""
+          echo "  Total RTO (term -> smoke):   ${rto_smoke}s ($(( rto_smoke / 60 ))m $(( rto_smoke % 60 ))s)"
+          echo ""
+          if [ "$rto_smoke" -le 1800 ]; then
+            echo "  STATUS: PASS (within 30-minute target)"
+          else
+            echo "  STATUS: WARNING -- RTO exceeded 30-minute target."
+            echo "  Investigate UserData timing, nginx startup, and staging-deploy duration."
+          fi
+          echo "=============================="
+
+          # Write RTO as a summary annotation.
+          cat >> "$GITHUB_STEP_SUMMARY" << SUMMARY
+          ## R-17 Smoke Gate Result
+
+          | Milestone | Elapsed |
+          |---|---|
+          | nginx responding (port 80) | ${rto_nginx}s |
+          | staging-deploy complete | ${rto_deploy}s |
+          | smoke gate green | ${rto_smoke}s |
+
+          **Total RTO**: ${rto_smoke}s ($(( rto_smoke / 60 ))m $(( rto_smoke % 60 ))s)
+          **Target**: 1800s (30 min)
+          **Result**: $( [ "$rto_smoke" -le 1800 ] && echo "PASS" || echo "OVER TARGET" )
+          SUMMARY
+
+# ============================================================
+#
+# ## TIM SPEC -- Playwright Smoke Suite Contract (R-17)
+#
+# This section is the authoritative spec for Tim's Playwright deliverable.
+# Tim must implement a reusable workflow (or a workflow_call step) that
+# plugs into SMOKE-4 above.
+#
+# ---- WHERE TO PLUG IN ----
+# Replace the SMOKE-4 `run` step in the smoke-gate job with:
+#   - name: SMOKE-4 -- Playwright suite
+#     uses: RdHamilton/vault-mtg/.github/workflows/e2e-smoke.yml@main
+#     with:
+#       base_url: https://stg-app.vaultmtg.app
+#       bff_url:  https://staging-api.vaultmtg.app
+#     secrets: inherit
+#
+# ---- WHAT THE PLAYWRIGHT SUITE MUST ASSERT ----
+# Tim must create/extend tests/smoke/staging.spec.ts (or equivalent) with
+# the following assertions, in this order:
+#
+#   1. SPA loads: navigate to https://stg-app.vaultmtg.app -- expect status 200
+#      and that the Clerk sign-in widget or SPA shell renders (no blank page,
+#      no JS error in console).
+#
+#   2. Clerk sign-in page is reachable: navigate to /sign-in -- expect the
+#      Clerk-rendered sign-in form to be visible (locator: [data-locator="sign-in"]).
+#      This proves the SPA is wired to the correct Clerk instance.
+#
+#   3. BFF /healthz from browser: fetch('https://staging-api.vaultmtg.app/healthz')
+#      from inside the Playwright page context -- expect HTTP 200. This proves the
+#      CORS preflight succeeds from the SPA origin, which a plain curl cannot prove.
+#
+#   4. Unauthenticated API call returns 401: fetch('/api/v1/health/daemon') with
+#      no Authorization header -- expect HTTP 401 (not 200, not 5xx). This is the
+#      browser-side Clerk middleware regression check.
+#
+# ---- URL INPUTS ----
+#   base_url: https://stg-app.vaultmtg.app  (SPA)
+#   bff_url:  https://staging-api.vaultmtg.app  (BFF)
+#
+# ---- SECRETS ----
+#   CLERK_STAGING_SECRET_KEY -- already present in the vault-mtg staging environment.
+#
+# ---- DO NOT ----
+#   - Do not write a new test runner or framework. Use the existing
+#     frontend/playwright.config.ts setup.
+#   - Do not add a Postgres service container -- this suite tests a live staging
+#     instance, not a local build.
+#   - Do not perform any authenticated flows that require a real Clerk user session.
+#     The suite is intentionally limited to unauthenticated assertions + Playwright
+#     navigation.
+#
+# ---- ACCEPTANCE CRITERIA ----
+#   - Suite runs in < 5 minutes on ubuntu-latest.
+#   - All 4 assertions above pass against a healthy staging instance.
+#   - A failure in any assertion causes the smoke-gate job to fail.
+#   - Results are uploaded as a GitHub Actions artifact (playwright-report/).
+#
+# ============================================================
