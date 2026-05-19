@@ -394,6 +394,34 @@ Resources:
         - Key: Environment
           Value: !Ref Environment
 
+  # ---------------------------------------------------------
+  # Elastic IP + Association
+  # ---------------------------------------------------------
+  # An EIP pins a stable public IP to the instance so that EC2 replacement
+  # (e.g., the R-13 namespace cutover) does not require a DNS change.
+  # The EIP address is the value to set on the api.vaultmtg.app A record.
+  #
+  # Deploy note: associating an EIP changes the instance public IP immediately.
+  # Coordinate the DNS repoint (api.vaultmtg.app A record) with the CFN
+  # changeset execution as documented in the deploy runbook in the PR body.
+  ElasticIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub "mtga-companion-eip-${Environment}"
+        - Key: Project
+          Value: mtga-companion
+        - Key: Environment
+          Value: !Ref Environment
+
+  ElasticIPAssociation:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      InstanceId: !Ref EC2Instance
+      EIP: !Ref ElasticIP
+
 Outputs:
   InstanceId:
     Description: EC2 instance ID
@@ -401,8 +429,16 @@ Outputs:
     Export:
       Name: !Sub "${AWS::StackName}-InstanceId"
 
+  ElasticIPAddress:
+    Description: >
+      Elastic IP address allocated to the EC2 instance.
+      Set the api.vaultmtg.app A record to this value after deploying this changeset.
+    Value: !Ref ElasticIP
+    Export:
+      Name: !Sub "${AWS::StackName}-ElasticIPAddress"
+
   PublicIP:
-    Description: EC2 instance public IP address
+    Description: EC2 instance public IP address (same as ElasticIPAddress after association)
     Value: !GetAtt EC2Instance.PublicIp
     Export:
       Name: !Sub "${AWS::StackName}-PublicIP"
