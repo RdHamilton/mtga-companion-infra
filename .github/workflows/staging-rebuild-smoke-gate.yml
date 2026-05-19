@@ -1,5 +1,30 @@
 name: Staging Rebuild + Smoke Gate
 
+# !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+# WARNING: THIS WORKFLOW TARGETS THE PRODUCTION EC2 INSTANCE
+#
+# Stack: mtga-companion-ec2
+# This is the LIVE PRODUCTION instance. Staging and production BFF are
+# co-hosted on it. A dry_run=false dispatch with skip_instance_replace=false
+# WILL TERMINATE the running instance, taking production offline for the
+# full RTO duration (~10-30 minutes).
+#
+# DO NOT dispatch with dry_run=false unless:
+#   1. You intend to perform a live rebuild exercise.
+#   2. R-02's Elastic IP is deployed (ElasticIPAddress in stack outputs) --
+#      without the EIP, the instance IP changes and DNS breaks permanently.
+#   3. The production GitHub Environment has a required-reviewer approval
+#      gate configured (see F-3 comment below and PR #53 description).
+#      This gate MUST be in place before R-02 ships -- once the EIP exists,
+#      the EIP guard no longer blocks a destructive run (F-4).
+#
+# Safe operations (dry_run=true OR skip_instance_replace=true):
+#   - dry_run=true (default): validates the changeset and probes the existing
+#     BFF but does NOT replace the instance.
+#   - skip_instance_replace=true: runs smoke checks only against the existing
+#     instance; no CFN operations.
+# !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+#
 # R-17: Make staging rebuildable from zero with a fully automated smoke gate.
 #
 # PURPOSE
@@ -38,6 +63,21 @@ name: Staging Rebuild + Smoke Gate
 #   workflow_dispatch only -- never runs on push. A rebuild is a deliberate
 #   operator action that terminates a running EC2 instance.
 #
+# APPROVAL GATE (F-3 / F-4)
+#   The production GitHub Environment must have a required-reviewer configured
+#   BEFORE R-02's Elastic IP is deployed. See the WARNING banner above and the
+#   PR #53 description for the exact setup steps (requires Ramone sign-off).
+#   Once the EIP exists the EIP guard in the SAFETY CHECK step no longer blocks
+#   destructive runs -- the Environment approval gate becomes the only gate.
+#
+# KNOWN LIMITATION -- STAGING-DEPLOY RUN-ID CORRELATION
+#   The staging-deploy poll (Job 3) fetches the most-recent run of
+#   staging-deploy.yml rather than correlating by the run ID created by the
+#   dispatch in this workflow. A concurrent dispatch from another source could
+#   cause a false-positive or false-negative result. This is tracked as a
+#   follow-up (see PR #53 non-blocking notes); it is non-critical for the
+#   current single-operator environment.
+#
 # #2373 DEPENDENCY DOCUMENTED
 #   /mtga-companion/production/latest-bff-sha is not written by any current
 #   workflow (issue #2373, open). The UserData self-install step in ec2.yml
@@ -51,9 +91,13 @@ on:
     inputs:
       dry_run:
         description: >
-          Dry run -- validate changeset, poll for SSM readiness, and run
-          pre-deploy healthz only. Does NOT execute the CFN changeset and
-          does NOT trigger staging-deploy. Safe to run at any time.
+          Dry run -- validate the CFN changeset (no execution), poll for SSM
+          readiness, and run the pre-deploy nginx healthz check on the EXISTING
+          instance. The smoke-gate job (SMOKE-1 through SMOKE-4) still runs
+          against the existing BFF. Does NOT execute the CFN changeset and does
+          NOT trigger staging-deploy. Safe to run at any time without
+          terminating the instance. Set to false only when you intend a live
+          rebuild that will terminate the production EC2 instance.
         required: false
         type: boolean
         default: true
@@ -101,10 +145,23 @@ jobs:
   # JOB 1: CFN instance replacement (skipped in dry-run / skip_instance_replace)
   # ============================================================
   replace-instance:
-    name: CFN -- Replace EC2 instance
+    name: "WARNING: CFN -- Replace PRODUCTION EC2 instance (dry_run=false terminates production)"
+    # !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+    # THIS JOB TARGETS --stack-name mtga-companion-ec2 -- THE LIVE
+    # PRODUCTION INSTANCE. A dry_run=false dispatch WILL TERMINATE the
+    # running EC2, taking production offline for the full RTO duration.
+    #
+    # APPROVAL GATE REQUIREMENT (F-3 / F-4):
+    #   The production GitHub Environment must have a required-reviewer
+    #   configured BEFORE R-02's Elastic IP is deployed. Once the EIP
+    #   exists, the EIP guard in the SAFETY CHECK step below is satisfied
+    #   automatically and this job will proceed without further blocking.
+    #   See PR #53 description for the exact gh api setup steps.
+    # !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
     if: ${{ !inputs.skip_instance_replace }}
     runs-on: ubuntu-latest
-    environment: production   # requires reviewer approval if configured
+    timeout-minutes: 40
+    environment: production   # REQUIRED: must have a required-reviewer before R-02 EIP ships
     outputs:
       rebuild_start_epoch: ${{ steps.start-timer.outputs.rebuild_start_epoch }}
 
@@ -252,6 +309,7 @@ jobs:
     # Also runs when skip_instance_replace=true (no replace-instance job ran)
     if: ${{ always() && (needs.replace-instance.result == 'success' || inputs.skip_instance_replace) }}
     runs-on: ubuntu-latest
+    timeout-minutes: 40
 
     outputs:
       instance_id: ${{ steps.find-instance.outputs.instance_id }}
@@ -400,6 +458,7 @@ jobs:
     needs: [wait-for-instance]
     if: ${{ !inputs.dry_run }}
     runs-on: ubuntu-latest
+    timeout-minutes: 40
 
     outputs:
       deploy_complete_epoch: ${{ steps.record-complete.outputs.deploy_complete_epoch }}
@@ -504,6 +563,7 @@ jobs:
     needs: [wait-for-instance, deploy-staging-bff]
     if: ${{ always() && (needs.deploy-staging-bff.result == 'success' || inputs.dry_run) }}
     runs-on: ubuntu-latest
+    timeout-minutes: 40
 
     outputs:
       smoke_complete_epoch: ${{ steps.record-smoke.outputs.smoke_complete_epoch }}
@@ -638,6 +698,7 @@ jobs:
     needs: [replace-instance, wait-for-instance, deploy-staging-bff, smoke-gate]
     if: ${{ always() && needs.smoke-gate.result == 'success' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 40
 
     steps:
       - name: Configure AWS credentials (OIDC)
