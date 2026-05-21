@@ -15,6 +15,13 @@ name: CFN Changeset Gate
 #   Reset ALLOW_REPLACEMENT to false (or delete the variable) immediately after
 #   the PR merges.  Every use is logged in the GitHub Actions run summary.
 #
+# Post-deploy ratification note:
+#   When a drift fix was already applied live before the PR merges (Path A),
+#   create-change-set returns "The submitted information didn't contain changes."
+#   This is a SUCCESS signal — the template matches the live stack.  The gate
+#   correctly passes on this message (see check_stack → grep for "didn't contain
+#   changes|no changes|no updates are to be performed").
+#
 # Path-filter note: a paths: filter was intentionally removed (2026-05-19).
 # A paths-filtered workflow never posts a check on non-matching PRs, which
 # would block every non-CFN PR once this job is a required status check.
@@ -209,8 +216,12 @@ jobs:
                 --query 'StatusReason' \
                 --output text)
               echo "  Changeset FAILED: $CS_REASON"
-              if echo "$CS_REASON" | grep -qi "no changes"; then
-                echo "  No changes detected — gate passes (no-op update)."
+              # AWS returns either "The submitted information didn't contain changes."
+              # or "No updates are to be performed." — both are no-op outcomes.
+              # A post-deploy ratification PR (drift already applied live) will
+              # produce the first message; treat both as SUCCESS, not as a gate error.
+              if echo "$CS_REASON" | grep -qiE "didn.t contain changes|no changes|no updates are to be performed"; then
+                echo "  No changes detected (changeset intentionally empty) — gate passes (no-op update)."
                 return 0
               fi
               echo "  Changeset failed for an unexpected reason — treating as gate error."
