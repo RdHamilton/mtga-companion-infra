@@ -571,13 +571,15 @@ Resources:
   # changeset execution as documented in the deploy runbook in the PR body.
   ElasticIP:
     Type: AWS::EC2::EIP
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       Domain: vpc
       Tags:
         - Key: Name
           Value: !Sub "mtga-companion-eip-${Environment}"
         - Key: Project
-          Value: mtga-companion
+          Value: vaultmtg
         - Key: Environment
           Value: !Ref Environment
 
