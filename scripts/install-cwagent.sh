@@ -64,6 +64,26 @@ chmod 640 /var/log/mtga-bff/bff.log 2>/dev/null || true
 log "Log permissions fixed."
 
 # ----------------------------------------------------------
+# 2c. Configure logrotate for /var/log/mtga-bff/*.log
+# ----------------------------------------------------------
+log "Configuring logrotate for BFF logs..."
+cat > /etc/logrotate.d/mtga-bff << 'LOGROTATE'
+/var/log/mtga-bff/*.log {
+    daily
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    sharedscripts
+    postrotate
+        systemctl kill -s HUP rsyslog || true
+    endscript
+}
+LOGROTATE
+log "logrotate configured for /var/log/mtga-bff/*.log."
+
+# ----------------------------------------------------------
 # 3. Write the CloudWatch Agent configuration
 # ----------------------------------------------------------
 log "Writing CWAgent config..."
