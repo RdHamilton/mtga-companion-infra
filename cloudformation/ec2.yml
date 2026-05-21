@@ -96,10 +96,36 @@ Resources:
                   - ssm:GetParameters
                   - ssm:GetParametersByPath
                 Resource:
-                  - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/mtga-companion/*"
-                  # 5a (Phase 5 VaultMTG rename) -- additive expand; mtga-companion entry
-                  # remains and will be removed in step 5d after SSM cutover is verified.
-                  - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/vaultmtg/*"
+                  # /mtga-companion/* paths -- current bootstrap namespace.
+                  # Narrowed to production/ and prod/ sub-paths; /mtga-companion/staging/*
+                  # is excluded by this explicit enumeration.
+                  # Phase 5d (R-13 SSM namespace cutover) will replace these with
+                  # /vaultmtg/app/production/* ARNs after the cutover is verified.
+                  #
+                  # Parameters read during EC2 UserData bootstrap:
+                  - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/mtga-companion/production/ALLOWED_ORIGINS"
+                  - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/mtga-companion/production/CLERK_FRONTEND_API"
+                  - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/mtga-companion/production/CLERK_SECRET_KEY"
+                  - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/mtga-companion/production/clerk-secret-key"
+                  - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/mtga-companion/production/db-endpoint"
+                  - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/mtga-companion/production/db-name"
+                  - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/mtga-companion/production/db-secret-arn"
+                  - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/mtga-companion/production/domain-name"
+                  # Parameters read by the deploy pipeline (provision-db-url.sh, provision-env.sh):
+                  - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/mtga-companion/prod/daemon-jwt-secret"
+                  # Legacy path present in parameter store; retained until daemon-jwt-secret
+                  # migration to /vaultmtg/* is confirmed complete (Phase 5d).
+                  - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/mtga-companion/daemon-jwt-secret"
+                  #
+                  # /vaultmtg/prod/* paths -- BFF runtime only (SENTRY_DSN + POSTHOG_API_KEY).
+                  # Narrowed from the former blanket /vaultmtg/* wildcard; the remaining
+                  # 15 /vaultmtg/prod/* params (discord, mailchimp, crisp, typeform, buffer,
+                  # notion, sentry-auth-token, posthog-personal-api-key, etc.) are NOT
+                  # BFF concerns and are excluded here.
+                  # The /vaultmtg/staging/*, /vaultmtg/production/* (SPA/marketing infra),
+                  # and any future /vaultmtg/app/* paths are also excluded until R-13 lands.
+                  - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/vaultmtg/prod/sentry-bff-dsn"
+                  - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/vaultmtg/prod/posthog-api-key"
               # kms:Decrypt is required to read SecureString parameters (e.g.
               # /mtga-companion/prod/daemon-jwt-secret) encrypted with the
               # default SSM KMS key (alias/aws/ssm).
