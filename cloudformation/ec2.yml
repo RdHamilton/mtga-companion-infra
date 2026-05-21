@@ -122,12 +122,16 @@ Resources:
                   # Production EC2 also hosts the staging BFF service; grant read
                   # access to the staging artifact bucket so SSM deploy commands work.
                   - arn:aws:s3:::mtga-companion-deploy-artifacts-staging/*
+                  # Bucket renamed from mtga-companion-deploy-artifacts-staging to
+                  # vaultmtg-deploy-artifacts-staging post repo rename (ADR-022).
+                  - arn:aws:s3:::vaultmtg-deploy-artifacts-staging/*
               - Effect: Allow
                 Action:
                   - s3:ListBucket
                 Resource:
                   - !Sub "arn:aws:s3:::mtga-companion-deploy-artifacts-${Environment}"
                   - arn:aws:s3:::mtga-companion-deploy-artifacts-staging
+                  - arn:aws:s3:::vaultmtg-deploy-artifacts-staging
         - PolicyName: CloudFormationReadExports
           PolicyDocument:
             Version: "2012-10-17"

@@ -31,6 +31,16 @@ Parameters:
     Default: arn:aws:iam::901347789205:oidc-provider/token.actions.githubusercontent.com
     Description: ARN of the GitHub Actions OIDC provider in this account
 
+  AppRepo:
+    Type: String
+    Default: vault-mtg
+    Description: GitHub repository name for the main VaultMTG app (renamed from MTGA-Companion)
+
+  WebRepo:
+    Type: String
+    Default: vault-mtg-web
+    Description: GitHub repository name for the VaultMTG marketing/web site
+
   SyncLambdaFunctionArn:
     Type: String
     Default: arn:aws:lambda:us-east-1:901347789205:function:vault-mtg-sync
@@ -361,6 +371,119 @@ Resources:
             Resource: "*"
 
   # ---------------------------------------------------------------------------
+  # github-actions-oidc-deploy
+  # Assumed by vault-mtg staging-deploy.yml and deploy-spa*.yml workflows for
+  # app deploys (BFF staging binary, SPA CDN, marketing site).
+  # This role was provisioned out-of-band and codified here post-P0 incident
+  # on 2026-05-21 when the trust policy still referenced the pre-rename repo
+  # name RdHamilton/MTGA-Companion. The sub-claim has been updated to
+  # vault-mtg (current name). vault-mtg-web and mtga-companion-web retained
+  # for rollback safety; mtga-companion-web can be pruned after the next
+  # vault-mtg-web OIDC re-auth confirms the new claim works.
+  # See vault-mtg#ISSUE (Hotfix: OIDC trust policy stale post-rename).
+  # ---------------------------------------------------------------------------
+  GhaAppDeployRole:
+    Type: AWS::IAM::Role
+    DeletionPolicy: Retain
+    Properties:
+      RoleName: github-actions-oidc-deploy
+      Description: >
+        GitHub Actions OIDC role for staging-deploy.yml and deploy-spa*.yml
+        in vault-mtg and vault-mtg-web. Grants BFF staging S3 upload,
+        SPA/marketing CDN invalidation, SSM send-command for EC2 deploys,
+        and SSM parameter reads for deploy config.
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Ref OidcProviderArn
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              StringLike:
+                token.actions.githubusercontent.com:sub:
+                  - !Sub repo:${GitHubOrg}/${AppRepo}:*
+                  - !Sub repo:${GitHubOrg}/${WebRepo}:*
+                  - !Sub repo:${GitHubOrg}/mtga-companion-web:*
+      Policies:
+        - PolicyName: github-actions-deploy-permissions
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: S3DeployBuckets
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                  - s3:CreateBucket
+                  - s3:PutBucketVersioning
+                  - s3:GetBucketVersioning
+                Resource:
+                  - arn:aws:s3:::mtga-companion-deploy-artifacts-production
+                  - arn:aws:s3:::mtga-companion-deploy-artifacts-production/*
+                  - arn:aws:s3:::vaultmtg-app-marketing
+                  - arn:aws:s3:::vaultmtg-app-marketing/*
+                  - arn:aws:s3:::vaultmtg-app-spa
+                  - arn:aws:s3:::vaultmtg-app-spa/*
+                  - arn:aws:s3:::vaultmtg-stg-app-spa
+                  - arn:aws:s3:::vaultmtg-stg-app-spa/*
+                  - arn:aws:s3:::rhamiltoneng-site
+                  - arn:aws:s3:::rhamiltoneng-site/*
+                  - arn:aws:s3:::mtga-companion-deploy-artifacts-staging
+                  - arn:aws:s3:::mtga-companion-deploy-artifacts-staging/*
+                  - arn:aws:s3:::vaultmtg-deploy-artifacts-staging
+                  - arn:aws:s3:::vaultmtg-deploy-artifacts-staging/*
+              - Sid: CloudFrontInvalidations
+                Effect: Allow
+                Action: cloudfront:CreateInvalidation
+                Resource:
+                  - arn:aws:cloudfront::901347789205:distribution/E2X31QYC4F5OX1
+                  - arn:aws:cloudfront::901347789205:distribution/E1CMIQSPLX5W4K
+                  - arn:aws:cloudfront::901347789205:distribution/E38F9CK3CM4EZZ
+                  - arn:aws:cloudfront::901347789205:distribution/EAZCYZ6PU3733
+              - Sid: SSMParameterRead
+                Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                Resource:
+                  - arn:aws:ssm:us-east-1:901347789205:parameter/mtga-companion/*
+                  - arn:aws:ssm:us-east-1:901347789205:parameter/vault-mtg/*
+                  - arn:aws:ssm:us-east-1:901347789205:parameter/mtga-companion-web/*
+                  - arn:aws:ssm:us-east-1:901347789205:parameter/vaultmtg/*
+                  - arn:aws:ssm:us-east-1:901347789205:parameter/rhamiltoneng/*
+              - Sid: SSMSendCommand
+                Effect: Allow
+                Action: ssm:SendCommand
+                Resource:
+                  - arn:aws:ec2:us-east-1:901347789205:instance/i-065351fbb99da2d22
+                  - arn:aws:ec2:us-east-1:901347789205:instance/i-0226bf51fcf09b506
+                  - arn:aws:ssm:us-east-1::document/AWS-RunShellScript
+              - Sid: SSMGetCommandInvocation
+                Effect: Allow
+                Action: ssm:GetCommandInvocation
+                Resource: "*"
+              - Sid: EC2DescribeForSSM
+                Effect: Allow
+                Action: ec2:DescribeInstances
+                Resource: "*"
+              - Sid: LambdaUpdateSync
+                Effect: Allow
+                Action: lambda:UpdateFunctionCode
+                Resource: arn:aws:lambda:us-east-1:901347789205:function:mtga-sync
+      Tags:
+        - Key: ManagedBy
+          Value: cloudformation
+        - Key: Stack
+          Value: !Sub mtga-companion-iam-gha-roles
+        - Key: Purpose
+          Value: github-actions-oidc
+
+  # ---------------------------------------------------------------------------
   # gha-infra-sync-deploy
   # Assumed by deploy-sync-lambda.yml to update the vault-mtg-sync Lambda
   # and manage its CloudFormation stack. Scoped to the infra repo only.
@@ -680,6 +803,12 @@ Resources:
           Value: github-actions-oidc
 
 Outputs:
+  GhaAppDeployRoleArn:
+    Description: ARN of the github-actions-oidc-deploy role (used by staging-deploy.yml and deploy-spa*.yml)
+    Value: !GetAtt GhaAppDeployRole.Arn
+    Export:
+      Name: !Sub mtga-companion-iam-gha-roles-AppDeployRoleArn
+
   GhaInfraSyncDeployRoleArn:
     Description: ARN of the gha-infra-sync-deploy OIDC role (used by deploy-sync-lambda.yml)
     Value: !GetAtt GhaInfraSyncDeployRole.Arn
