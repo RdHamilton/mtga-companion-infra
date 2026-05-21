@@ -19,7 +19,7 @@ log() { echo "[setup] $(date '+%Y-%m-%dT%H:%M:%S') $*"; }
 # ---------------------------------------------------------
 log "Installing system packages..."
 dnf update -y --quiet
-dnf install -y nginx logrotate aws-cli jq python3 python3-pip
+dnf install -y nginx logrotate aws-cli jq python3 python3-pip postgresql15
 
 # certbot via pip (certbot-nginx not in AL2023 default repos)
 pip3 install --quiet certbot certbot-nginx
