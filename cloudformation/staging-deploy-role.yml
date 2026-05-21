@@ -1,0 +1,201 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  S-03: vaultmtg-staging-deploy-provisioner scoped IAM role (ADR-022 addendum
+  sect4A). Dedicated deploy-provisioning identity for provision-staging-env.sh.
+  Scoped to /vaultmtg/staging/*, /vaultmtg/app/staging/*, /mtga-companion/staging/*,
+  kms:Decrypt via alias/aws/ssm, and secretsmanager:GetSecretValue on mtga-companion/staging/* only.
+  No production SSM access. No writes. No S3. No EC2 control-plane.
+  Trust: GitHub OIDC (Path B, end state) + EC2 instance AssumeRole bridge (Path A,
+  interim -- removed when Path B refactor lands). Gates S-02 and EC-6.
+  Deploy order: standalone. See RdHamilton/vault-mtg#2364.
+
+Parameters:
+  GitHubOrg:
+    Type: String
+    Default: RdHamilton
+    Description: GitHub organization or user that owns the app repo
+
+  GitHubRepo:
+    Type: String
+    Default: vault-mtg
+    Description: GitHub app repository name (vault-mtg)
+
+  OidcProviderArn:
+    Type: String
+    Default: arn:aws:iam::901347789205:oidc-provider/token.actions.githubusercontent.com
+    Description: ARN of the GitHub Actions OIDC provider in this account
+
+  EC2RoleArn:
+    Type: String
+    Default: arn:aws:iam::901347789205:role/mtga-companion-ec2-role-production
+    Description: >
+      ARN of the production EC2 instance role. Used for the Path A interim trust
+      statement (sts:AssumeRole bridge). Removed when Path B refactor lands.
+
+Resources:
+
+  # ---------------------------------------------------------------------------
+  # vaultmtg-staging-deploy-provisioner
+  #
+  # Purpose: dedicated, scoped IAM identity for the staging BFF env-file
+  #   provisioning step. Replaces the production EC2 instance role as the
+  #   credential source for provision-staging-env.sh.
+  #
+  # Trust policy (two statements):
+  #   Path B (end state) -- GitHub OIDC. staging-deploy.yml assumes this role
+  #   directly in the GHA runner after Bob's refactor lands (sect4A.3). The
+  #   sub-claim is pinned to refs/heads/main to restrict the scope to the
+  #   canonical deploy path; the staging-deploy.yml workflow runs only on
+  #   pushes to main and workflow_dispatch from main.
+  #
+  #   Path A (interim) -- the production EC2 instance role may assume this
+  #   role via sts:AssumeRole so that provision-staging-env.sh can call
+  #   sts:AssumeRole from inside the SSM RunCommand session and export
+  #   scoped credentials before any aws ssm get-parameter call. The
+  #   instance role needs only sts:AssumeRole on this one ARN (not the
+  #   SSM grants), which is strictly smaller than its current /vaultmtg/*
+  #   grant. The Path A statement is removed in the same PR as the Path B
+  #   refactor (sect4A.3, sect4A.6).
+  #
+  # Permission set: exactly the SSM paths and secrets provision-staging-env.sh
+  #   calls, auditable line-by-line against the script:
+  #
+  #   /vaultmtg/staging/*          -- BFF core + DB config + integration secrets
+  #   /vaultmtg/app/staging/*      -- target namespace after R-13 cutover
+  #   /mtga-companion/staging/*    -- legacy path; dropped in step 5d
+  #   kms:Decrypt via SSM KMS key  -- SecureString params (CLERK_SECRET_KEY etc.)
+  #   secretsmanager:GetSecretValue on mtga-companion/staging/* -- staging RDS credential only
+  #
+  # What is NOT granted (explicit scope boundary):
+  #   - /vaultmtg/prod/* or /vaultmtg/production/*
+  #   - /mtga-companion/production/*
+  #   - ssm:PutParameter, ssm:DeleteParameter (no write)
+  #   - S3 (no artifact access)
+  #   - EC2 control-plane actions
+  #   - secretsmanager:GetSecretValue on production secrets
+  # ---------------------------------------------------------------------------
+  StagingDeployProvisionerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: vaultmtg-staging-deploy-provisioner
+      Description: >
+        Dedicated scoped IAM role for the staging BFF env-file provisioning step.
+        Grants SSM reads on /vaultmtg/staging/*, /vaultmtg/app/staging/*,
+        /mtga-companion/staging/* and secretsmanager:GetSecretValue on
+        mtga-companion/staging/* only. No production SSM access. No parameter writes. No S3.
+        See ADR-022 addendum sect4A and RdHamilton/vault-mtg#2364.
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          # Path B -- GitHub OIDC (end state).
+          # staging-deploy.yml assumes this role in the GHA runner after the
+          # Bob-owned Path B refactor lands (vault-mtg#2364 sect4A.3).
+          # sub claim pinned to refs/heads/main: only the canonical deploy branch.
+          - Sid: GitHubOIDCTrust
+            Effect: Allow
+            Principal:
+              Federated: !Ref OidcProviderArn
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: !Sub "repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/main"
+          # Path A -- interim bridge (removed when Path B refactor lands).
+          # Allows provision-staging-env.sh, running on-instance via SSM RunCommand,
+          # to call sts:AssumeRole and export scoped credentials before any SSM read.
+          # The EC2 instance role needs only sts:AssumeRole on this one ARN (S-02
+          # replaces the current blanket /vaultmtg/* grant with this pinhole).
+          # Path A interim bridge.
+          # Tracked for removal: RdHamilton/vault-mtg#2402
+          # Removal trigger: Bob's Path B (OIDC) refactor of provision-staging-env.sh lands.
+          - Sid: EC2InstanceRoleBridge
+            Effect: Allow
+            Principal:
+              AWS: !Ref EC2RoleArn
+            Action: sts:AssumeRole
+      Policies:
+        # SSM reads: exactly the staging parameter paths provision-staging-env.sh
+        # enumerates. Both the current flat paths and the post-cutover app sub-path
+        # are granted so the role works before, during, and after the R-13 namespace
+        # migration. The mtga-companion/staging/* entry is dropped in step 5d.
+        - PolicyName: StagingProvisioningSSMRead
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: StagingSSMRead
+                Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                  - ssm:GetParametersByPath
+                Resource:
+                  # Current flat path (pre-cutover + cutover window)
+                  - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/vaultmtg/staging/*"
+                  # Target path (post-R-13 namespace cutover)
+                  - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/vaultmtg/app/staging/*"
+                  # Legacy path (dropped in step 5d after SSM cutover verified)
+                  - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/mtga-companion/staging/*"
+        # KMS Decrypt: required for SecureString parameters
+        # (CLERK_SECRET_KEY, CLERK_PUBLISHABLE_KEY, etc. encrypted with
+        # the default SSM KMS key alias/aws/ssm). Constrained via
+        # kms:ViaService so the Decrypt can only be called through the
+        # SSM service endpoint, not directly against the key.
+        # Resource narrowed to alias/aws/ssm (the managed SSM key) -- no other KMS keys in scope.
+        - PolicyName: StagingProvisioningKMSDecrypt
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: KMSDecryptViaSSM
+                Effect: Allow
+                Action: kms:Decrypt
+                Resource: !Sub "arn:aws:kms:${AWS::Region}:${AWS::AccountId}:alias/aws/ssm"
+                Condition:
+                  StringEquals:
+                    kms:ViaService: !Sub "ssm.${AWS::Region}.amazonaws.com"
+        # Secrets Manager: staging RDS credential only.
+        # provision-staging-env.sh reads db-secret-arn from SSM and then calls
+        # secretsmanager:GetSecretValue to retrieve the postgres password.
+        # Scoped to mtga-companion/staging/* only. rds!* removed: that pattern
+        # matched the production RDS managed secret (rds!db-12c647a0-...) which
+        # must not be accessible from this staging-scoped role.
+        - PolicyName: StagingProvisioningDBSecretRead
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: StagingDBSecretRead
+                Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource:
+                  # Staging RDS credential (user-created secret, staging namespace only)
+                  - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:mtga-companion/staging/*"
+      Tags:
+        - Key: Project
+          Value: mtga-companion
+        - Key: Environment
+          Value: staging
+        - Key: ManagedBy
+          Value: cloudformation
+        - Key: Stack
+          Value: mtga-companion-staging-deploy-role
+        - Key: Purpose
+          Value: staging-deploy-provisioner
+        - Key: Ticket
+          Value: "2364"
+
+Outputs:
+  ProvisionerRoleArn:
+    Description: >
+      ARN of the vaultmtg-staging-deploy-provisioner role.
+      Use this ARN in staging-deploy.yml (Path B) and as the target for
+      sts:AssumeRole in provision-staging-env.sh (Path A interim bridge).
+      Also used by S-02 to replace the /vaultmtg/* blanket grant on the
+      production EC2 instance role with a single sts:AssumeRole pinhole.
+    Value: !GetAtt StagingDeployProvisionerRole.Arn
+    Export:
+      Name: mtga-companion-staging-deploy-ProvisionerRoleArn
+
+  ProvisionerRoleName:
+    Description: Name of the vaultmtg-staging-deploy-provisioner role
+    Value: !Ref StagingDeployProvisionerRole
+    Export:
+      Name: mtga-companion-staging-deploy-ProvisionerRoleName
