@@ -230,13 +230,33 @@ Resources:
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
-              # Allows the CloudWatch agent to push disk/mem metrics and allows
+              # Allows the CloudWatch agent to push disk/mem/cpu metrics and allows
               # the bff-staging restart-metric timer to publish BffStagingRestartCount.
               - Effect: Allow
                 Action:
                   - cloudwatch:PutMetricData
                   - cloudwatch:GetMetricStatistics
                   - cloudwatch:ListMetrics
+                Resource: "*"
+        - PolicyName: CloudWatchLogsAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # Allows the CloudWatch agent to create and write to the BFF and nginx
+              # log groups. Scoped to /vaultmtg/production/* log groups only.
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogStreams
+                Resource:
+                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/vaultmtg/production/bff:*"
+                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/vaultmtg/production/nginx:*"
+              # DescribeLogGroups is not resource-scopeable; limit to the minimum needed.
+              - Effect: Allow
+                Action:
+                  - logs:DescribeLogGroups
                 Resource: "*"
       Tags:
         - Key: Project
@@ -312,7 +332,7 @@ Resources:
           # ---------------------------------------------------------
           log "Updating packages..."
           dnf update -y --quiet
-          dnf install -y nginx logrotate aws-cli jq python3 python3-pip postgresql15
+          dnf install -y nginx logrotate aws-cli jq python3 python3-pip postgresql15 amazon-cloudwatch-agent
           pip3 install --quiet certbot certbot-nginx
 
           # ---------------------------------------------------------
@@ -545,6 +565,126 @@ Resources:
               log "No domain in SSM (/mtga-companion/production/domain-name) -- skipping certbot."
               log "WARNING: set /mtga-companion/production/domain-name in SSM before deploying (issue #2316)."
           fi
+
+          # ---------------------------------------------------------
+          # 9. BFF log forwarding via rsyslog
+          # AL2023 uses journald only by default -- no /var/log/messages.
+          # rsyslog filters mtga-bff entries (by syslog identifier) into a
+          # dedicated file so the CloudWatch Agent can collect them as files.
+          # ---------------------------------------------------------
+          log "Configuring rsyslog for BFF log forwarding..."
+          dnf install -y rsyslog
+          mkdir -p /var/log/mtga-bff
+          # Pipe through sed to strip the 10-space YAML indent before writing the rsyslog rule.
+          sed 's/^          //' > /etc/rsyslog.d/mtga-bff.conf <<'RSYSLOG'
+          :programname, isequal, "mtga-bff" /var/log/mtga-bff/bff.log
+          & stop
+          RSYSLOG
+          systemctl enable rsyslog
+          systemctl restart rsyslog
+          log "rsyslog configured."
+
+          # Fix nginx log group ownership so cwagent (added to the nginx group)
+          # can read existing and future log files.
+          # nginx creates log files as root:root by default on AL2023;
+          # chown nginx:nginx so the nginx group read bit grants access.
+          chown nginx:nginx /var/log/nginx/access.log /var/log/nginx/error.log 2>/dev/null || true
+          # Ensure cwagent is in the nginx group for group-read access to nginx logs
+          usermod -a -G nginx cwagent 2>/dev/null || true
+
+          # ---------------------------------------------------------
+          # 10. CloudWatch Agent configuration
+          # Writes the canonical config from config/cloudwatch-agent.json
+          # (committed to the infra repo) and starts the agent.
+          # Collects: CPU (idle/user/system), memory, disk utilisation.
+          # Ships logs: BFF (via rsyslog -> /var/log/mtga-bff/bff.log) -> /vaultmtg/production/bff
+          #             nginx access+error -> /vaultmtg/production/nginx
+          # Note: CWAgent 1.x schema does not support systemd_journal directly;
+          #       BFF logs are forwarded to file via rsyslog (section 9 above).
+          # ---------------------------------------------------------
+          log "Configuring CloudWatch Agent..."
+          sed 's/^          //' > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json <<'CWCONFIG'
+          {
+            "agent": {
+              "metrics_collection_interval": 60,
+              "run_as_user": "cwagent"
+            },
+            "metrics": {
+              "namespace": "CWAgent",
+              "append_dimensions": {
+                "InstanceId": "${!aws:InstanceId}"
+              },
+              "metrics_collected": {
+                "cpu": {
+                  "measurement": [
+                    "cpu_usage_idle",
+                    "cpu_usage_user",
+                    "cpu_usage_system"
+                  ],
+                  "metrics_collection_interval": 60,
+                  "totalcpu": true
+                },
+                "disk": {
+                  "measurement": [
+                    "disk_used_percent"
+                  ],
+                  "metrics_collection_interval": 60,
+                  "resources": [
+                    "/"
+                  ],
+                  "ignore_file_system_types": [
+                    "tmpfs",
+                    "devtmpfs"
+                  ]
+                },
+                "mem": {
+                  "measurement": [
+                    "mem_used_percent"
+                  ],
+                  "metrics_collection_interval": 60
+                }
+              }
+            },
+            "logs": {
+              "logs_collected": {
+                "files": {
+                  "collect_list": [
+                    {
+                      "file_path": "/var/log/mtga-bff/bff.log",
+                      "log_group_name": "/vaultmtg/production/bff",
+                      "log_stream_name": "{instance_id}/mtga-bff",
+                      "timezone": "UTC"
+                    },
+                    {
+                      "file_path": "/var/log/nginx/access.log",
+                      "log_group_name": "/vaultmtg/production/nginx",
+                      "log_stream_name": "{instance_id}/access",
+                      "timezone": "UTC"
+                    },
+                    {
+                      "file_path": "/var/log/nginx/error.log",
+                      "log_group_name": "/vaultmtg/production/nginx",
+                      "log_stream_name": "{instance_id}/error",
+                      "timezone": "UTC"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+          CWCONFIG
+
+          /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+              -a fetch-config \
+              -m ec2 \
+              -s \
+              -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
+
+          systemctl enable amazon-cloudwatch-agent
+          systemctl restart amazon-cloudwatch-agent
+
+          CWA_STATUS=$(systemctl is-active amazon-cloudwatch-agent 2>/dev/null || echo unknown)
+          log "CloudWatch agent status: $CWA_STATUS"
 
           log "Bootstrap complete."
       Tags:
