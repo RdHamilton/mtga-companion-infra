@@ -92,14 +92,15 @@ Resources:
             Statement:
               # ---------------------------------------------------------------
               # Statement 1: /mtga-companion/* BFF bootstrap paths.
-              # Current namespace; narrowed to production/ and prod/ sub-paths.
-              # /mtga-companion/staging/* is excluded by this explicit enumeration.
-              # Phase 5d (R-13 SSM namespace cutover) will replace these with
-              # /vaultmtg/app/production/* ARNs after the cutover is verified.
+              # REVERSIBLE WINDOW — retained until all consumers are verified
+              # reading from /vaultmtg/app/production/* (Phase 5c cutover).
+              # Removed in Phase 5d (R-13 IAM contract step).
               #
-              # Consumers: EC2 UserData bootstrap + BFF systemd EnvironmentFile.
+              # Consumers: EC2 UserData bootstrap (reads /mtga-companion/production/*
+              # and /mtga-companion/prod/daemon-jwt-secret).
               # ---------------------------------------------------------------
-              - Effect: Allow
+              - Sid: LegacyMtgaCompanionBootstrap
+                Effect: Allow
                 Action:
                   - ssm:GetParameter
                   - ssm:GetParameters
@@ -113,31 +114,43 @@ Resources:
                   - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/mtga-companion/production/db-name"
                   - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/mtga-companion/production/db-secret-arn"
                   - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/mtga-companion/production/domain-name"
-                  # deploy pipeline paths:
                   - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/mtga-companion/prod/daemon-jwt-secret"
-                  # Legacy path retained until daemon-jwt-secret migration to /vaultmtg/*
-                  # is confirmed complete (Phase 5d).
                   - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/mtga-companion/daemon-jwt-secret"
-                  # BFF runtime paths:
-                  - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/vaultmtg/prod/sentry-bff-dsn"
-                  - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/vaultmtg/prod/posthog-api-key"
               # ---------------------------------------------------------------
-              # Statement 2: /vaultmtg/production/* production provisioning paths.
+              # Statement 2: /vaultmtg/app/production/* — new canonical BFF
+              # runtime and provisioning namespace (R-13).
+              #
+              # Covers: provision-env.sh, provision-db-url.sh (deploy pipeline)
+              # and UserData bootstrap (after Phase 5c UserData literal update).
+              #
+              # OQ-6 resolution: staging BFF is purely EnvironmentFile=-driven
+              # (confirmed from infra/systemd/mtga-bff-staging.service and the
+              # provision-staging-env.sh flow). The production instance role does
+              # NOT need /vaultmtg/app/staging/* for runtime BFF reads — staging
+              # parameters are only read by provision-staging-env.sh during
+              # deploy-time provisioning, which runs under the dedicated
+              # vaultmtg-staging-deploy-provisioner role (S-03).
+              # ---------------------------------------------------------------
+              - Sid: VaultmtgAppProductionNamespace
+                Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                  - ssm:GetParametersByPath
+                Resource:
+                  - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/vaultmtg/app/production/*"
+              # ---------------------------------------------------------------
+              # Statement 3: /vaultmtg/production/* deploy provisioning paths.
               # Read by provision-env.sh and provision-db-url.sh which execute
-              # ON the production EC2 instance via AWS-RunShellScript (SSM
-              # send-command) from deploy-bff.yml. The scripts resolve SSM path
-              # constants from infra/config/deploy-env.sh at runtime.
+              # ON the production EC2 instance via SSM RunCommand from deploy-bff.yml.
+              # These are the paths deploy-env.sh SSM_PROD_* constants currently
+              # point at (pre-Phase 5c cutover).
               #
-              # Consumers (scripts running under this role via SSM RunCommand):
-              #   provision-env.sh ALLOWED_ORIGINS /vaultmtg/production/ALLOWED_ORIGINS
-              #   provision-env.sh CLERK_SECRET_KEY /vaultmtg/production/CLERK_SECRET_KEY
-              #   provision-db-url.sh ($SSM_PROD_DB_SECRET_ARN / ENDPOINT / NAME)
-              #
-              # R-13 note: when the full /vaultmtg/production/* namespace is
-              # activated (Phase 5d), Statement 1 /mtga-companion/* entries will
-              # be removed and this statement will expand to cover all BFF params.
+              # After Phase 5c (app-repo deploy-env.sh update to /vaultmtg/app/*),
+              # this statement is folded into Statement 2 and removed.
               # ---------------------------------------------------------------
-              - Effect: Allow
+              - Sid: VaultmtgProductionProvisioningLegacy
+                Effect: Allow
                 Action:
                   - ssm:GetParameter
                   - ssm:GetParameters
@@ -149,36 +162,31 @@ Resources:
                   - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/vaultmtg/production/db-endpoint"
                   - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/vaultmtg/production/db-name"
               # ---------------------------------------------------------------
-              # Statement 3: /vaultmtg/staging/* staging provisioning paths.
-              # Read by provision-staging-env.sh which executes ON the production
-              # EC2 instance via AWS-RunShellScript. The production EC2 hosts
-              # both production and staging BFF services; staging provisioning
-              # therefore runs under mtga-companion-ec2-role-production.
+              # Statement 4: /vaultmtg/staging/* staging provisioning paths.
+              # Read by provision-staging-env.sh when it runs under the
+              # production EC2 instance role (interim — before the Path-B
+              # vaultmtg-staging-deploy-provisioner OIDC refactor lands).
               #
-              # Consumers (scripts running under this role via SSM RunCommand):
-              #   provision-staging-env.sh (all paths below)
-              #
-              # R-13 migration note: when R-13 provisions a dedicated staging EC2
-              # with its own IAM role, these grants migrate to that role's policy
-              # and are removed from this production-role policy.
+              # After the Path-B refactor (Bob, app-repo ticket), this statement
+              # is removed from the production instance role; provision-staging-env.sh
+              # will run in the GHA runner under vaultmtg-staging-deploy-provisioner.
               # ---------------------------------------------------------------
-              - Effect: Allow
+              - Sid: VaultmtgStagingProvisioningInterim
+                Effect: Allow
                 Action:
                   - ssm:GetParameter
                   - ssm:GetParameters
                   - ssm:GetParametersByPath
                 Resource:
-                  # Core BFF config (provision-staging-env.sh write_param calls):
+                  # /vaultmtg/staging/* (current flat namespace — pre-cutover)
                   - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/vaultmtg/staging/PORT"
                   - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/vaultmtg/staging/ALLOWED_ORIGINS"
                   - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/vaultmtg/staging/CLERK_PUBLISHABLE_KEY"
                   - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/vaultmtg/staging/CLERK_SECRET_KEY"
                   - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/vaultmtg/staging/CLERK_FRONTEND_API"
-                  # DB connection (provision-staging-env.sh write_param + direct get-parameter):
                   - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/vaultmtg/staging/db-secret-arn"
                   - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/vaultmtg/staging/db-endpoint"
                   - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/vaultmtg/staging/db-name"
-                  # VaultMTG shared service keys (provision-staging-env.sh write_param calls):
                   - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/vaultmtg/staging/resend-api-key"
                   - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/vaultmtg/staging/sentry-bff-dsn"
                   - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/vaultmtg/staging/discord-bot-token"
@@ -186,11 +194,25 @@ Resources:
                   - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/vaultmtg/staging/mailchimp-api-key"
                   - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/vaultmtg/staging/mailchimp-list-id"
                   - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/vaultmtg/staging/crisp-website-id"
-              # kms:Decrypt is required to read SecureString parameters (e.g.
-              # /mtga-companion/prod/daemon-jwt-secret, /vaultmtg/staging/CLERK_SECRET_KEY,
-              # /vaultmtg/production/CLERK_SECRET_KEY) encrypted with the
-              # default SSM KMS key (alias/aws/ssm).
-              - Effect: Allow
+                  # /vaultmtg/app/staging/* (new namespace — for cutover window and post-cutover)
+                  - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/vaultmtg/app/staging/*"
+              # ---------------------------------------------------------------
+              # Statement 5: /vaultmtg/prod/* — two specific BFF runtime paths
+              # that are NOT migrating (owned by Greg/Faye marketing automation).
+              # These remain at /vaultmtg/prod/* permanently.
+              # ---------------------------------------------------------------
+              - Sid: VaultmtgProdRuntimePaths
+                Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                Resource:
+                  - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/vaultmtg/prod/sentry-bff-dsn"
+                  - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/vaultmtg/prod/posthog-api-key"
+              # kms:Decrypt is required to read SecureString parameters encrypted
+              # with the default SSM KMS key (alias/aws/ssm).
+              - Sid: SSMKMSDecrypt
+                Effect: Allow
                 Action:
                   - kms:Decrypt
                 Resource: !Sub "arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/*"
@@ -326,27 +348,54 @@ Resources:
           # ---------------------------------------------------------
           # 3. Environment file from SSM
           #
-          # Bug fix (R-05): the previous implementation used an unquoted heredoc
-          # (<<ENVEOF) whose body lines carried leading whitespace from YAML
-          # indentation, writing malformed entries like "        PORT=8080" instead
-          # of "PORT=8080".  It also assembled DATABASE_URL with embedded credentials
-          # fetched from Secrets Manager -- the BFF expects a credential-free URL and
-          # resolves credentials at startup via DB_SECRET_ARN.  Both are fixed here
-          # using printf statements and the canonical provision-db-url.sh pattern.
+          # R-13 cutover: reads from /vaultmtg/app/production/* (new canonical
+          # namespace) with fallback to /mtga-companion/production/* (old namespace)
+          # during the cutover window. After Phase 5c is verified and Phase 5d
+          # removes the legacy IAM grants, the fallback paths are deleted from this
+          # UserData block.
+          #
+          # Bug fix (R-05): uses printf statements and the credential-free
+          # DATABASE_URL pattern — credentials resolved at BFF startup via DB_SECRET_ARN.
           # ---------------------------------------------------------
-          log "Fetching config from SSM..."
+          log "Fetching config from SSM (primary: /vaultmtg/app/production/*)..."
 
-          PORT=$(fetch_ssm "/mtga-companion/production/PORT")
+          # Helper: fetch from primary path; fall back to legacy path if empty.
+          # Returns empty string if both are absent.
+          fetch_ssm_with_fallback() {
+              local _primary="$1"
+              local _legacy="$2"
+              local _val
+              _val=$(fetch_ssm "$_primary")
+              if [ -z "$_val" ] || [ "$_val" = "None" ]; then
+                  log "Primary SSM path '$_primary' empty - trying legacy '$_legacy'"
+                  _val=$(fetch_ssm "$_legacy")
+              fi
+              printf '%s' "$_val"
+          }
+
+          require_ssm_with_fallback() {
+              local _primary="$1"
+              local _legacy="$2"
+              local _val
+              _val=$(fetch_ssm_with_fallback "$_primary" "$_legacy")
+              if [ -z "$_val" ] || [ "$_val" = "None" ]; then
+                  log "FATAL: required SSM parameter '$_primary' (and legacy '$_legacy') missing. Aborting bootstrap."
+                  exit 1
+              fi
+              printf '%s' "$_val"
+          }
+
+          PORT=$(fetch_ssm_with_fallback "/vaultmtg/app/production/PORT" "/mtga-companion/production/PORT")
           PORT="${!PORT:-8080}"
 
-          ALLOWED_ORIGINS=$(require_ssm "/mtga-companion/production/ALLOWED_ORIGINS")
-          DAEMON_JWT_SECRET=$(fetch_ssm "/mtga-companion/prod/daemon-jwt-secret")
+          ALLOWED_ORIGINS=$(require_ssm_with_fallback "/vaultmtg/app/production/ALLOWED_ORIGINS" "/mtga-companion/production/ALLOWED_ORIGINS")
+          DAEMON_JWT_SECRET=$(fetch_ssm_with_fallback "/vaultmtg/app/production/daemon-jwt-secret" "/mtga-companion/prod/daemon-jwt-secret")
 
           # Credential-free DATABASE_URL -- BFF resolves credentials via DB_SECRET_ARN
           # at startup (matches provision-db-url.sh and deploy-env.sh pattern).
-          DB_SECRET_ARN=$(require_ssm "/mtga-companion/production/db-secret-arn")
-          DB_ENDPOINT=$(require_ssm "/mtga-companion/production/db-endpoint")
-          DB_NAME=$(require_ssm "/mtga-companion/production/db-name")
+          DB_SECRET_ARN=$(require_ssm_with_fallback "/vaultmtg/app/production/db-secret-arn" "/mtga-companion/production/db-secret-arn")
+          DB_ENDPOINT=$(require_ssm_with_fallback "/vaultmtg/app/production/db-endpoint" "/mtga-companion/production/db-endpoint")
+          DB_NAME=$(require_ssm_with_fallback "/vaultmtg/app/production/db-name" "/mtga-companion/production/db-name")
           DATABASE_URL="postgresql://${!DB_ENDPOINT}:5432/${!DB_NAME}?sslmode=require"
 
           log "Writing env file to $ENV_DIR/env..."
@@ -526,7 +575,7 @@ Resources:
           # via require_ssm rather than silently skipping certbot.
           # ---------------------------------------------------------
           log "Checking for domain in SSM..."
-          DOMAIN=$(fetch_ssm "/mtga-companion/production/domain-name")
+          DOMAIN=$(fetch_ssm_with_fallback "/vaultmtg/app/production/domain-name" "/mtga-companion/production/domain-name")
           if [ -n "$DOMAIN" ] && [ "$DOMAIN" != "None" ]; then
               log "Domain: $DOMAIN -- running certbot..."
               if [ ! -d "/etc/letsencrypt/live/$DOMAIN" ]; then
@@ -542,8 +591,8 @@ Resources:
                   (crontab -l 2>/dev/null; echo "0 3 * * * certbot renew --quiet --nginx && systemctl reload nginx") | crontab -
               log "Certbot renewal cron confirmed."
           else
-              log "No domain in SSM (/mtga-companion/production/domain-name) -- skipping certbot."
-              log "WARNING: set /mtga-companion/production/domain-name in SSM before deploying (issue #2316)."
+              log "No domain in SSM (/vaultmtg/app/production/domain-name or /mtga-companion/production/domain-name) -- skipping certbot."
+              log "WARNING: set /vaultmtg/app/production/domain-name in SSM before deploying (issue #2316)."
           fi
 
           log "Bootstrap complete."
