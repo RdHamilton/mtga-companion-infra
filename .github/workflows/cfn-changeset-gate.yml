@@ -134,7 +134,7 @@ jobs:
             case "$BASENAME" in
               cdn)                       echo "vaultmtg-app-cdn" ;;
               iam-gha-roles)             echo "mtga-companion-iam-gha-roles" ;;
-              cloudtrail)                echo "vault-mtg-cloudtrail" ;;
+              cloudtrail)                echo "vaultmtg-cloudtrail" ;;
               # cloudwatch-alarms.yml backs both cloudwatch-alarms and
               # cloudwatch-alarms-staging stacks.  We gate both.
               cloudwatch-alarms)         echo "cloudwatch-alarms" ;;  # handled specially below

@@ -88,7 +88,7 @@ Resources:
   CloudTrailKMSKeyAlias:
     Type: AWS::KMS::Alias
     Properties:
-      AliasName: !Sub "alias/vault-mtg-cloudtrail-${Environment}"
+      AliasName: !Sub "alias/vaultmtg-cloudtrail-${Environment}"
       TargetKeyId: !Ref CloudTrailKMSKey
 
   # -----------------------------------------------------------------------
@@ -108,7 +108,7 @@ Resources:
     DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
     Properties:
-      BucketName: !Sub "vault-mtg-cloudtrail-logs-${Environment}-${AWS::AccountId}"
+      BucketName: !Sub "vaultmtg-cloudtrail-logs-${Environment}-${AWS::AccountId}"
       VersioningConfiguration:
         Status: Enabled
       BucketEncryption:
