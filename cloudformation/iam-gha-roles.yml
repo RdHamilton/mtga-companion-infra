@@ -438,12 +438,22 @@ Resources:
               StringEquals:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
               StringLike:
+                # The vault-mtg staging deploy workflows (staging-deploy.yml ->
+                # deploy-bff.yml, and deploy-spa-staging.yml) run their deploy
+                # jobs in `environment: staging`. When a job targets a named
+                # GitHub environment, the OIDC token sub becomes
+                # `repo:<org>/<repo>:environment:<name>` -- NOT a ref-based sub --
+                # so the environment sub must be allowed explicitly or
+                # AssumeRoleWithWebIdentity is denied. See P1 incident
+                # 2026-05-22 (post-PR #87 #2332) and vault-mtg#2485.
                 token.actions.githubusercontent.com:sub:
                   # vault-mtg: main branch deploys (staging, BFF) and release tags
                   - !Sub repo:${GitHubOrg}/${AppRepo}:ref:refs/heads/main
                   - !Sub repo:${GitHubOrg}/${AppRepo}:ref:refs/tags/app/v*
                   - !Sub repo:${GitHubOrg}/${AppRepo}:ref:refs/tags/daemon/v*
                   - !Sub repo:${GitHubOrg}/${AppRepo}:ref:refs/tags/v*
+                  # vault-mtg: staging deploy jobs run in `environment: staging`
+                  - !Sub repo:${GitHubOrg}/${AppRepo}:environment:staging
                   # vault-mtg-web: main branch and release tag deploys
                   - !Sub repo:${GitHubOrg}/${WebRepo}:ref:refs/heads/main
                   - !Sub repo:${GitHubOrg}/${WebRepo}:ref:refs/tags/v*
