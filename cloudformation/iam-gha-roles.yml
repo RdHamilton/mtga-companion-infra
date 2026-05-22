@@ -117,6 +117,7 @@ Resources:
               - iam:DeleteRole
               - iam:GetRole
               - iam:UpdateRole
+              - iam:UpdateRoleDescription
               - iam:UpdateAssumeRolePolicy
               - iam:CreateServiceLinkedRole
               - iam:PutRolePolicy
@@ -638,6 +639,7 @@ Resources:
                   - iam:DeleteRole
                   - iam:GetRole
                   - iam:UpdateRole
+                  - iam:UpdateRoleDescription
                   - iam:UpdateAssumeRolePolicy
                   - iam:CreateServiceLinkedRole
                   - iam:PutRolePolicy
