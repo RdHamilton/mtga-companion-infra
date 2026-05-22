@@ -138,16 +138,38 @@ Resources:
                   - ec2messages:GetMessages
                   - ec2messages:SendReply
                 Resource: "*"
-        - PolicyName: SecretsManagerDBAccess
+        # ---------------------------------------------------------
+        # SecretsManagerStagingDBAccess (#2375).
+        #
+        # Scoped down from the former SecretsManagerDBAccess policy, which
+        # over-granted secretsmanager:GetSecretValue on (a) the production
+        # RDS secret (!ImportValue mtga-companion-rds-DBSecretArn) and
+        # (b) a wildcard over all mtga-companion/* secrets.
+        #
+        # The BFF does NOT read Secrets Manager at runtime (zero grep hits
+        # for secretsmanager / DB_SECRET_ARN in services/bff/). The ONLY
+        # live consumer of an instance-role Secrets Manager grant is the
+        # deploy-time script scripts/deploy/provision-staging-env.sh, which
+        # runs ON this instance via AWS-RunShellScript (app-repo
+        # deploy-bff.yml) and calls secretsmanager:GetSecretValue on the
+        # staging RDS secret to assemble the staging DATABASE_URL.
+        #
+        # Production secret access and the mtga-companion/* wildcard are
+        # therefore removed; the grant is scoped to mtga-companion/staging/*
+        # only — exactly the secret provision-staging-env.sh consumes.
+        #
+        # Full removal of this policy is gated on the Path B (OIDC) refactor
+        # of provision-staging-env.sh, which moves the GetSecretValue call
+        # under the dedicated vaultmtg-staging-deploy-provisioner role
+        # (vault-mtg#2402). Until #2402 lands, this scoped grant must remain.
+        # ---------------------------------------------------------
+        - PolicyName: SecretsManagerStagingDBAccess
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
               - Effect: Allow
                 Action: secretsmanager:GetSecretValue
-                Resource: !ImportValue mtga-companion-rds-DBSecretArn
-              - Effect: Allow
-                Action: secretsmanager:GetSecretValue
-                Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:mtga-companion/*"
+                Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:mtga-companion/staging/*"
         - PolicyName: SSMParameterStoreAccess
           PolicyDocument:
             Version: "2012-10-17"
@@ -277,13 +299,6 @@ Resources:
                   - !Sub "arn:aws:s3:::mtga-companion-deploy-artifacts-${Environment}"
                   - arn:aws:s3:::mtga-companion-deploy-artifacts-staging
                   - arn:aws:s3:::vaultmtg-deploy-artifacts-staging
-        - PolicyName: CloudFormationReadExports
-          PolicyDocument:
-            Version: "2012-10-17"
-            Statement:
-              - Effect: Allow
-                Action: cloudformation:ListExports
-                Resource: "*"
         - PolicyName: CloudWatchMetricsPublish
           PolicyDocument:
             Version: "2012-10-17"
