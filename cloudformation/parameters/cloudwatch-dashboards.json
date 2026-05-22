@@ -1,0 +1,10 @@
+[
+  {
+    "ParameterKey": "EC2InstanceId",
+    "ParameterValue": "i-0226bf51fcf09b506"
+  },
+  {
+    "ParameterKey": "RdsInstanceIdentifier",
+    "ParameterValue": "mtga-companion-postgres"
+  }
+]

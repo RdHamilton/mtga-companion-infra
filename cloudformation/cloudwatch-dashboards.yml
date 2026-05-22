@@ -1,0 +1,382 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: |
+  VaultMTG - CloudWatch dashboards for production and staging environments.
+  Defines vaultmtg-production and vaultmtg-staging dashboards with BFF and host
+  metrics sourced from the running VaultMTG stack. Deploy-event annotations are
+  written to a custom metric (VaultMTG/Deploys DeployEvent) by the deploy workflow;
+  each dashboard surfaces this metric as a vertical annotation line.
+  This stack has no cross-stack Import dependencies and can be deployed independently.
+  DeletionPolicy: Retain on all dashboards -- dropping this stack does not delete them.
+
+Parameters:
+
+  EC2InstanceId:
+    Type: String
+    Description: |
+      Production EC2 instance ID. Resolved from the ec2 stack export at deploy time;
+      supply via parameters/cloudwatch-dashboards.json.
+    Default: i-0226bf51fcf09b506
+
+  RdsInstanceIdentifier:
+    Type: String
+    Description: RDS DB instance identifier (shared by production and staging).
+    Default: mtga-companion-postgres
+
+Resources:
+
+  # ---------------------------------------------------------
+  # Production Dashboard
+  #
+  # Widgets:
+  #   Row 0 (top):  BFF Http5xxCount | BFF Http4xxCount
+  #   Row 1:        EC2 CPUUtilization | EC2 mem_used_percent
+  #   Row 2:        EC2 NetworkIn/Out  | RDS DatabaseConnections
+  #   Row 3:        RDS FreeStorageSpace | Deploy annotations
+  #
+  # BFF metrics (MTGA/BFF namespace) are emitted by the timer installed
+  # via scripts/install-bff-5xx-metric.sh and scripts/install-bff-4xx-metric.sh.
+  # The dashboard will show "No data" for these until the scripts are running.
+  #
+  # Deploy annotations: the deploy workflow calls
+  #   aws cloudwatch put-metric-data ... --namespace VaultMTG/Deploys
+  # after each successful deploy.  The DeployEvent widget exposes that
+  # metric as a vertical line so deploys appear on all time-range views.
+  # ---------------------------------------------------------
+  ProductionDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    DeletionPolicy: Retain
+    Properties:
+      DashboardName: vaultmtg-production
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "title": "BFF HTTP 5xx Count (per 5 min)",
+                "view": "timeSeries",
+                "stacked": false,
+                "metrics": [
+                  ["MTGA/BFF", "Http5xxCount", "Environment", "production", {"stat": "Sum", "period": 300, "label": "5xx count"}]
+                ],
+                "region": "us-east-1",
+                "yAxis": {"left": {"min": 0}},
+                "annotations": {
+                  "horizontal": [{"label": "Alarm threshold (5)", "value": 5, "color": "#d62728"}]
+                }
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "title": "BFF HTTP 4xx Count (per 5 min)",
+                "view": "timeSeries",
+                "stacked": false,
+                "metrics": [
+                  ["MTGA/BFF", "Http4xxCount", "Environment", "production", {"stat": "Sum", "period": 300, "label": "4xx count"}]
+                ],
+                "region": "us-east-1",
+                "yAxis": {"left": {"min": 0}}
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 6,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "title": "EC2 CPU Utilization (%)",
+                "view": "timeSeries",
+                "stacked": false,
+                "metrics": [
+                  ["AWS/EC2", "CPUUtilization", "InstanceId", "${EC2InstanceId}", {"stat": "Average", "period": 300, "label": "CPU %"}]
+                ],
+                "region": "us-east-1",
+                "yAxis": {"left": {"min": 0, "max": 100}},
+                "annotations": {
+                  "horizontal": [{"label": "Alarm threshold (85%)", "value": 85, "color": "#d62728"}]
+                }
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 6,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "title": "EC2 Memory Utilization (%)",
+                "view": "timeSeries",
+                "stacked": false,
+                "metrics": [
+                  ["CWAgent", "mem_used_percent", "InstanceId", "${EC2InstanceId}", {"stat": "Average", "period": 60, "label": "Memory %"}]
+                ],
+                "region": "us-east-1",
+                "yAxis": {"left": {"min": 0, "max": 100}},
+                "annotations": {
+                  "horizontal": [{"label": "Alarm threshold (90%)", "value": 90, "color": "#d62728"}]
+                }
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 12,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "title": "EC2 Network I/O (bytes/5 min)",
+                "view": "timeSeries",
+                "stacked": false,
+                "metrics": [
+                  ["AWS/EC2", "NetworkIn",  "InstanceId", "${EC2InstanceId}", {"stat": "Sum", "period": 300, "label": "NetworkIn"}],
+                  ["AWS/EC2", "NetworkOut", "InstanceId", "${EC2InstanceId}", {"stat": "Sum", "period": 300, "label": "NetworkOut"}]
+                ],
+                "region": "us-east-1",
+                "yAxis": {"left": {"min": 0}}
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 12,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "title": "RDS Database Connections",
+                "view": "timeSeries",
+                "stacked": false,
+                "metrics": [
+                  ["AWS/RDS", "DatabaseConnections", "DBInstanceIdentifier", "${RdsInstanceIdentifier}", {"stat": "Average", "period": 300, "label": "Connections"}]
+                ],
+                "region": "us-east-1",
+                "yAxis": {"left": {"min": 0}}
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 18,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "title": "RDS Free Storage Space (bytes)",
+                "view": "timeSeries",
+                "stacked": false,
+                "metrics": [
+                  ["AWS/RDS", "FreeStorageSpace", "DBInstanceIdentifier", "${RdsInstanceIdentifier}", {"stat": "Average", "period": 300, "label": "Free storage"}]
+                ],
+                "region": "us-east-1",
+                "yAxis": {"left": {"min": 0}}
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 18,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "title": "Deploy Events",
+                "view": "timeSeries",
+                "stacked": false,
+                "metrics": [
+                  ["VaultMTG/Deploys", "DeployEvent", "Environment", "production", {"stat": "Sum", "period": 300, "label": "Deploys", "color": "#2ca02c"}]
+                ],
+                "region": "us-east-1",
+                "yAxis": {"left": {"min": 0}},
+                "annotations": {}
+              }
+            }
+          ]
+        }
+
+  # ---------------------------------------------------------
+  # Staging Dashboard
+  #
+  # Same widget layout as production, scoped to staging resources.
+  # Both production and staging share the single RDS instance
+  # (mtga-companion-postgres); staging BFF runs as bff-staging.service
+  # on the same EC2 host.  Network I/O and host CPU/mem widgets
+  # therefore reflect the combined workload.
+  # ---------------------------------------------------------
+  StagingDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    DeletionPolicy: Retain
+    Properties:
+      DashboardName: vaultmtg-staging
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "title": "BFF HTTP 5xx Count (per 5 min) - Staging",
+                "view": "timeSeries",
+                "stacked": false,
+                "metrics": [
+                  ["MTGA/BFF", "Http5xxCount", "Environment", "staging", {"stat": "Sum", "period": 300, "label": "5xx count"}]
+                ],
+                "region": "us-east-1",
+                "yAxis": {"left": {"min": 0}},
+                "annotations": {
+                  "horizontal": [{"label": "Alarm threshold (5)", "value": 5, "color": "#d62728"}]
+                }
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "title": "BFF HTTP 4xx Count (per 5 min) - Staging",
+                "view": "timeSeries",
+                "stacked": false,
+                "metrics": [
+                  ["MTGA/BFF", "Http4xxCount", "Environment", "staging", {"stat": "Sum", "period": 300, "label": "4xx count"}]
+                ],
+                "region": "us-east-1",
+                "yAxis": {"left": {"min": 0}}
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 6,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "title": "EC2 CPU Utilization (%) - Shared Host",
+                "view": "timeSeries",
+                "stacked": false,
+                "metrics": [
+                  ["AWS/EC2", "CPUUtilization", "InstanceId", "${EC2InstanceId}", {"stat": "Average", "period": 300, "label": "CPU %"}]
+                ],
+                "region": "us-east-1",
+                "yAxis": {"left": {"min": 0, "max": 100}},
+                "annotations": {
+                  "horizontal": [{"label": "Alarm threshold (85%)", "value": 85, "color": "#d62728"}]
+                }
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 6,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "title": "EC2 Memory Utilization (%) - Shared Host",
+                "view": "timeSeries",
+                "stacked": false,
+                "metrics": [
+                  ["CWAgent", "mem_used_percent", "InstanceId", "${EC2InstanceId}", {"stat": "Average", "period": 60, "label": "Memory %"}]
+                ],
+                "region": "us-east-1",
+                "yAxis": {"left": {"min": 0, "max": 100}},
+                "annotations": {
+                  "horizontal": [{"label": "Alarm threshold (90%)", "value": 90, "color": "#d62728"}]
+                }
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 12,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "title": "EC2 Network I/O (bytes/5 min) - Shared Host",
+                "view": "timeSeries",
+                "stacked": false,
+                "metrics": [
+                  ["AWS/EC2", "NetworkIn",  "InstanceId", "${EC2InstanceId}", {"stat": "Sum", "period": 300, "label": "NetworkIn"}],
+                  ["AWS/EC2", "NetworkOut", "InstanceId", "${EC2InstanceId}", {"stat": "Sum", "period": 300, "label": "NetworkOut"}]
+                ],
+                "region": "us-east-1",
+                "yAxis": {"left": {"min": 0}}
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 12,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "title": "RDS Database Connections (Shared)",
+                "view": "timeSeries",
+                "stacked": false,
+                "metrics": [
+                  ["AWS/RDS", "DatabaseConnections", "DBInstanceIdentifier", "${RdsInstanceIdentifier}", {"stat": "Average", "period": 300, "label": "Connections"}]
+                ],
+                "region": "us-east-1",
+                "yAxis": {"left": {"min": 0}}
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 18,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "title": "RDS Free Storage Space (bytes, Shared)",
+                "view": "timeSeries",
+                "stacked": false,
+                "metrics": [
+                  ["AWS/RDS", "FreeStorageSpace", "DBInstanceIdentifier", "${RdsInstanceIdentifier}", {"stat": "Average", "period": 300, "label": "Free storage"}]
+                ],
+                "region": "us-east-1",
+                "yAxis": {"left": {"min": 0}}
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 18,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "title": "Deploy Events - Staging",
+                "view": "timeSeries",
+                "stacked": false,
+                "metrics": [
+                  ["VaultMTG/Deploys", "DeployEvent", "Environment", "staging", {"stat": "Sum", "period": 300, "label": "Deploys", "color": "#2ca02c"}]
+                ],
+                "region": "us-east-1",
+                "yAxis": {"left": {"min": 0}},
+                "annotations": {}
+              }
+            }
+          ]
+        }
+
+Outputs:
+
+  ProductionDashboardName:
+    Description: Name of the production CloudWatch dashboard.
+    Value: vaultmtg-production
+    Export:
+      Name: vaultmtg-production-DashboardName
+
+  StagingDashboardName:
+    Description: Name of the staging CloudWatch dashboard.
+    Value: vaultmtg-staging
+    Export:
+      Name: vaultmtg-staging-DashboardName
