@@ -80,6 +80,13 @@ Resources:
   #      never self-escalate to a blanket IAM grant -- regardless of what the
   #      inline policy says. iam:CreateUser, iam:CreateAccessKey, iam:AttachUserPolicy,
   #      etc. are absent and therefore DENIED.
+  #   4. IAM Resource ARNs (vault-mtg#2383) -- the scopable IAM actions are
+  #      bound (in both IAMScoped Sids) to the role / instance-profile /
+  #      managed-policy / OIDC-provider ARNs the infra CFN stacks actually
+  #      manage. The deploy role cannot mutate an IAM principal outside those
+  #      naming prefixes. Only account-level list actions and
+  #      iam:CreateServiceLinkedRole remain on Resource:"*" (IAMUnscopable),
+  #      and none of those can mutate a principal by name.
   # ===========================================================================
   GhaCfnDeployPermissionsBoundary:
     Type: AWS::IAM::ManagedPolicy
@@ -107,9 +114,13 @@ Resources:
               - cloudformation:DescribeStacks
             Resource: "*"
 
-          # mirrors inline IAMPassAndManage — specific actions only, never iam:*,
-          # so the boundary permanently forbids IAM self-escalation.
-          - Sid: IAM
+          # mirrors inline IAMPassAndManageScoped -- specific actions only,
+          # never iam:*, so the boundary permanently forbids IAM
+          # self-escalation. Resource ARNs match the inline scoped statement
+          # (vault-mtg#2383): the boundary ceiling for these actions is now
+          # also bound to the infra IAM resource ARNs, not "*". The boundary
+          # action set remains a superset of the inline action set.
+          - Sid: IAMScoped
             Effect: Allow
             Action:
               - iam:PassRole
@@ -123,7 +134,6 @@ Resources:
               # by 3 consecutive stack events. Required permanently.
               - iam:UpdateRoleDescription
               - iam:UpdateAssumeRolePolicy
-              - iam:CreateServiceLinkedRole
               - iam:PutRolePolicy
               - iam:DeleteRolePolicy
               - iam:GetRolePolicy
@@ -136,17 +146,18 @@ Resources:
               - iam:ListRoleTags
               - iam:PutRolePermissionsBoundary
               - iam:DeleteRolePermissionsBoundary
+              # AWS::IAM::InstanceProfile lifecycle
               - iam:CreateInstanceProfile
               - iam:DeleteInstanceProfile
               - iam:GetInstanceProfile
               - iam:AddRoleToInstanceProfile
               - iam:RemoveRoleFromInstanceProfile
+              # AWS::IAM::OIDCProvider lifecycle (single fixed provider ARN)
               - iam:CreateOIDCProvider
               - iam:DeleteOIDCProvider
               - iam:GetOIDCProvider
               - iam:UpdateOIDCProvider
               - iam:TagOIDCProvider
-              - iam:ListOIDCProviders
               # AWS::IAM::ManagedPolicy lifecycle (Create / Update / Delete / drift-read)
               - iam:CreatePolicy
               - iam:CreatePolicyVersion
@@ -155,12 +166,28 @@ Resources:
               - iam:DeletePolicyVersion
               - iam:GetPolicy
               - iam:GetPolicyVersion
-              - iam:ListPolicies
               - iam:ListPolicyVersions
               - iam:ListEntitiesForPolicy
               - iam:TagPolicy
               - iam:UntagPolicy
               - iam:ListPolicyTags
+            Resource:
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/vaultmtg-*
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/vault-mtg-*
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/mtga-companion-*
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/gha-*
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/github-actions-*
+              - !Sub arn:aws:iam::${AWS::AccountId}:instance-profile/mtga-companion-*
+              - !Sub arn:aws:iam::${AWS::AccountId}:policy/gha-*
+              - !Ref OidcProviderArn
+          # mirrors inline IAMUnscopable -- the irreducible IAM wildcard
+          # surface (account-level list actions + CreateServiceLinkedRole).
+          - Sid: IAMUnscopable
+            Effect: Allow
+            Action:
+              - iam:CreateServiceLinkedRole
+              - iam:ListPolicies
+              - iam:ListOIDCProviders
             Resource: "*"
 
           - Sid: EC2
@@ -541,13 +568,33 @@ Resources:
               # AWS::IAM::Role and AWS::IAM::ManagedPolicy resource handlers,
               # enumerated from the CFN resource-provider schemas rather than
               # discovered one deploy failure at a time (see PR audit notes).
-              # Grouped by resource type. Any addition here MUST be mirrored
-              # into the GhaCfnDeployPermissionsBoundary IAM Sid in the SAME PR.
-              - Sid: IAMPassAndManage
+              # Any addition here MUST be mirrored into the matching
+              # GhaCfnDeployPermissionsBoundary IAM Sid in the SAME PR.
+              #
+              # vault-mtg#2383 -- Resource ARN narrowing:
+              # The single Resource:"*" IAM statement is split into two.
+              # IAMPassAndManageScoped (this statement) carries every IAM action
+              # that supports resource-level permissions, bound to the IAM
+              # resource ARNs the infra CFN stacks actually create / manage:
+              #   roles -- arn:aws:iam::<acct>:role/<prefix>* for the role-name
+              #     prefixes used across cloudformation/*.yml:
+              #       vaultmtg-*            (staging-deploy-role.yml)
+              #       vault-mtg-*           (sync-lambda.yml)
+              #       mtga-companion-*      (ec2.yml, deploy-artifacts.yml)
+              #       gha-*, github-actions-* (this template's OIDC roles)
+              #   instance-profiles -- mtga-companion-* (ec2.yml)
+              #   managed policies -- gha-* (this template's boundary policy)
+              #   the GitHub Actions OIDC provider -- the single fixed ARN.
+              # Actions that act before any ARN exists or are not resource-
+              # scopable stay in IAMUnscopable below.
+              - Sid: IAMPassAndManageScoped
                 Effect: Allow
                 Action:
                   - iam:PassRole
-                  # AWS::IAM::Role lifecycle (Create / Update / Delete / drift-read)
+                  # AWS::IAM::Role lifecycle (Create / Update / Delete / drift-read).
+                  # iam:CreateRole IS resource-scopable -- the ARN restricts which
+                  # role NAMES this role may create, which is the least-privilege
+                  # control we want.
                   - iam:CreateRole
                   - iam:DeleteRole
                   - iam:GetRole
@@ -557,7 +604,6 @@ Resources:
                   # Mirrored into the GhaCfnDeployPermissionsBoundary IAM Sid.
                   - iam:UpdateRoleDescription
                   - iam:UpdateAssumeRolePolicy
-                  - iam:CreateServiceLinkedRole
                   - iam:PutRolePolicy
                   - iam:DeleteRolePolicy
                   - iam:GetRolePolicy
@@ -570,18 +616,21 @@ Resources:
                   - iam:ListRoleTags
                   - iam:PutRolePermissionsBoundary
                   - iam:DeleteRolePermissionsBoundary
+                  # AWS::IAM::InstanceProfile lifecycle
                   - iam:CreateInstanceProfile
                   - iam:DeleteInstanceProfile
                   - iam:GetInstanceProfile
                   - iam:AddRoleToInstanceProfile
                   - iam:RemoveRoleFromInstanceProfile
+                  # AWS::IAM::OIDCProvider lifecycle (single fixed provider ARN)
                   - iam:CreateOIDCProvider
                   - iam:DeleteOIDCProvider
                   - iam:GetOIDCProvider
                   - iam:UpdateOIDCProvider
                   - iam:TagOIDCProvider
-                  - iam:ListOIDCProviders
-                  # AWS::IAM::ManagedPolicy lifecycle (Create / Update / Delete / drift-read)
+                  # AWS::IAM::ManagedPolicy lifecycle (Create / Update / Delete / drift-read).
+                  # iam:CreatePolicy and iam:SetDefaultPolicyVersion ARE
+                  # resource-scopable -- the policy ARN identifies the target.
                   - iam:CreatePolicy
                   - iam:CreatePolicyVersion
                   - iam:SetDefaultPolicyVersion
@@ -589,12 +638,32 @@ Resources:
                   - iam:DeletePolicyVersion
                   - iam:GetPolicy
                   - iam:GetPolicyVersion
-                  - iam:ListPolicies
                   - iam:ListPolicyVersions
                   - iam:ListEntitiesForPolicy
                   - iam:TagPolicy
                   - iam:UntagPolicy
                   - iam:ListPolicyTags
+                Resource:
+                  - !Sub arn:aws:iam::${AWS::AccountId}:role/vaultmtg-*
+                  - !Sub arn:aws:iam::${AWS::AccountId}:role/vault-mtg-*
+                  - !Sub arn:aws:iam::${AWS::AccountId}:role/mtga-companion-*
+                  - !Sub arn:aws:iam::${AWS::AccountId}:role/gha-*
+                  - !Sub arn:aws:iam::${AWS::AccountId}:role/github-actions-*
+                  - !Sub arn:aws:iam::${AWS::AccountId}:instance-profile/mtga-companion-*
+                  - !Sub arn:aws:iam::${AWS::AccountId}:policy/gha-*
+                  - !Ref OidcProviderArn
+              # IAM actions that genuinely require Resource:"*". These are the
+              # account-level list actions (no per-resource ARN) and
+              # CreateServiceLinkedRole, whose target role name and path are
+              # chosen by the AWS service, not the caller -- it cannot be
+              # scoped to a predictable ARN. This is the irreducible IAM
+              # wildcard surface; it grants no mutate-by-name capability.
+              - Sid: IAMUnscopable
+                Effect: Allow
+                Action:
+                  - iam:CreateServiceLinkedRole
+                  - iam:ListPolicies
+                  - iam:ListOIDCProviders
                 Resource: "*"
               - Sid: EC2
                 Effect: Allow
