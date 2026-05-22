@@ -13,12 +13,7 @@ Description: >
   permissions match the inline policy one-for-one so the boundary never
   tightens currently-required operations. See RdHamilton/vault-mtg#2325.
 
-  2026-05-22: Added vault-mtg-* to CloudFormationStackOperations in both the
-  permissions boundary and the role inline policy. The cloudtrail stack is
-  named vault-mtg-cloudtrail and requires this prefix to be authorized.
-  CloudTrail and full KMS permissions (CreateKey, PutKeyPolicy, etc.) were
-  already present in the template from PR #67 but never deployed.
-  See RdHamilton/vault-mtg#2324.
+  2026-05-22: Added vault-mtg-* prefix to CloudFormationStackOperations (see RdHamilton/vault-mtg#2444).
 
   Deploy order: standalone (no stack dependencies).
 
