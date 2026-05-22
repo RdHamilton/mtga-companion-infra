@@ -85,11 +85,7 @@ Resources:
     Type: AWS::IAM::ManagedPolicy
     Properties:
       ManagedPolicyName: gha-cfn-deploy-permissions-boundary
-      Description: >
-        Permissions boundary for the gha-infra-cfn-deploy GitHub Actions role.
-        Caps effective permissions: excludes secretsmanager:GetSecretValue and
-        secretsmanager:PutSecretValue, and grants only specific iam: actions
-        (never iam:*). See RdHamilton/vault-mtg#2325.
+      Description: "Permissions boundary for gha-infra-cfn-deploy: excludes secretsmanager GetSecretValue/PutSecretValue and grants only specific iam: actions (never iam:*). See RdHamilton/vault-mtg#2325."
       PolicyDocument:
         Version: "2012-10-17"
         Statement:
