@@ -267,6 +267,17 @@ Resources:
               - cloudwatch:GetDashboard
             Resource: "*"
 
+          # Mirrors gha-infra-cfn-deploy inline CloudWatchLogs statement (S-04 rule).
+          # Scoped to the /vaultmtg/* log-group namespace (#2471).
+          - Sid: CWLogs
+            Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:PutRetentionPolicy
+              - logs:DeleteLogGroup
+            Resource:
+              - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/vaultmtg/*
+
           - Sid: SNS
             Effect: Allow
             Action:
@@ -395,9 +406,9 @@ Resources:
   # This role was provisioned out-of-band and codified here post-P0 incident
   # on 2026-05-21 when the trust policy still referenced the pre-rename repo
   # name RdHamilton/MTGA-Companion. The sub-claim has been updated to
-  # vault-mtg (current name). vault-mtg-web and mtga-companion-web retained
-  # for rollback safety; mtga-companion-web can be pruned after the next
-  # vault-mtg-web OIDC re-auth confirms the new claim works.
+  # vault-mtg (current name). The legacy mtga-companion-web trust entry was
+  # removed in vault-mtg#2470 after confirming no active workflow depends on
+  # it; vault-mtg-web OIDC re-auth on the new claim is confirmed working.
   # See vault-mtg#ISSUE (Hotfix: OIDC trust policy stale post-rename).
   # ---------------------------------------------------------------------------
   GhaAppDeployRole:
@@ -405,7 +416,7 @@ Resources:
     DeletionPolicy: Retain
     Properties:
       RoleName: github-actions-oidc-deploy
-      Description: OIDC role for GitHub Actions across MTGA-Companion, vault-mtg-web, and mtga-companion-web repos
+      Description: OIDC role for GitHub Actions across MTGA-Companion and vault-mtg-web repos
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
@@ -426,9 +437,6 @@ Resources:
                   # vault-mtg-web: main branch and release tag deploys
                   - !Sub repo:${GitHubOrg}/${WebRepo}:ref:refs/heads/main
                   - !Sub repo:${GitHubOrg}/${WebRepo}:ref:refs/tags/v*
-                  # mtga-companion-web: legacy repo retained for rollback safety
-                  - !Sub repo:${GitHubOrg}/mtga-companion-web:ref:refs/heads/main
-                  - !Sub repo:${GitHubOrg}/mtga-companion-web:ref:refs/tags/v*
       Policies:
         - PolicyName: github-actions-deploy-permissions
           PolicyDocument:
@@ -728,7 +736,7 @@ Resources:
                   - s3:GetIntelligentTieringConfiguration
                 Resource: "*"
               # Tightly-scoped grant for the dedicated CloudTrail logs bucket.
-              # cloudtrail.yml creates vault-mtg-cloudtrail-logs-${Environment}-${AccountId};
+              # cloudtrail.yml creates vaultmtg-cloudtrail-logs-${Environment}-${AccountId};
               # the prefix wildcard covers both production and staging environments.
               # This statement is the complete CRUD+rollback permission set the
               # CloudFormation AWS::S3::Bucket and AWS::S3::BucketPolicy resource
@@ -772,8 +780,8 @@ Resources:
                   - s3:GetMetricsConfiguration
                   - s3:GetIntelligentTieringConfiguration
                 Resource:
-                  - arn:aws:s3:::vault-mtg-cloudtrail-logs-*
-                  - arn:aws:s3:::vault-mtg-cloudtrail-logs-*/*
+                  - arn:aws:s3:::vaultmtg-cloudtrail-logs-*
+                  - arn:aws:s3:::vaultmtg-cloudtrail-logs-*/*
               # Object-level grant for the bootstrap script upload step in deploy.yml.
               # gha-infra-cfn-deploy uploads scripts/deploy/ec2-bootstrap.sh to the
               # production artifacts bucket before deploying the ec2 stack (#2459).
@@ -827,6 +835,18 @@ Resources:
                   - cloudwatch:DeleteDashboards
                   - cloudwatch:GetDashboard
                 Resource: "*"
+              # CloudWatch Logs: log-group lifecycle for the AWS::Logs::LogGroup
+              # resource handler. Scoped to the /vaultmtg/* log-group namespace
+              # to follow least-privilege (#2471).
+              # Mirrored in GhaCfnDeployPermissionsBoundary per S-04 (#2325) design rule.
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:PutRetentionPolicy
+                  - logs:DeleteLogGroup
+                Resource:
+                  - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/vaultmtg/*
               - Sid: SNS
                 Effect: Allow
                 Action:
