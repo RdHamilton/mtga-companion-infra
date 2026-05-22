@@ -186,7 +186,7 @@ Resources:
               # and UserData bootstrap (after Phase 5c UserData literal update).
               #
               # OQ-6 resolution: staging BFF is purely EnvironmentFile=-driven
-              # (confirmed from infra/systemd/mtga-bff-staging.service and the
+              # (confirmed from infra/systemd/vault-mtg-bff-staging.service and the
               # provision-staging-env.sh flow). The production instance role does
               # NOT need /vaultmtg/app/staging/* for runtime BFF reads — staging
               # parameters are only read by provision-staging-env.sh during
@@ -575,6 +575,61 @@ Resources:
           fi
 
           # ---------------------------------------------------------
+          # 5b. Staging BFF systemd service (vault-mtg-bff-staging)
+          #
+          # Installs the staging unit so it survives instance replacement.
+          # BFF_PORT=8081 and MTGA_ENV=staging are set inline so the unit
+          # starts correctly even before provision-staging-env.sh runs.
+          # The binary (/usr/local/bin/mtga-bff-staging) and env file
+          # (/etc/mtga-companion-staging/env) are populated by the
+          # staging-deploy.yml pipeline, not by this UserData.
+          #
+          # See tickets #2409 and #2445.
+          # ---------------------------------------------------------
+          log "Installing staging BFF systemd service..."
+          mkdir -p /etc/mtga-companion-staging
+          chmod 750 /etc/mtga-companion-staging
+
+          # Touch a placeholder env file so EnvironmentFile= doesn't fail on first
+          # start (before provision-staging-env.sh has run).
+          touch /etc/mtga-companion-staging/env
+          chmod 600 /etc/mtga-companion-staging/env
+          chown "root:$APP_USER" /etc/mtga-companion-staging/env
+
+          sed 's/^          //' > /etc/systemd/system/vault-mtg-bff-staging.service <<'STAGINGUNIT'
+          [Unit]
+          Description=VaultMTG BFF Staging
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=simple
+          User=mtga-companion
+          Group=mtga-companion
+          ExecStart=/usr/local/bin/mtga-bff-staging
+          Restart=on-failure
+          RestartSec=5
+          StandardOutput=journal
+          StandardError=journal
+          SyslogIdentifier=vault-mtg-bff-staging
+          Environment=BFF_PORT=8081
+          Environment=MTGA_ENV=staging
+          EnvironmentFile=/etc/mtga-companion-staging/env
+          MemoryMax=512M
+          CPUQuota=50%
+          NoNewPrivileges=true
+          PrivateTmp=true
+          ProtectSystem=full
+
+          [Install]
+          WantedBy=multi-user.target
+          STAGINGUNIT
+
+          systemctl daemon-reload
+          systemctl enable vault-mtg-bff-staging
+          log "vault-mtg-bff-staging unit enabled (binary not yet present -- will start on first staging deploy)."
+
+          # ---------------------------------------------------------
           # 6. nginx configuration
           # ---------------------------------------------------------
           log "Configuring nginx..."
@@ -626,6 +681,24 @@ Resources:
           rm -f /etc/nginx/conf.d/default.conf
           mkdir -p /var/www/mtga-companion /var/www/certbot
           chown -R nginx:nginx /var/www/mtga-companion /var/www/certbot
+
+          # Staging nginx vhost — HTTP-only block at bootstrap time.
+          # certbot --expand adds the HTTPS block once DNS propagates.
+          # See scripts/deploy/certbot-expand-staging.sh (or run manually:
+          #   certbot --expand -d api.vaultmtg.app -d staging-api.vaultmtg.app --nginx)
+          sed 's/^          //' > /etc/nginx/conf.d/staging-api.vaultmtg.app.conf <<'STAGINGNGINX'
+          server {
+              listen 80;
+              server_name staging-api.vaultmtg.app;
+              location /.well-known/acme-challenge/ {
+                  root /var/www/certbot;
+              }
+              location / {
+                  return 301 https://$host$request_uri;
+              }
+          }
+          STAGINGNGINX
+
           nginx -t
           systemctl enable nginx
           systemctl start nginx

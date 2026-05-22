@@ -22,7 +22,7 @@ Parameters:
     Type: String
     Description: >
       EC2 Elastic IP address for the BFF instance (same as api.vaultmtg.app).
-      Value: 3.82.48.206
+      Value: 34.234.7.126
 
   TTL:
     Type: Number
