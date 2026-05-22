@@ -92,6 +92,22 @@ Resources:
         - Key: Environment
           Value: !Ref Environment
 
+  # --- RDS Secret Rotation Schedule ------------------------------------------
+  # The RDS instance uses ManageMasterUserPassword: true, so AWS owns the
+  # Secrets Manager secret natively.  The default rotation cadence for
+  # RDS-managed secrets is 7 days.  This resource overrides it to 90 days,
+  # which is the VaultMTG policy (see engineering/runbooks/secret-rotation-policy.md).
+  #
+  # No HostedRotationLambda is needed here — RDS-managed secrets are rotated
+  # internally by the RDS service, not by a customer-deployed Lambda.
+  DBSecretRotationSchedule:
+    Type: AWS::SecretsManager::RotationSchedule
+    DependsOn: DBInstance
+    Properties:
+      SecretId: !GetAtt DBInstance.MasterUserSecret.SecretArn
+      RotationRules:
+        AutomaticallyAfterDays: 90
+
   # --- RDS Instance -----------------------------------------------------------
   DBInstance:
     Type: AWS::RDS::DBInstance
