@@ -18,6 +18,8 @@ on:
           - sync-lambda
           - cloudwatch-alarms
           - cloudwatch-alarms-staging
+          - logs
+          - logs-import
           - cdn
           - iam-gha-roles
           - cloudtrail
@@ -58,6 +60,7 @@ jobs:
             cloudwatch-alarms-staging)  STACK_NAME="mtga-companion-cloudwatch-alarms-staging" ; TEMPLATE_NAME="cloudwatch-alarms" ;;
             cloudtrail)                 STACK_NAME="vault-mtg-cloudtrail" ;               TEMPLATE_NAME="${{ inputs.stack }}" ;;
             staging-deploy-role)        STACK_NAME="mtga-companion-staging-deploy-role" ; TEMPLATE_NAME="${{ inputs.stack }}" ;;
+            logs-import)                STACK_NAME="mtga-companion-logs" ;                TEMPLATE_NAME="logs" ;;
             *)                          STACK_NAME="mtga-companion-${{ inputs.stack }}" ; TEMPLATE_NAME="${{ inputs.stack }}" ;;
           esac
           echo "STACK_NAME=$STACK_NAME" >> $GITHUB_ENV
@@ -108,37 +111,65 @@ jobs:
           CHANGESET_NAME="deploy-$(date +%Y%m%d%H%M%S)"
           echo "changeset_name=$CHANGESET_NAME" >> $GITHUB_OUTPUT
 
-          # Determine CREATE vs UPDATE by checking if the stack already exists and is stable.
-          # Save as a step output so the execute step uses the right waiter.
-          STACK_STATUS=$(aws cloudformation describe-stacks \
-            --stack-name "${{ env.STACK_NAME }}" \
-            --query 'Stacks[0].StackStatus' \
-            --output text 2>/dev/null || echo "DOES_NOT_EXIST")
+          # logs-import: first-time adoption of pre-existing log groups via IMPORT changeset.
+          # All five log groups already exist in CloudWatch; CREATE would be blocked by the
+          # AWS::EarlyValidation::ResourceExistenceCheck hook. IMPORT adopts them into CFN
+          # management without recreating them. Subsequent updates use the normal UPDATE path
+          # (select "logs" instead of "logs-import" once the stack exists).
+          if [ "${{ inputs.stack }}" = "logs-import" ]; then
+            CHANGE_TYPE="IMPORT"
+            echo "change_type=$CHANGE_TYPE" >> $GITHUB_OUTPUT
+            echo "Changeset type: $CHANGE_TYPE (resource import for logs stack)"
 
-          if echo "$STACK_STATUS" | grep -qE 'COMPLETE|ROLLBACK'; then
-            CHANGE_TYPE="UPDATE"
+            PARAMS_FILE="cloudformation/parameters/logs.json"
+            PARAMS_ARG=""
+            [ -f "$PARAMS_FILE" ] && PARAMS_ARG="--parameters file://$PARAMS_FILE"
+
+            aws cloudformation create-change-set \
+              --stack-name "${{ env.STACK_NAME }}" \
+              --template-body file://cloudformation/${{ env.TEMPLATE_NAME }}.yml \
+              --change-set-name "$CHANGESET_NAME" \
+              --change-set-type IMPORT \
+              --resources-to-import file://cloudformation/parameters/logs-import.json \
+              --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
+              $PARAMS_ARG
+
+            aws cloudformation wait change-set-create-complete \
+              --stack-name "${{ env.STACK_NAME }}" \
+              --change-set-name "$CHANGESET_NAME" || true
           else
-            CHANGE_TYPE="CREATE"
+            # Determine CREATE vs UPDATE by checking if the stack already exists and is stable.
+            # Save as a step output so the execute step uses the right waiter.
+            STACK_STATUS=$(aws cloudformation describe-stacks \
+              --stack-name "${{ env.STACK_NAME }}" \
+              --query 'Stacks[0].StackStatus' \
+              --output text 2>/dev/null || echo "DOES_NOT_EXIST")
+
+            if echo "$STACK_STATUS" | grep -qE 'COMPLETE|ROLLBACK'; then
+              CHANGE_TYPE="UPDATE"
+            else
+              CHANGE_TYPE="CREATE"
+            fi
+            echo "change_type=$CHANGE_TYPE" >> $GITHUB_OUTPUT
+            echo "Changeset type: $CHANGE_TYPE (stack status: $STACK_STATUS)"
+
+            PARAMS_FILE="cloudformation/parameters/${{ inputs.stack }}.json"
+            PARAMS_ARG=""
+            [ -f "$PARAMS_FILE" ] && PARAMS_ARG="--parameters file://$PARAMS_FILE"
+
+            aws cloudformation create-change-set \
+              --stack-name "${{ env.STACK_NAME }}" \
+              --template-body file://cloudformation/${{ env.TEMPLATE_NAME }}.yml \
+              --change-set-name "$CHANGESET_NAME" \
+              --change-set-type "$CHANGE_TYPE" \
+              --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
+              $PARAMS_ARG
+
+            # Wait for changeset to finish computing (FAILED is terminal -- e.g. no changes)
+            aws cloudformation wait change-set-create-complete \
+              --stack-name "${{ env.STACK_NAME }}" \
+              --change-set-name "$CHANGESET_NAME" || true
           fi
-          echo "change_type=$CHANGE_TYPE" >> $GITHUB_OUTPUT
-          echo "Changeset type: $CHANGE_TYPE (stack status: $STACK_STATUS)"
-
-          PARAMS_FILE="cloudformation/parameters/${{ inputs.stack }}.json"
-          PARAMS_ARG=""
-          [ -f "$PARAMS_FILE" ] && PARAMS_ARG="--parameters file://$PARAMS_FILE"
-
-          aws cloudformation create-change-set \
-            --stack-name "${{ env.STACK_NAME }}" \
-            --template-body file://cloudformation/${{ env.TEMPLATE_NAME }}.yml \
-            --change-set-name "$CHANGESET_NAME" \
-            --change-set-type "$CHANGE_TYPE" \
-            --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
-            $PARAMS_ARG
-
-          # Wait for changeset to finish computing (FAILED is terminal — e.g. no changes)
-          aws cloudformation wait change-set-create-complete \
-            --stack-name "${{ env.STACK_NAME }}" \
-            --change-set-name "$CHANGESET_NAME" || true
 
       - name: Show changeset
         run: |
@@ -159,10 +190,38 @@ jobs:
           if [ "${{ steps.changeset.outputs.change_type }}" = "CREATE" ]; then
             aws cloudformation wait stack-create-complete \
               --stack-name "${{ env.STACK_NAME }}"
+          elif [ "${{ steps.changeset.outputs.change_type }}" = "IMPORT" ]; then
+            aws cloudformation wait stack-import-complete \
+              --stack-name "${{ env.STACK_NAME }}"
           else
             aws cloudformation wait stack-update-complete \
               --stack-name "${{ env.STACK_NAME }}"
           fi
+
+      - name: Apply log group retention policies (logs-import only)
+        # CloudFormation IMPORT adopts existing resources but does not reconcile
+        # non-identifier properties (such as RetentionInDays) in the same operation.
+        # This step forces the retention policy onto each imported log group so that
+        # the live state matches the template immediately after import.
+        # Idempotent: safe to re-run; no-op if retention is already correct.
+        if: ${{ inputs.stack == 'logs-import' && !inputs.dry_run }}
+        run: |
+          RETENTION_DAYS=30
+          for LG in \
+            "/vaultmtg/production/bff" \
+            "/vaultmtg/production/nginx" \
+            "/aws/lambda/vault-mtg-sync" \
+            "/aws/lambda/mtga-sync" \
+            "/aws/lambda/mtga-companion-production-cfn-vpc-config"; do
+            aws logs put-retention-policy \
+              --log-group-name "$LG" \
+              --retention-in-days $RETENTION_DAYS
+            echo "Set ${RETENTION_DAYS}-day retention on $LG"
+          done
+          echo "Verifying retention policies..."
+          aws logs describe-log-groups \
+            --query 'logGroups[].[logGroupName,retentionInDays]' \
+            --output table
 
       - name: Show stack outputs
         if: ${{ !inputs.dry_run }}

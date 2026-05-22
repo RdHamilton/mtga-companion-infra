@@ -1,0 +1,147 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: |
+  VaultMTG - CloudWatch log group definitions with retention policies.
+  Manages BFF, nginx, and Lambda log groups for the VaultMTG stack.
+  All groups are set to 30-day retention to bound storage cost.
+  Deploy order: independent (no cross-stack imports or exports required).
+  INITIAL DEPLOY: use the logs-import workflow input or supply
+  --resources-to-import file://cloudformation/parameters/logs-import.json
+  (required because all five groups already exist and must be imported,
+  not created). Subsequent updates use the normal UPDATE changeset path.
+
+Parameters:
+  Environment:
+    Type: String
+    Description: Deployment environment (production or staging).
+    Default: production
+    AllowedValues: [production, staging]
+
+  RetentionDays:
+    Type: Number
+    Description: |
+      Number of days to retain CloudWatch logs across all managed groups.
+      Default 30 (one month) balances debugging utility with storage cost.
+    Default: 30
+    AllowedValues: [1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1096, 1827, 2192, 2557, 2922, 3288, 3653]
+
+  LambdaSyncFunctionName:
+    Type: String
+    Description: Name of the primary sync Lambda function.
+    Default: vault-mtg-sync
+
+  LambdaLegacySyncFunctionName:
+    Type: String
+    Description: Name of the legacy sync Lambda function (pre-rename).
+    Default: mtga-sync
+
+  LambdaVpcConfigFunctionName:
+    Type: String
+    Description: Name of the CloudFormation VPC-config custom-resource Lambda.
+    Default: mtga-companion-production-cfn-vpc-config
+
+Resources:
+
+  # ---------------------------------------------------------
+  # BFF log group
+  #
+  # Receives structured JSON logs from the Go BFF process via
+  # the CloudWatch Agent on the EC2 instance.
+  # Log group name matches the path used by the CWAgent config
+  # shipped with this repo (scripts/install-cwagent.sh):
+  #   /vaultmtg/production/bff
+  #
+  # DeletionPolicy: Retain -- do not delete logs on stack delete.
+  # This group was auto-created by CloudWatch; it is imported into
+  # CloudFormation management (not created) on the initial deploy.
+  # ---------------------------------------------------------
+  BffLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: !Sub "/vaultmtg/${Environment}/bff"
+      RetentionInDays: !Ref RetentionDays
+      Tags:
+        - Key: Project
+          Value: vault-mtg
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ---------------------------------------------------------
+  # nginx log group
+  #
+  # Receives nginx access and error logs forwarded by the
+  # CloudWatch Agent on the EC2 instance.
+  # Log group name: /vaultmtg/production/nginx
+  # ---------------------------------------------------------
+  NginxLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: !Sub "/vaultmtg/${Environment}/nginx"
+      RetentionInDays: !Ref RetentionDays
+      Tags:
+        - Key: Project
+          Value: vault-mtg
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ---------------------------------------------------------
+  # Lambda log group: vault-mtg-sync (primary)
+  #
+  # CloudWatch creates /aws/lambda/<function-name> automatically
+  # on first invocation. This resource imports the existing group
+  # and applies the retention policy.
+  # ---------------------------------------------------------
+  LambdaSyncLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${LambdaSyncFunctionName}"
+      RetentionInDays: !Ref RetentionDays
+      Tags:
+        - Key: Project
+          Value: vault-mtg
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ---------------------------------------------------------
+  # Lambda log group: mtga-sync (legacy pre-rename)
+  #
+  # The legacy function name remains in use until the rename
+  # wave (Project #34) retires it. Retention is backfilled here.
+  # ---------------------------------------------------------
+  LambdaLegacySyncLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${LambdaLegacySyncFunctionName}"
+      RetentionInDays: !Ref RetentionDays
+      Tags:
+        - Key: Project
+          Value: vault-mtg
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ---------------------------------------------------------
+  # Lambda log group: VPC-config custom resource Lambda
+  #
+  # The sync-lambda stack creates a helper Lambda for the CFN
+  # custom resource that configures VPC placement. Its log group
+  # (auto-named by Lambda) gets the same 30-day retention.
+  # ---------------------------------------------------------
+  LambdaVpcConfigLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${LambdaVpcConfigFunctionName}"
+      RetentionInDays: !Ref RetentionDays
+      Tags:
+        - Key: Project
+          Value: vault-mtg
+        - Key: Environment
+          Value: !Ref Environment
