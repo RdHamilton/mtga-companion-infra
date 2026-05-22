@@ -99,8 +99,12 @@ jobs:
             # Look for lines where a github sub condition ends in :* (the wildcard form).
             # Pattern: token.actions.githubusercontent.com:sub: ...:<repo>:*
             # StringLike with :* matches any ref -- this is the overly-broad pattern we ban.
+            # -A 20 widens the window so sub lists longer than 5 entries are still
+            # fully scanned. The secondary filter is anchored to `repo:...:*` (an
+            # OIDC sub-ref wildcard) so unrelated IAM action wildcards within the
+            # window (e.g. `Action: cloudformation:*`) are not false positives.
             HITS=$(grep -n 'token.actions.githubusercontent.com:sub' "$TEMPLATE_FILE" \
-              -A 5 | grep -E ':\*\s*$' || true)
+              -A 20 | grep -E 'repo:.*:\*\s*$' || true)
             if [ -n "$HITS" ]; then
               VIOLATIONS="${VIOLATIONS}\n  $TEMPLATE_FILE:\n$HITS"
             fi
