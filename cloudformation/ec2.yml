@@ -153,33 +153,7 @@ Resources:
             Version: "2012-10-17"
             Statement:
               # ---------------------------------------------------------------
-              # Statement 1: /mtga-companion/* BFF bootstrap paths.
-              # REVERSIBLE WINDOW — retained until all consumers are verified
-              # reading from /vaultmtg/app/production/* (Phase 5c cutover).
-              # Removed in Phase 5d (R-13 IAM contract step).
-              #
-              # Consumers: EC2 UserData bootstrap (reads /mtga-companion/production/*
-              # and /mtga-companion/prod/daemon-jwt-secret).
-              # ---------------------------------------------------------------
-              - Sid: LegacyMtgaCompanionBootstrap
-                Effect: Allow
-                Action:
-                  - ssm:GetParameter
-                  - ssm:GetParameters
-                  - ssm:GetParametersByPath
-                Resource:
-                  - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/mtga-companion/production/ALLOWED_ORIGINS"
-                  - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/mtga-companion/production/CLERK_FRONTEND_API"
-                  - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/mtga-companion/production/CLERK_SECRET_KEY"
-                  - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/mtga-companion/production/clerk-secret-key"
-                  - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/mtga-companion/production/db-endpoint"
-                  - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/mtga-companion/production/db-name"
-                  - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/mtga-companion/production/db-secret-arn"
-                  - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/mtga-companion/production/domain-name"
-                  - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/mtga-companion/prod/daemon-jwt-secret"
-                  - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/mtga-companion/daemon-jwt-secret"
-              # ---------------------------------------------------------------
-              # Statement 2: /vaultmtg/app/production/* — new canonical BFF
+              # Statement 1: /vaultmtg/app/production/* — canonical BFF
               # runtime and provisioning namespace (R-13).
               #
               # Covers: provision-env.sh, provision-db-url.sh (deploy pipeline)
@@ -202,14 +176,14 @@ Resources:
                 Resource:
                   - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/vaultmtg/app/production/*"
               # ---------------------------------------------------------------
-              # Statement 3: /vaultmtg/production/* deploy provisioning paths.
+              # Statement 2: /vaultmtg/production/* deploy provisioning paths.
               # Read by provision-env.sh and provision-db-url.sh which execute
               # ON the production EC2 instance via SSM RunCommand from deploy-bff.yml.
               # These are the paths deploy-env.sh SSM_PROD_* constants currently
               # point at (pre-Phase 5c cutover).
               #
               # After Phase 5c (app-repo deploy-env.sh update to /vaultmtg/app/*),
-              # this statement is folded into Statement 2 and removed.
+              # this statement is folded into Statement 1 and removed.
               # ---------------------------------------------------------------
               - Sid: VaultmtgProductionProvisioningLegacy
                 Effect: Allow
@@ -224,7 +198,7 @@ Resources:
                   - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/vaultmtg/production/db-endpoint"
                   - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/vaultmtg/production/db-name"
               # ---------------------------------------------------------------
-              # Statement 4: /vaultmtg/staging/* staging provisioning paths.
+              # Statement 3: /vaultmtg/staging/* staging provisioning paths.
               # Read by provision-staging-env.sh when it runs under the
               # production EC2 instance role (interim — before the Path-B
               # vaultmtg-staging-deploy-provisioner OIDC refactor lands).
