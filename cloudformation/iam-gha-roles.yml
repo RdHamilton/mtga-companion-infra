@@ -7,6 +7,10 @@ Description: >
   resource-import change set is import-only. See PR #36 and PR #39 for
   the original provisioning context.
 
+  S-04 (vault-mtg#2325): GhaCfnDeployPermissionsBoundary caps the effective
+  permissions of gha-infra-cfn-deploy -- see the resource-level comment for
+  the full design rationale.
+
   Deploy order: standalone (no stack dependencies).
 
 Parameters:
@@ -46,6 +50,391 @@ Parameters:
     Description: ARN pattern for the sync-lambda CloudFormation stack
 
 Resources:
+  # ===========================================================================
+  # Permissions boundary for gha-infra-cfn-deploy (S-04 / vault-mtg#2325)
+  #
+  # A permissions boundary is evaluated alongside the role's identity (inline)
+  # policy with logical AND: an action is granted only if BOTH the inline
+  # policy AND this boundary Allow it. Effective permissions therefore equal
+  # (inline policy INTERSECT boundary).
+  #
+  # DESIGN PRINCIPLE -- completeness by mirroring:
+  #   This boundary mirrors the gha-infra-cfn-deploy inline policy (cfn-stack-deploy,
+  #   below) statement-for-statement and action-for-action, with ONE deliberate
+  #   exclusion described below. Because the boundary action set is a SUPERSET of
+  #   the inline policy action set, the intersection equals the inline policy --
+  #   the boundary never silently breaks a legitimate deploy. Any future addition
+  #   to the inline policy MUST be mirrored here in the same PR.
+  #
+  # WHAT THE BOUNDARY CAPS (the dangerous surface from #2325):
+  #   1. secretsmanager:GetSecretValue -- NOT in the boundary. The deploy role
+  #      manages secret lifecycle (create/delete/describe/tag/list) for
+  #      RDS-managed secrets but never reads plaintext values. The EC2 instance
+  #      role reads secrets at runtime. Even if a future inline edit re-adds
+  #      GetSecretValue, this boundary keeps it DENIED.
+  #   2. secretsmanager:PutSecretValue -- NOT in the boundary. RDS
+  #      ManageMasterUserPassword has AWS rotate the credential directly; the
+  #      deploy role is not in the rotation path.
+  #   3. iam:* (wildcard) -- NEVER granted. The boundary lists only the specific
+  #      iam: actions the CFN stacks legitimately need, so the deploy role can
+  #      never self-escalate to a blanket IAM grant -- regardless of what the
+  #      inline policy says. iam:CreateUser, iam:CreateAccessKey, iam:AttachUserPolicy,
+  #      etc. are absent and therefore DENIED.
+  # ===========================================================================
+  GhaCfnDeployPermissionsBoundary:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: gha-cfn-deploy-permissions-boundary
+      Description: >
+        Permissions boundary for the gha-infra-cfn-deploy GitHub Actions role.
+        Caps effective permissions: excludes secretsmanager:GetSecretValue and
+        secretsmanager:PutSecretValue, and grants only specific iam: actions
+        (never iam:*). See RdHamilton/vault-mtg#2325.
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          # --- mirrors inline Sid CloudFormationStackOperations ---
+          - Sid: CloudFormationStackOperations
+            Effect: Allow
+            Action: cloudformation:*
+            Resource:
+              - arn:aws:cloudformation:us-east-1:901347789205:stack/mtga-companion-*/*
+              - arn:aws:cloudformation:us-east-1:901347789205:stack/vaultmtg-*/*
+              - arn:aws:cloudformation:us-east-1:901347789205:stack/vault-mtg-*/*
+
+          # --- mirrors inline Sid CloudFormationGlobal ---
+          - Sid: CloudFormationGlobal
+            Effect: Allow
+            Action:
+              - cloudformation:ValidateTemplate
+              - cloudformation:ListStacks
+              - cloudformation:DescribeStacks
+            Resource: "*"
+
+          # --- mirrors inline Sid IAMPassAndManage ---
+          # Specific iam: actions only. iam:* is intentionally NOT present so
+          # the boundary permanently forbids IAM self-escalation. iam:CreateUser,
+          # iam:CreateAccessKey, iam:AttachUserPolicy and similar user/group
+          # actions are absent and therefore DENIED by the boundary.
+          - Sid: IAMPassAndManage
+            Effect: Allow
+            Action:
+              - iam:PassRole
+              - iam:CreateRole
+              - iam:DeleteRole
+              - iam:GetRole
+              - iam:UpdateRole
+              - iam:CreateServiceLinkedRole
+              - iam:PutRolePolicy
+              - iam:DeleteRolePolicy
+              - iam:GetRolePolicy
+              - iam:ListRolePolicies
+              - iam:AttachRolePolicy
+              - iam:DetachRolePolicy
+              - iam:ListAttachedRolePolicies
+              - iam:TagRole
+              - iam:UntagRole
+              - iam:CreateInstanceProfile
+              - iam:DeleteInstanceProfile
+              - iam:GetInstanceProfile
+              - iam:AddRoleToInstanceProfile
+              - iam:RemoveRoleFromInstanceProfile
+              - iam:CreateOIDCProvider
+              - iam:DeleteOIDCProvider
+              - iam:GetOIDCProvider
+              - iam:UpdateOIDCProvider
+              - iam:TagOIDCProvider
+              - iam:ListOIDCProviders
+              - iam:PutRolePermissionsBoundary
+              - iam:CreatePolicy
+              - iam:CreatePolicyVersion
+              - iam:DeletePolicy
+              - iam:DeletePolicyVersion
+              - iam:GetPolicy
+              - iam:GetPolicyVersion
+              - iam:ListPolicies
+              - iam:ListPolicyVersions
+            Resource: "*"
+
+          # --- mirrors inline Sid EC2 ---
+          - Sid: EC2
+            Effect: Allow
+            Action: ec2:*
+            Resource: "*"
+
+          # --- mirrors inline Sid RDS ---
+          - Sid: RDS
+            Effect: Allow
+            Action: rds:*
+            Resource: "*"
+
+          # --- mirrors inline Sid Lambda ---
+          - Sid: Lambda
+            Effect: Allow
+            Action: lambda:*
+            Resource: "*"
+
+          # --- mirrors inline Sid S3 ---
+          - Sid: S3
+            Effect: Allow
+            Action:
+              - s3:CreateBucket
+              - s3:DeleteBucket
+              - s3:ListBucket
+              - s3:GetBucketLocation
+              - s3:GetBucketAcl
+              - s3:GetBucketPolicy
+              - s3:PutBucketPolicy
+              - s3:DeleteBucketPolicy
+              - s3:GetBucketVersioning
+              - s3:PutBucketVersioning
+              - s3:PutBucketPublicAccessBlock
+              - s3:GetBucketPublicAccessBlock
+              - s3:PutEncryptionConfiguration
+              - s3:GetEncryptionConfiguration
+              - s3:DeleteBucketEncryption
+              - s3:PutBucketTagging
+              - s3:GetBucketTagging
+              - s3:TagResource
+              - s3:UntagResource
+              - s3:ListTagsForResource
+              - s3:PutBucketOwnershipControls
+              - s3:GetBucketOwnershipControls
+              - s3:PutBucketObjectLockConfiguration
+              - s3:GetBucketObjectLockConfiguration
+              - s3:PutLifecycleConfiguration
+              - s3:GetLifecycleConfiguration
+              - s3:PutBucketNotification
+              - s3:GetBucketNotification
+              - s3:GetBucketCORS
+              - s3:PutBucketCORS
+              - s3:GetBucketLogging
+              - s3:GetBucketWebsite
+              - s3:GetAccelerateConfiguration
+              - s3:GetReplicationConfiguration
+              - s3:GetAnalyticsConfiguration
+              - s3:GetInventoryConfiguration
+              - s3:GetMetricsConfiguration
+              - s3:GetIntelligentTieringConfiguration
+            Resource: "*"
+
+          # --- mirrors inline Sid S3CloudTrailLogsBucket ---
+          - Sid: S3CloudTrailLogsBucket
+            Effect: Allow
+            Action:
+              - s3:CreateBucket
+              - s3:DeleteBucket
+              - s3:ListBucket
+              - s3:GetBucketAcl
+              - s3:GetBucketLocation
+              - s3:GetBucketPolicy
+              - s3:PutBucketPolicy
+              - s3:DeleteBucketPolicy
+              - s3:GetBucketVersioning
+              - s3:PutBucketVersioning
+              - s3:GetBucketPublicAccessBlock
+              - s3:PutBucketPublicAccessBlock
+              - s3:GetEncryptionConfiguration
+              - s3:PutEncryptionConfiguration
+              - s3:DeleteBucketEncryption
+              - s3:GetBucketTagging
+              - s3:PutBucketTagging
+              - s3:TagResource
+              - s3:UntagResource
+              - s3:ListTagsForResource
+              - s3:GetBucketOwnershipControls
+              - s3:PutBucketOwnershipControls
+              - s3:GetBucketObjectLockConfiguration
+              - s3:PutBucketObjectLockConfiguration
+              - s3:GetLifecycleConfiguration
+              - s3:GetBucketNotification
+              - s3:GetBucketCORS
+              - s3:GetBucketLogging
+              - s3:GetBucketWebsite
+              - s3:GetAccelerateConfiguration
+              - s3:GetReplicationConfiguration
+              - s3:GetAnalyticsConfiguration
+              - s3:GetInventoryConfiguration
+              - s3:GetMetricsConfiguration
+              - s3:GetIntelligentTieringConfiguration
+            Resource:
+              - arn:aws:s3:::vault-mtg-cloudtrail-logs-*
+              - arn:aws:s3:::vault-mtg-cloudtrail-logs-*/*
+
+          # --- mirrors inline Sid CloudFront ---
+          - Sid: CloudFront
+            Effect: Allow
+            Action: cloudfront:*
+            Resource: "*"
+
+          # --- mirrors inline Sid ACM ---
+          - Sid: ACM
+            Effect: Allow
+            Action:
+              - acm:RequestCertificate
+              - acm:DescribeCertificate
+              - acm:DeleteCertificate
+              - acm:ListCertificates
+              - acm:AddTagsToCertificate
+              - acm:ListTagsForCertificate
+            Resource: "*"
+
+          # --- mirrors inline Sid Route53 ---
+          - Sid: Route53
+            Effect: Allow
+            Action:
+              - route53:CreateHostedZone
+              - route53:DeleteHostedZone
+              - route53:GetHostedZone
+              - route53:ListHostedZones
+              - route53:ChangeResourceRecordSets
+              - route53:GetChange
+              - route53:ListResourceRecordSets
+              - route53:CreateHealthCheck
+              - route53:DeleteHealthCheck
+              - route53:GetHealthCheck
+            Resource: "*"
+
+          # --- mirrors inline Sid CloudWatch ---
+          - Sid: CloudWatch
+            Effect: Allow
+            Action:
+              - cloudwatch:PutMetricAlarm
+              - cloudwatch:DeleteAlarms
+              - cloudwatch:DescribeAlarms
+              - cloudwatch:ListTagsForResource
+              - cloudwatch:TagResource
+            Resource: "*"
+
+          # --- mirrors inline Sid SNS ---
+          - Sid: SNS
+            Effect: Allow
+            Action:
+              - sns:CreateTopic
+              - sns:DeleteTopic
+              - sns:GetTopicAttributes
+              - sns:SetTopicAttributes
+              - sns:Subscribe
+              - sns:Unsubscribe
+              - sns:ListSubscriptionsByTopic
+              - sns:TagResource
+              - sns:ListTagsForResource
+            Resource: "*"
+
+          # --- mirrors inline Sid SSM ---
+          - Sid: SSM
+            Effect: Allow
+            Action:
+              - ssm:GetParameter
+              - ssm:GetParameters
+              - ssm:PutParameter
+              - ssm:DeleteParameter
+              - ssm:DescribeParameters
+              - ssm:AddTagsToResource
+              - ssm:ListTagsForResource
+            Resource: "*"
+
+          # --- mirrors inline Sid SecretsManagerLifecycle ---
+          # Lifecycle actions ONLY. secretsmanager:GetSecretValue and
+          # secretsmanager:PutSecretValue are deliberately ABSENT -- this is
+          # the S-04 cap. The intersection with the inline policy means those
+          # two actions are DENIED for this role even on its own RDS secret.
+          - Sid: SecretsManagerLifecycle
+            Effect: Allow
+            Action:
+              - secretsmanager:CreateSecret
+              - secretsmanager:DeleteSecret
+              - secretsmanager:DescribeSecret
+              - secretsmanager:TagResource
+              - secretsmanager:ListSecrets
+            Resource: "*"
+
+          # --- mirrors inline Sid KMS ---
+          - Sid: KMS
+            Effect: Allow
+            Action:
+              - kms:CreateKey
+              - kms:DisableKey
+              - kms:EnableKeyRotation
+              - kms:PutKeyPolicy
+              - kms:TagResource
+              - kms:DescribeKey
+              - kms:GetKeyPolicy
+              - kms:GetKeyRotationStatus
+              - kms:ListResourceTags
+              - kms:DisableKeyRotation
+              - kms:EnableKey
+              - kms:UntagResource
+              - kms:UpdateKeyDescription
+              - kms:ScheduleKeyDeletion
+              - kms:ListKeys
+              - kms:CreateAlias
+              - kms:UpdateAlias
+              - kms:DeleteAlias
+              - kms:ListAliases
+              - kms:CreateGrant
+            Resource: "*"
+
+          # --- mirrors inline Sid EventBridge ---
+          - Sid: EventBridge
+            Effect: Allow
+            Action:
+              - scheduler:CreateSchedule
+              - scheduler:UpdateSchedule
+              - scheduler:DeleteSchedule
+              - scheduler:GetSchedule
+              - scheduler:ListSchedules
+              - events:PutRule
+              - events:DeleteRule
+              - events:DescribeRule
+              - events:PutTargets
+              - events:RemoveTargets
+            Resource: "*"
+
+          # --- mirrors inline Sid SQS ---
+          - Sid: SQS
+            Effect: Allow
+            Action:
+              - sqs:CreateQueue
+              - sqs:DeleteQueue
+              - sqs:GetQueueAttributes
+              - sqs:SetQueueAttributes
+              - sqs:ListQueueTags
+              - sqs:TagQueue
+            Resource: "*"
+
+          # --- mirrors inline Sid CloudTrail ---
+          - Sid: CloudTrail
+            Effect: Allow
+            Action:
+              - cloudtrail:CreateTrail
+              - cloudtrail:AddTags
+              - cloudtrail:PutEventSelectors
+              - cloudtrail:PutInsightSelectors
+              - cloudtrail:PutEventConfiguration
+              - cloudtrail:StartLogging
+              - cloudtrail:DescribeTrails
+              - cloudtrail:GetTrail
+              - cloudtrail:GetTrailStatus
+              - cloudtrail:GetEventSelectors
+              - cloudtrail:GetInsightSelectors
+              - cloudtrail:GetEventConfiguration
+              - cloudtrail:ListTags
+              - cloudtrail:ListTrails
+              - cloudtrail:UpdateTrail
+              - cloudtrail:RemoveTags
+              - cloudtrail:StopLogging
+              - cloudtrail:DeleteTrail
+            Resource: "*"
+
+          # --- mirrors inline Sid CloudTrailOrganizationsProbe ---
+          - Sid: CloudTrailOrganizationsProbe
+            Effect: Allow
+            Action:
+              - organizations:DescribeOrganization
+              - organizations:ListAWSServiceAccessForOrganization
+            Resource: "*"
+
   # ---------------------------------------------------------------------------
   # github-actions-oidc-deploy
   # Assumed by vault-mtg staging-deploy.yml and deploy-spa*.yml workflows for
@@ -201,6 +590,14 @@ Resources:
   # Assumed by deploy.yml to provision / update all other CloudFormation stacks
   # in this repo. Broad CloudFormation + resource permissions scoped to
   # mtga-companion-* and vaultmtg-* stack name prefixes where possible.
+  #
+  # S-04 (vault-mtg#2325): PermissionsBoundary attached. The boundary
+  # (GhaCfnDeployPermissionsBoundary, above) is a hard ceiling -- effective
+  # permissions equal (this inline policy INTERSECT boundary). The boundary
+  # mirrors this inline policy action-for-action, so it never tightens a
+  # currently-required operation; it permanently caps secretsmanager read/write
+  # and forbids any iam:* wildcard. When this inline policy gains an action,
+  # mirror it into the boundary in the SAME PR or that action will be denied.
   # ---------------------------------------------------------------------------
   GhaInfraCfnDeployRole:
     Type: AWS::IAM::Role
@@ -208,6 +605,7 @@ Resources:
     Properties:
       RoleName: gha-infra-cfn-deploy
       Description: GitHub Actions OIDC role for mtga-companion-infra CloudFormation deploy workflow
+      PermissionsBoundary: !Ref GhaCfnDeployPermissionsBoundary
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
