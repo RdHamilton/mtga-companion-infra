@@ -89,8 +89,8 @@ Resources:
       PolicyDocument:
         Version: "2012-10-17"
         Statement:
-          # --- mirrors inline Sid CloudFormationStackOperations ---
-          - Sid: CloudFormationStackOperations
+          # mirrors inline CloudFormationStackOperations
+          - Sid: CfnStack
             Effect: Allow
             Action: cloudformation:*
             Resource:
@@ -98,8 +98,8 @@ Resources:
               - arn:aws:cloudformation:us-east-1:901347789205:stack/vaultmtg-*/*
               - arn:aws:cloudformation:us-east-1:901347789205:stack/vault-mtg-*/*
 
-          # --- mirrors inline Sid CloudFormationGlobal ---
-          - Sid: CloudFormationGlobal
+          # mirrors inline CloudFormationGlobal
+          - Sid: CfnGlobal
             Effect: Allow
             Action:
               - cloudformation:ValidateTemplate
@@ -107,12 +107,9 @@ Resources:
               - cloudformation:DescribeStacks
             Resource: "*"
 
-          # --- mirrors inline Sid IAMPassAndManage ---
-          # Specific iam: actions only. iam:* is intentionally NOT present so
-          # the boundary permanently forbids IAM self-escalation. iam:CreateUser,
-          # iam:CreateAccessKey, iam:AttachUserPolicy and similar user/group
-          # actions are absent and therefore DENIED by the boundary.
-          - Sid: IAMPassAndManage
+          # mirrors inline IAMPassAndManage — specific actions only, never iam:*,
+          # so the boundary permanently forbids IAM self-escalation.
+          - Sid: IAM
             Effect: Allow
             Action:
               - iam:PassRole
@@ -152,25 +149,25 @@ Resources:
               - iam:ListPolicyVersions
             Resource: "*"
 
-          # --- mirrors inline Sid EC2 ---
           - Sid: EC2
             Effect: Allow
             Action: ec2:*
             Resource: "*"
 
-          # --- mirrors inline Sid RDS ---
           - Sid: RDS
             Effect: Allow
             Action: rds:*
             Resource: "*"
 
-          # --- mirrors inline Sid Lambda ---
           - Sid: Lambda
             Effect: Allow
             Action: lambda:*
             Resource: "*"
 
-          # --- mirrors inline Sid S3 ---
+          # Merged from inline S3 (Resource:*) + S3CloudTrailLogsBucket (scoped ARNs).
+          # The scoped statement's 35 actions are a strict subset of these 38 actions;
+          # since Resource:* already covers the scoped ARNs, the scoped statement was
+          # redundant in the boundary and is collapsed here. Effective ceiling unchanged.
           - Sid: S3
             Effect: Allow
             Action:
@@ -214,56 +211,11 @@ Resources:
               - s3:GetIntelligentTieringConfiguration
             Resource: "*"
 
-          # --- mirrors inline Sid S3CloudTrailLogsBucket ---
-          - Sid: S3CloudTrailLogsBucket
-            Effect: Allow
-            Action:
-              - s3:CreateBucket
-              - s3:DeleteBucket
-              - s3:ListBucket
-              - s3:GetBucketAcl
-              - s3:GetBucketLocation
-              - s3:GetBucketPolicy
-              - s3:PutBucketPolicy
-              - s3:DeleteBucketPolicy
-              - s3:GetBucketVersioning
-              - s3:PutBucketVersioning
-              - s3:GetBucketPublicAccessBlock
-              - s3:PutBucketPublicAccessBlock
-              - s3:GetEncryptionConfiguration
-              - s3:PutEncryptionConfiguration
-              - s3:DeleteBucketEncryption
-              - s3:GetBucketTagging
-              - s3:PutBucketTagging
-              - s3:TagResource
-              - s3:UntagResource
-              - s3:ListTagsForResource
-              - s3:GetBucketOwnershipControls
-              - s3:PutBucketOwnershipControls
-              - s3:GetBucketObjectLockConfiguration
-              - s3:PutBucketObjectLockConfiguration
-              - s3:GetLifecycleConfiguration
-              - s3:GetBucketNotification
-              - s3:GetBucketCORS
-              - s3:GetBucketLogging
-              - s3:GetBucketWebsite
-              - s3:GetAccelerateConfiguration
-              - s3:GetReplicationConfiguration
-              - s3:GetAnalyticsConfiguration
-              - s3:GetInventoryConfiguration
-              - s3:GetMetricsConfiguration
-              - s3:GetIntelligentTieringConfiguration
-            Resource:
-              - arn:aws:s3:::vault-mtg-cloudtrail-logs-*
-              - arn:aws:s3:::vault-mtg-cloudtrail-logs-*/*
-
-          # --- mirrors inline Sid CloudFront ---
           - Sid: CloudFront
             Effect: Allow
             Action: cloudfront:*
             Resource: "*"
 
-          # --- mirrors inline Sid ACM ---
           - Sid: ACM
             Effect: Allow
             Action:
@@ -275,8 +227,7 @@ Resources:
               - acm:ListTagsForCertificate
             Resource: "*"
 
-          # --- mirrors inline Sid Route53 ---
-          - Sid: Route53
+          - Sid: R53
             Effect: Allow
             Action:
               - route53:CreateHostedZone
@@ -291,8 +242,7 @@ Resources:
               - route53:GetHealthCheck
             Resource: "*"
 
-          # --- mirrors inline Sid CloudWatch ---
-          - Sid: CloudWatch
+          - Sid: CW
             Effect: Allow
             Action:
               - cloudwatch:PutMetricAlarm
@@ -302,7 +252,6 @@ Resources:
               - cloudwatch:TagResource
             Resource: "*"
 
-          # --- mirrors inline Sid SNS ---
           - Sid: SNS
             Effect: Allow
             Action:
@@ -317,7 +266,6 @@ Resources:
               - sns:ListTagsForResource
             Resource: "*"
 
-          # --- mirrors inline Sid SSM ---
           - Sid: SSM
             Effect: Allow
             Action:
@@ -330,12 +278,11 @@ Resources:
               - ssm:ListTagsForResource
             Resource: "*"
 
-          # --- mirrors inline Sid SecretsManagerLifecycle ---
           # Lifecycle actions ONLY. secretsmanager:GetSecretValue and
           # secretsmanager:PutSecretValue are deliberately ABSENT -- this is
           # the S-04 cap. The intersection with the inline policy means those
           # two actions are DENIED for this role even on its own RDS secret.
-          - Sid: SecretsManagerLifecycle
+          - Sid: SM
             Effect: Allow
             Action:
               - secretsmanager:CreateSecret
@@ -345,7 +292,6 @@ Resources:
               - secretsmanager:ListSecrets
             Resource: "*"
 
-          # --- mirrors inline Sid KMS ---
           - Sid: KMS
             Effect: Allow
             Action:
@@ -371,8 +317,7 @@ Resources:
               - kms:CreateGrant
             Resource: "*"
 
-          # --- mirrors inline Sid EventBridge ---
-          - Sid: EventBridge
+          - Sid: EB
             Effect: Allow
             Action:
               - scheduler:CreateSchedule
@@ -387,7 +332,6 @@ Resources:
               - events:RemoveTargets
             Resource: "*"
 
-          # --- mirrors inline Sid SQS ---
           - Sid: SQS
             Effect: Allow
             Action:
@@ -399,8 +343,7 @@ Resources:
               - sqs:TagQueue
             Resource: "*"
 
-          # --- mirrors inline Sid CloudTrail ---
-          - Sid: CloudTrail
+          - Sid: CT
             Effect: Allow
             Action:
               - cloudtrail:CreateTrail
@@ -423,8 +366,7 @@ Resources:
               - cloudtrail:DeleteTrail
             Resource: "*"
 
-          # --- mirrors inline Sid CloudTrailOrganizationsProbe ---
-          - Sid: CloudTrailOrganizationsProbe
+          - Sid: Org
             Effect: Allow
             Action:
               - organizations:DescribeOrganization
