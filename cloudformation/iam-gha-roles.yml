@@ -414,9 +414,17 @@ Resources:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
               StringLike:
                 token.actions.githubusercontent.com:sub:
-                  - !Sub repo:${GitHubOrg}/${AppRepo}:*
-                  - !Sub repo:${GitHubOrg}/${WebRepo}:*
-                  - !Sub repo:${GitHubOrg}/mtga-companion-web:*
+                  # vault-mtg: main branch deploys (staging, BFF) and release tags
+                  - !Sub repo:${GitHubOrg}/${AppRepo}:ref:refs/heads/main
+                  - !Sub repo:${GitHubOrg}/${AppRepo}:ref:refs/tags/app/v*
+                  - !Sub repo:${GitHubOrg}/${AppRepo}:ref:refs/tags/daemon/v*
+                  - !Sub repo:${GitHubOrg}/${AppRepo}:ref:refs/tags/v*
+                  # vault-mtg-web: main branch and release tag deploys
+                  - !Sub repo:${GitHubOrg}/${WebRepo}:ref:refs/heads/main
+                  - !Sub repo:${GitHubOrg}/${WebRepo}:ref:refs/tags/v*
+                  # mtga-companion-web: legacy repo retained for rollback safety
+                  - !Sub repo:${GitHubOrg}/mtga-companion-web:ref:refs/heads/main
+                  - !Sub repo:${GitHubOrg}/mtga-companion-web:ref:refs/tags/v*
       Policies:
         - PolicyName: github-actions-deploy-permissions
           PolicyDocument:
@@ -513,7 +521,9 @@ Resources:
               StringEquals:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
               StringLike:
-                token.actions.githubusercontent.com:sub: !Sub repo:${GitHubOrg}/${InfraRepo}:*
+                # S-05: pinned to main branch only; sync Lambda deploy runs
+                # from main via workflow_dispatch and repository_dispatch.
+                token.actions.githubusercontent.com:sub: !Sub repo:${GitHubOrg}/${InfraRepo}:ref:refs/heads/main
       Policies:
         - PolicyName: sync-lambda-deploy
           PolicyDocument:
@@ -566,7 +576,13 @@ Resources:
               StringEquals:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
               StringLike:
-                token.actions.githubusercontent.com:sub: !Sub repo:${GitHubOrg}/${InfraRepo}:*
+                # S-05: pinned to main branch and pull_request sub only.
+                # deploy.yml (workflow_dispatch) runs from main.
+                # cfn-changeset-gate.yml (pull_request) emits a pull_request sub.
+                # No feature-branch, fork, or tag ref can assume this role.
+                token.actions.githubusercontent.com:sub:
+                  - !Sub repo:${GitHubOrg}/${InfraRepo}:ref:refs/heads/main
+                  - !Sub repo:${GitHubOrg}/${InfraRepo}:pull_request
       Policies:
         - PolicyName: cfn-stack-deploy
           PolicyDocument:
