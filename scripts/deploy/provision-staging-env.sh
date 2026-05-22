@@ -4,7 +4,7 @@
 # Runs ON the EC2 instance via SSM RunShellScript during staging deploys.
 #
 # The env file is consumed by the EnvironmentFile= directive in
-# systemd/mtga-companion-staging.service.
+# systemd/vault-mtg-bff-staging.service.
 #
 # Parameters read (all from /vaultmtg/staging/ and /mtga-companion/staging/):
 #   clerk-secret-key       -> CLERK_SECRET_KEY  (SecureString)
@@ -37,12 +37,16 @@ upsert() {
 
 echo "Provisioning /etc/mtga-companion-staging/env from SSM..."
 
-# PORT
+# PORT and BFF_PORT
+# The BFF binary reads BFF_PORT (not PORT) for its HTTP listen address.
+# Both keys are written for compatibility; the systemd unit's inline
+# Environment=BFF_PORT=8081 directive also overrides EnvironmentFile.
 PORT=$(aws ssm get-parameter \
   --name "/vaultmtg/staging/PORT" \
   --region "$REGION" \
   --query Parameter.Value --output text)
 upsert PORT "$PORT"
+upsert BFF_PORT "$PORT"
 
 # MTGA_ENV (always staging)
 upsert MTGA_ENV "staging"

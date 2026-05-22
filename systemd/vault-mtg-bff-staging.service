@@ -1,0 +1,45 @@
+[Unit]
+Description=VaultMTG BFF Staging
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mtga-companion
+Group=mtga-companion
+ExecStart=/usr/local/bin/mtga-bff-staging
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=vault-mtg-bff-staging
+
+# BFF_PORT overrides the compiled-in default (8080) so the staging process
+# listens on 8081.  The BFF reads BFF_PORT (not PORT) for its listen address
+# — see services/bff/cmd/main.go.
+Environment=BFF_PORT=8081
+
+# MTGA_ENV must be staging so config.Load() accepts missing CLERK/DB
+# in development-mode while still applying staging-mode validation.
+# Inline here to guarantee the value even if provision-staging-env.sh
+# has not been run yet (e.g. immediately after instance bootstrap).
+Environment=MTGA_ENV=staging
+
+# Environment file — populated at deploy time by provision-staging-env.sh
+# which reads /vaultmtg/staging/* SSM parameters.
+# Inline Environment= declarations above take precedence over this file
+# when both define the same key (systemd: inline wins, EnvironmentFile loses).
+EnvironmentFile=/etc/mtga-companion-staging/env
+
+# Resource limits — staging shares the EC2 instance with production;
+# caps prevent a runaway staging process from starving the prod service.
+MemoryMax=512M
+CPUQuota=50%
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

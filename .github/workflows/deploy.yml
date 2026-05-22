@@ -14,6 +14,7 @@ on:
           - ec2
           - vpc
           - dns
+          - dns-staging
           - sync-lambda
           - cloudwatch-alarms
           - cloudwatch-alarms-staging
@@ -51,10 +52,11 @@ jobs:
           # TEMPLATE_NAME defaults to inputs.stack but can be overridden when the template filename
           # differs from the stack input (e.g. cloudwatch-alarms-staging uses cloudwatch-alarms.yml).
           case "${{ inputs.stack }}" in
-            cdn)                        STACK_NAME="vaultmtg-app-cdn" ;             TEMPLATE_NAME="${{ inputs.stack }}" ;;
-            iam-gha-roles)              STACK_NAME="mtga-companion-iam-gha-roles" ; TEMPLATE_NAME="${{ inputs.stack }}" ;;
+            cdn)                        STACK_NAME="vaultmtg-app-cdn" ;                   TEMPLATE_NAME="${{ inputs.stack }}" ;;
+            dns-staging)                STACK_NAME="mtga-companion-dns-staging" ;         TEMPLATE_NAME="${{ inputs.stack }}" ;;
+            iam-gha-roles)              STACK_NAME="mtga-companion-iam-gha-roles" ;       TEMPLATE_NAME="${{ inputs.stack }}" ;;
             cloudwatch-alarms-staging)  STACK_NAME="mtga-companion-cloudwatch-alarms-staging" ; TEMPLATE_NAME="cloudwatch-alarms" ;;
-            cloudtrail)                 STACK_NAME="vault-mtg-cloudtrail" ;          TEMPLATE_NAME="${{ inputs.stack }}" ;;
+            cloudtrail)                 STACK_NAME="vault-mtg-cloudtrail" ;               TEMPLATE_NAME="${{ inputs.stack }}" ;;
             staging-deploy-role)        STACK_NAME="mtga-companion-staging-deploy-role" ; TEMPLATE_NAME="${{ inputs.stack }}" ;;
             *)                          STACK_NAME="mtga-companion-${{ inputs.stack }}" ; TEMPLATE_NAME="${{ inputs.stack }}" ;;
           esac
