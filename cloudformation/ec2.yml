@@ -72,10 +72,72 @@ Resources:
             Principal:
               Service: ec2.amazonaws.com
             Action: sts:AssumeRole
-      ManagedPolicyArns:
-        # SSM Session Manager access - port 22 is never opened
-        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
       Policies:
+        # ---------------------------------------------------------
+        # SSMAgentConnectivity — replaces AmazonSSMManagedInstanceCore (F-1, #2441).
+        #
+        # AmazonSSMManagedInstanceCore (v2) includes ssm:GetParameter and
+        # ssm:GetParameters on Resource: * — a wildcard that undercuts the
+        # ARN-scoped parameter grants established by S-02 (#2310) and S-03 (#2364).
+        #
+        # This inline policy reproduces every statement from the managed policy
+        # EXCEPT the GetParameter* actions, which are already covered by the
+        # narrowed SSMParameterStoreAccess policy on this same role.
+        #
+        # Actions retained from managed policy statement 1 (SSM agent operations):
+        #   ssm:DescribeAssociation, ssm:GetDeployablePatchSnapshotForInstance,
+        #   ssm:GetDocument, ssm:DescribeDocument, ssm:GetManifest,
+        #   ssm:ListAssociations, ssm:ListInstanceAssociations,
+        #   ssm:PutInventory, ssm:PutComplianceItems, ssm:PutConfigurePackageResult,
+        #   ssm:UpdateAssociationStatus, ssm:UpdateInstanceAssociationStatus,
+        #   ssm:UpdateInstanceInformation
+        # Actions omitted (covered by SSMParameterStoreAccess — ARN-scoped):
+        #   ssm:GetParameter, ssm:GetParameters
+        # ---------------------------------------------------------
+        - PolicyName: SSMAgentConnectivity
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # SSM Agent operations — required for Session Manager, patch
+              # management, Run Command. Resource: * is unavoidable for agent
+              # control-plane actions (no ARN scope exists for these).
+              # ssm:GetParameter and ssm:GetParameters intentionally omitted —
+              # parameter reads are covered by the ARN-scoped SSMParameterStoreAccess
+              # policy on this role (S-02 #2310, S-03 #2364).
+              - Effect: Allow
+                Action:
+                  - ssm:DescribeAssociation
+                  - ssm:GetDeployablePatchSnapshotForInstance
+                  - ssm:GetDocument
+                  - ssm:DescribeDocument
+                  - ssm:GetManifest
+                  - ssm:ListAssociations
+                  - ssm:ListInstanceAssociations
+                  - ssm:PutInventory
+                  - ssm:PutComplianceItems
+                  - ssm:PutConfigurePackageResult
+                  - ssm:UpdateAssociationStatus
+                  - ssm:UpdateInstanceAssociationStatus
+                  - ssm:UpdateInstanceInformation
+                Resource: "*"
+              # SSM Messages — required for Session Manager connectivity
+              - Effect: Allow
+                Action:
+                  - ssmmessages:CreateControlChannel
+                  - ssmmessages:CreateDataChannel
+                  - ssmmessages:OpenControlChannel
+                  - ssmmessages:OpenDataChannel
+                Resource: "*"
+              # EC2 Messages — required for SSM Run Command
+              - Effect: Allow
+                Action:
+                  - ec2messages:AcknowledgeMessage
+                  - ec2messages:DeleteMessage
+                  - ec2messages:FailMessage
+                  - ec2messages:GetEndpoint
+                  - ec2messages:GetMessages
+                  - ec2messages:SendReply
+                Resource: "*"
         - PolicyName: SecretsManagerDBAccess
           PolicyDocument:
             Version: "2012-10-17"
