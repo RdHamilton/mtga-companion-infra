@@ -1,0 +1,27 @@
+[
+  {
+    "ResourceType": "AWS::Logs::LogGroup",
+    "LogicalResourceId": "BffLogGroup",
+    "ResourceIdentifier": { "LogGroupName": "/vaultmtg/production/bff" }
+  },
+  {
+    "ResourceType": "AWS::Logs::LogGroup",
+    "LogicalResourceId": "NginxLogGroup",
+    "ResourceIdentifier": { "LogGroupName": "/vaultmtg/production/nginx" }
+  },
+  {
+    "ResourceType": "AWS::Logs::LogGroup",
+    "LogicalResourceId": "LambdaSyncLogGroup",
+    "ResourceIdentifier": { "LogGroupName": "/aws/lambda/vault-mtg-sync" }
+  },
+  {
+    "ResourceType": "AWS::Logs::LogGroup",
+    "LogicalResourceId": "LambdaLegacySyncLogGroup",
+    "ResourceIdentifier": { "LogGroupName": "/aws/lambda/mtga-sync" }
+  },
+  {
+    "ResourceType": "AWS::Logs::LogGroup",
+    "LogicalResourceId": "LambdaVpcConfigLogGroup",
+    "ResourceIdentifier": { "LogGroupName": "/aws/lambda/mtga-companion-production-cfn-vpc-config" }
+  }
+]
