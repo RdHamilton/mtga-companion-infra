@@ -58,7 +58,7 @@ jobs:
             dns-staging)                STACK_NAME="mtga-companion-dns-staging" ;         TEMPLATE_NAME="${{ inputs.stack }}" ;;
             iam-gha-roles)              STACK_NAME="mtga-companion-iam-gha-roles" ;       TEMPLATE_NAME="${{ inputs.stack }}" ;;
             cloudwatch-alarms-staging)  STACK_NAME="mtga-companion-cloudwatch-alarms-staging" ; TEMPLATE_NAME="cloudwatch-alarms" ;;
-            cloudtrail)                 STACK_NAME="vault-mtg-cloudtrail" ;               TEMPLATE_NAME="${{ inputs.stack }}" ;;
+            cloudtrail)                 STACK_NAME="vaultmtg-cloudtrail" ;                TEMPLATE_NAME="${{ inputs.stack }}" ;;
             staging-deploy-role)        STACK_NAME="mtga-companion-staging-deploy-role" ; TEMPLATE_NAME="${{ inputs.stack }}" ;;
             logs-import)                STACK_NAME="mtga-companion-logs" ;                TEMPLATE_NAME="logs" ;;
             *)                          STACK_NAME="mtga-companion-${{ inputs.stack }}" ; TEMPLATE_NAME="${{ inputs.stack }}" ;;
