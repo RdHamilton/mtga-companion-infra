@@ -79,6 +79,54 @@ jobs:
           echo "No CloudFormation templates changed in this PR."
           echo "Changeset gate: PASS (no CFN files touched — nothing to inspect)."
 
+      # S-05: Reject any trust policy sub-condition using :* (too broad).
+      # A :* sub allows ANY branch, tag, PR, or fork to assume the role.
+      # All OIDC sub conditions must be pinned to specific refs (refs/heads/main,
+      # refs/tags/<pattern>, pull_request, etc.).
+      # Runs before AWS credentials so it never needs OIDC and always fires on
+      # CFN-touching PRs without any role assumption.
+      - name: Check OIDC trust policy - reject wildcard sub conditions
+        if: steps.cfn_check.outputs.has_cfn_changes == 'true'
+        run: |
+          set -euo pipefail
+
+          CHANGED=$(git diff --name-only --diff-filter=AM \
+            "origin/${{ github.base_ref }}...HEAD" \
+            -- 'cloudformation/*.yml' | grep -v 'cloudformation/parameters/' || true)
+
+          VIOLATIONS=""
+          for TEMPLATE_FILE in $CHANGED; do
+            # Look for lines where a github sub condition ends in :* (the wildcard form).
+            # Pattern: token.actions.githubusercontent.com:sub: ...:<repo>:*
+            # StringLike with :* matches any ref -- this is the overly-broad pattern we ban.
+            HITS=$(grep -n 'token.actions.githubusercontent.com:sub' "$TEMPLATE_FILE" \
+              -A 5 | grep -E ':\*\s*$' || true)
+            if [ -n "$HITS" ]; then
+              VIOLATIONS="${VIOLATIONS}\n  $TEMPLATE_FILE:\n$HITS"
+            fi
+          done
+
+          if [ -n "$VIOLATIONS" ]; then
+            echo ""
+            echo "=========================================="
+            echo "S-05 VIOLATION: Wildcard OIDC sub condition detected."
+            echo ""
+            echo "One or more trust policies use ':*' as the sub condition, which"
+            echo "allows ANY branch, tag, PR, or fork to assume the role."
+            echo ""
+            echo "Required: pin sub conditions to specific refs, e.g.:"
+            echo "  repo:<org>/<repo>:ref:refs/heads/main"
+            echo "  repo:<org>/<repo>:ref:refs/tags/app/v*"
+            echo "  repo:<org>/<repo>:pull_request"
+            echo ""
+            echo "Violations found:"
+            printf '%b\n' "$VIOLATIONS"
+            echo "=========================================="
+            exit 1
+          fi
+
+          echo "S-05 check PASSED -- no wildcard OIDC sub conditions found in changed templates."
+
       - name: Configure AWS credentials
         if: steps.cfn_check.outputs.has_cfn_changes == 'true'
         uses: aws-actions/configure-aws-credentials@v6
