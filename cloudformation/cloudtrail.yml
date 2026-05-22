@@ -8,7 +8,7 @@ Description: >
   (multi-region trail, log-file integrity validation, Object Lock,
   S3 data-event selectors) was descoped. The account is solo-operated, so a
   basic audit trail is the right observability floor for a solo-dev beta.
-  See ADR-0022.
+  See ADR-0025.
 
 # ---------------------------------------------------------------------------
 # Parameters
@@ -100,7 +100,7 @@ Resources:
   #   - Versioning enabled (allows recovery of accidental overwrites)
   #   - Bucket policy grants CloudTrail PutObject; requires HTTPS
   #
-  # Object Lock was descoped (see ADR-0022) -- it is tamper-proofing against a
+  # Object Lock was descoped (see ADR-0025) -- it is tamper-proofing against a
   # malicious insider, a threat model that does not apply to a solo account.
   # -----------------------------------------------------------------------
   CloudTrailLogsBucket:
@@ -181,7 +181,7 @@ Resources:
   # IsMultiRegionTrail: false  -- single-region (us-east-1) trail.
   # IncludeGlobalServiceEvents: true -- IAM/STS/CloudFront global-service
   #   events still land in this trail.
-  # EnableLogFileValidation: descoped (see ADR-0022).
+  # EnableLogFileValidation: descoped (see ADR-0025).
   # No S3 data-event selectors (descoped).
   # -----------------------------------------------------------------------
   CloudTrailTrail:
