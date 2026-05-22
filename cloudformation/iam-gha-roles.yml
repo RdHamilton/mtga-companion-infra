@@ -174,63 +174,36 @@ Resources:
             Action: lambda:*
             Resource: "*"
 
-          # Merged from inline S3 (Resource:*) + S3CloudTrailLogsBucket (scoped ARNs).
-          # The scoped statement's 35 actions are a strict subset of these 38 actions;
-          # since Resource:* already covers the scoped ARNs, the scoped statement was
-          # redundant in the boundary and is collapsed here. Effective ceiling unchanged.
+          # ===================================================================
+          # NON-IAM SERVICE CEILINGS -- service:* wildcard compression.
+          #
+          # The boundary is a CEILING, not a grant: effective permission =
+          # (inline policy INTERSECT boundary). For every non-IAM service the
+          # actual granted action set is still fully enumerated and scoped in
+          # the gha-infra-cfn-deploy inline policy (cfn-stack-deploy, below).
+          # The boundary therefore only needs to declare "this service is an
+          # allowed surface" -- per-action granularity outside IAM adds no
+          # security value because it cannot widen the inline grant.
+          #
+          # WHY: AWS::IAM::ManagedPolicy has a hard 6144-char PolicyDocument
+          # quota (Adjustable:False). Enumerating every non-IAM action drove
+          # the document to ~5922 chars with ~222 chars of headroom; any future
+          # service action re-triggered the LimitExceeded error. Collapsing the
+          # non-IAM Sids to service:* wildcards drops the document well under
+          # 2000 chars and permanently removes the quota as a constraint.
+          #
+          # WHAT IS NOT COMPRESSED:
+          #   - IAM (above): kept per-action -- IAM is the only privilege-
+          #     escalation surface; iam:* is NEVER granted in the boundary.
+          #   - SM (Secrets Manager, below): kept per-action -- the boundary
+          #     deliberately OMITS secretsmanager:GetSecretValue and
+          #     PutSecretValue. That omission is the S-04 cap (vault-mtg#2325);
+          #     secretsmanager:* here would silently restore those actions.
+          # ===================================================================
           - Sid: S3
             Effect: Allow
-            Action:
-              - s3:CreateBucket
-              - s3:DeleteBucket
-              - s3:ListBucket
-              - s3:GetBucketLocation
-              - s3:GetBucketAcl
-              - s3:GetBucketPolicy
-              - s3:PutBucketPolicy
-              - s3:DeleteBucketPolicy
-              - s3:GetBucketVersioning
-              - s3:PutBucketVersioning
-              - s3:PutBucketPublicAccessBlock
-              - s3:GetBucketPublicAccessBlock
-              - s3:PutEncryptionConfiguration
-              - s3:GetEncryptionConfiguration
-              - s3:DeleteBucketEncryption
-              - s3:PutBucketTagging
-              - s3:GetBucketTagging
-              - s3:TagResource
-              - s3:UntagResource
-              - s3:ListTagsForResource
-              - s3:PutBucketOwnershipControls
-              - s3:GetBucketOwnershipControls
-              - s3:PutBucketObjectLockConfiguration
-              - s3:GetBucketObjectLockConfiguration
-              - s3:PutLifecycleConfiguration
-              - s3:GetLifecycleConfiguration
-              - s3:PutBucketNotification
-              - s3:GetBucketNotification
-              - s3:GetBucketCORS
-              - s3:PutBucketCORS
-              - s3:GetBucketLogging
-              - s3:GetBucketWebsite
-              - s3:GetAccelerateConfiguration
-              - s3:GetReplicationConfiguration
-              - s3:GetAnalyticsConfiguration
-              - s3:GetInventoryConfiguration
-              - s3:GetMetricsConfiguration
-              - s3:GetIntelligentTieringConfiguration
+            Action: s3:*
             Resource: "*"
-
-          # Mirrors gha-infra-cfn-deploy inline S3BootstrapWrite statement (S-04 rule).
-          # Object-level grant scoped to the bootstrap/ prefix of the production
-          # artifacts bucket. Added for #2459 (ec2-bootstrap.sh S3 externalization).
-          - Sid: S3BootstrapWrite
-            Effect: Allow
-            Action:
-              - s3:PutObject
-              - s3:GetObject
-            Resource:
-              - arn:aws:s3:::mtga-companion-deploy-artifacts-production/bootstrap/*
 
           - Sid: CloudFront
             Effect: Allow
@@ -239,84 +212,36 @@ Resources:
 
           - Sid: ACM
             Effect: Allow
-            Action:
-              - acm:RequestCertificate
-              - acm:DescribeCertificate
-              - acm:DeleteCertificate
-              - acm:ListCertificates
-              - acm:AddTagsToCertificate
-              - acm:ListTagsForCertificate
+            Action: acm:*
             Resource: "*"
 
           - Sid: R53
             Effect: Allow
-            Action:
-              - route53:CreateHostedZone
-              - route53:DeleteHostedZone
-              - route53:GetHostedZone
-              - route53:ListHostedZones
-              - route53:ChangeResourceRecordSets
-              - route53:GetChange
-              - route53:ListResourceRecordSets
-              - route53:CreateHealthCheck
-              - route53:DeleteHealthCheck
-              - route53:GetHealthCheck
+            Action: route53:*
             Resource: "*"
 
           - Sid: CW
             Effect: Allow
             Action:
-              - cloudwatch:PutMetricAlarm
-              - cloudwatch:DeleteAlarms
-              - cloudwatch:DescribeAlarms
-              - cloudwatch:ListTagsForResource
-              - cloudwatch:TagResource
-              - cloudwatch:PutDashboard
-              - cloudwatch:DeleteDashboards
-              - cloudwatch:GetDashboard
+              - cloudwatch:*
+              - logs:*
             Resource: "*"
-
-          # Mirrors gha-infra-cfn-deploy inline CloudWatchLogs statement (S-04 rule).
-          # Scoped to the /vaultmtg/* log-group namespace (#2471).
-          - Sid: CWLogs
-            Effect: Allow
-            Action:
-              - logs:CreateLogGroup
-              - logs:PutRetentionPolicy
-              - logs:DeleteLogGroup
-            Resource:
-              - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/vaultmtg/*
 
           - Sid: SNS
             Effect: Allow
-            Action:
-              - sns:CreateTopic
-              - sns:DeleteTopic
-              - sns:GetTopicAttributes
-              - sns:SetTopicAttributes
-              - sns:Subscribe
-              - sns:Unsubscribe
-              - sns:ListSubscriptionsByTopic
-              - sns:TagResource
-              - sns:ListTagsForResource
+            Action: sns:*
             Resource: "*"
 
           - Sid: SSM
             Effect: Allow
-            Action:
-              - ssm:GetParameter
-              - ssm:GetParameters
-              - ssm:PutParameter
-              - ssm:DeleteParameter
-              - ssm:DescribeParameters
-              - ssm:AddTagsToResource
-              - ssm:ListTagsForResource
+            Action: ssm:*
             Resource: "*"
 
-          # Lifecycle actions ONLY. secretsmanager:GetSecretValue and
+          # NOT compressed. secretsmanager:GetSecretValue and
           # secretsmanager:PutSecretValue are deliberately ABSENT -- this is
-          # the S-04 cap. The intersection with the inline policy means those
-          # two actions are DENIED for this role even on its own RDS secret.
+          # the S-04 cap (vault-mtg#2325). The intersection with the inline
+          # policy means those two actions are DENIED for this role even on
+          # its own RDS secret. secretsmanager:* would silently break the cap.
           - Sid: SM
             Effect: Allow
             Action:
@@ -329,83 +254,29 @@ Resources:
 
           - Sid: KMS
             Effect: Allow
-            Action:
-              - kms:CreateKey
-              - kms:DisableKey
-              - kms:EnableKeyRotation
-              - kms:PutKeyPolicy
-              - kms:TagResource
-              - kms:DescribeKey
-              - kms:GetKeyPolicy
-              - kms:GetKeyRotationStatus
-              - kms:ListResourceTags
-              - kms:DisableKeyRotation
-              - kms:EnableKey
-              - kms:UntagResource
-              - kms:UpdateKeyDescription
-              - kms:ScheduleKeyDeletion
-              - kms:ListKeys
-              - kms:CreateAlias
-              - kms:UpdateAlias
-              - kms:DeleteAlias
-              - kms:ListAliases
-              - kms:CreateGrant
+            Action: kms:*
             Resource: "*"
 
           - Sid: EB
             Effect: Allow
             Action:
-              - scheduler:CreateSchedule
-              - scheduler:UpdateSchedule
-              - scheduler:DeleteSchedule
-              - scheduler:GetSchedule
-              - scheduler:ListSchedules
-              - events:PutRule
-              - events:DeleteRule
-              - events:DescribeRule
-              - events:PutTargets
-              - events:RemoveTargets
+              - scheduler:*
+              - events:*
             Resource: "*"
 
           - Sid: SQS
             Effect: Allow
-            Action:
-              - sqs:CreateQueue
-              - sqs:DeleteQueue
-              - sqs:GetQueueAttributes
-              - sqs:SetQueueAttributes
-              - sqs:ListQueueTags
-              - sqs:TagQueue
+            Action: sqs:*
             Resource: "*"
 
           - Sid: CT
             Effect: Allow
-            Action:
-              - cloudtrail:CreateTrail
-              - cloudtrail:AddTags
-              - cloudtrail:PutEventSelectors
-              - cloudtrail:PutInsightSelectors
-              - cloudtrail:PutEventConfiguration
-              - cloudtrail:StartLogging
-              - cloudtrail:DescribeTrails
-              - cloudtrail:GetTrail
-              - cloudtrail:GetTrailStatus
-              - cloudtrail:GetEventSelectors
-              - cloudtrail:GetInsightSelectors
-              - cloudtrail:GetEventConfiguration
-              - cloudtrail:ListTags
-              - cloudtrail:ListTrails
-              - cloudtrail:UpdateTrail
-              - cloudtrail:RemoveTags
-              - cloudtrail:StopLogging
-              - cloudtrail:DeleteTrail
+            Action: cloudtrail:*
             Resource: "*"
 
           - Sid: Org
             Effect: Allow
-            Action:
-              - organizations:DescribeOrganization
-              - organizations:ListAWSServiceAccessForOrganization
+            Action: organizations:*
             Resource: "*"
 
   # ---------------------------------------------------------------------------
