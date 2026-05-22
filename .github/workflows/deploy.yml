@@ -79,6 +79,19 @@ jobs:
             --template-body file://cloudformation/${{ env.TEMPLATE_NAME }}.yml
           echo "✓ Template valid"
 
+      - name: Upload bootstrap script (ec2 stack only)
+        # Uploads scripts/deploy/ec2-bootstrap.sh to the production artifacts bucket
+        # before the ec2 stack is created/updated. The UserData stub fetches this script
+        # at instance launch. Skipped for all other stacks.
+        # S3 path: s3://mtga-companion-deploy-artifacts-production/bootstrap/ec2-bootstrap.sh
+        # IAM: gha-infra-cfn-deploy has s3:PutObject on that bucket path (iam-gha-roles.yml).
+        if: ${{ inputs.stack == 'ec2' }}
+        run: |
+          aws s3 cp scripts/deploy/ec2-bootstrap.sh \
+            s3://mtga-companion-deploy-artifacts-production/bootstrap/ec2-bootstrap.sh \
+            --region us-east-1
+          echo "Bootstrap script uploaded to S3"
+
       - name: Load parameters
         id: params
         run: |
