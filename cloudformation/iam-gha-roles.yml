@@ -247,6 +247,7 @@ Resources:
                   - iam:DeleteRole
                   - iam:GetRole
                   - iam:UpdateRole
+                  - iam:CreateServiceLinkedRole
                   - iam:PutRolePolicy
                   - iam:DeleteRolePolicy
                   - iam:GetRolePolicy
@@ -289,12 +290,25 @@ Resources:
                 Effect: Allow
                 Action: lambda:*
                 Resource: "*"
+              # General S3 bucket lifecycle for non-CloudTrail infra stacks
+              # (dns, ec2, sync-lambda buckets, etc.). Resource "*" is retained
+              # because this role manages buckets across multiple stacks whose
+              # names are not all known here. Bucket-scoped grants for the
+              # dedicated CloudTrail logs bucket are in S3CloudTrailLogsBucket.
+              #
+              # NOTE: s3:PutEncryptionConfiguration / s3:GetEncryptionConfiguration
+              # are the real IAM action names. The strings s3:PutBucketEncryption
+              # and s3:GetBucketEncryption are NOT valid IAM actions -- the
+              # CloudFormation AWS::S3::Bucket handler calls the SDK PutBucketEncryption
+              # API which is gated by the s3:PutEncryptionConfiguration permission.
               - Sid: S3
                 Effect: Allow
                 Action:
                   - s3:CreateBucket
                   - s3:DeleteBucket
+                  - s3:ListBucket
                   - s3:GetBucketLocation
+                  - s3:GetBucketAcl
                   - s3:GetBucketPolicy
                   - s3:PutBucketPolicy
                   - s3:DeleteBucketPolicy
@@ -302,17 +316,80 @@ Resources:
                   - s3:PutBucketVersioning
                   - s3:PutBucketPublicAccessBlock
                   - s3:GetBucketPublicAccessBlock
-                  - s3:PutBucketEncryption
-                  - s3:GetBucketEncryption
+                  - s3:PutEncryptionConfiguration
+                  - s3:GetEncryptionConfiguration
+                  - s3:DeleteBucketEncryption
                   - s3:PutBucketTagging
                   - s3:GetBucketTagging
+                  - s3:TagResource
+                  - s3:UntagResource
+                  - s3:ListTagsForResource
+                  - s3:PutBucketOwnershipControls
+                  - s3:GetBucketOwnershipControls
+                  - s3:PutBucketObjectLockConfiguration
+                  - s3:GetBucketObjectLockConfiguration
                   - s3:PutLifecycleConfiguration
                   - s3:GetLifecycleConfiguration
                   - s3:PutBucketNotification
                   - s3:GetBucketNotification
                   - s3:GetBucketCORS
                   - s3:PutBucketCORS
+                  - s3:GetBucketLogging
+                  - s3:GetBucketWebsite
+                  - s3:GetAccelerateConfiguration
+                  - s3:GetReplicationConfiguration
+                  - s3:GetAnalyticsConfiguration
+                  - s3:GetInventoryConfiguration
+                  - s3:GetMetricsConfiguration
+                  - s3:GetIntelligentTieringConfiguration
                 Resource: "*"
+              # Tightly-scoped grant for the dedicated CloudTrail logs bucket.
+              # cloudtrail.yml creates vault-mtg-cloudtrail-logs-${Environment}-${AccountId};
+              # the prefix wildcard covers both production and staging environments.
+              # This statement is the complete CRUD+rollback permission set the
+              # CloudFormation AWS::S3::Bucket and AWS::S3::BucketPolicy resource
+              # handlers require for that bucket.
+              - Sid: S3CloudTrailLogsBucket
+                Effect: Allow
+                Action:
+                  - s3:CreateBucket
+                  - s3:DeleteBucket
+                  - s3:ListBucket
+                  - s3:GetBucketAcl
+                  - s3:GetBucketLocation
+                  - s3:GetBucketPolicy
+                  - s3:PutBucketPolicy
+                  - s3:DeleteBucketPolicy
+                  - s3:GetBucketVersioning
+                  - s3:PutBucketVersioning
+                  - s3:GetBucketPublicAccessBlock
+                  - s3:PutBucketPublicAccessBlock
+                  - s3:GetEncryptionConfiguration
+                  - s3:PutEncryptionConfiguration
+                  - s3:DeleteBucketEncryption
+                  - s3:GetBucketTagging
+                  - s3:PutBucketTagging
+                  - s3:TagResource
+                  - s3:UntagResource
+                  - s3:ListTagsForResource
+                  - s3:GetBucketOwnershipControls
+                  - s3:PutBucketOwnershipControls
+                  - s3:GetBucketObjectLockConfiguration
+                  - s3:PutBucketObjectLockConfiguration
+                  - s3:GetLifecycleConfiguration
+                  - s3:GetBucketNotification
+                  - s3:GetBucketCORS
+                  - s3:GetBucketLogging
+                  - s3:GetBucketWebsite
+                  - s3:GetAccelerateConfiguration
+                  - s3:GetReplicationConfiguration
+                  - s3:GetAnalyticsConfiguration
+                  - s3:GetInventoryConfiguration
+                  - s3:GetMetricsConfiguration
+                  - s3:GetIntelligentTieringConfiguration
+                Resource:
+                  - arn:aws:s3:::vault-mtg-cloudtrail-logs-*
+                  - arn:aws:s3:::vault-mtg-cloudtrail-logs-*/*
               - Sid: CloudFront
                 Effect: Allow
                 Action: cloudfront:*
@@ -388,21 +465,41 @@ Resources:
                   - secretsmanager:TagResource
                   - secretsmanager:ListSecrets
                 Resource: "*"
+              # KMS: complete CRUD+rollback permission set for the
+              # AWS::KMS::Key and AWS::KMS::Alias resource handlers.
+              # Resource "*" is required: kms:CreateKey and kms:ListKeys are
+              # not resource-scopable, and the CloudFormation handler acts on
+              # the key during creation before its ARN/ID exists. This role
+              # also manages KMS keys across multiple infra stacks.
               - Sid: KMS
                 Effect: Allow
                 Action:
-                  - kms:DescribeKey
-                  - kms:ListKeys
-                  - kms:CreateGrant
+                  # AWS::KMS::Key -- create
                   - kms:CreateKey
+                  - kms:DisableKey
                   - kms:EnableKeyRotation
-                  - kms:GetKeyPolicy
                   - kms:PutKeyPolicy
                   - kms:TagResource
+                  # AWS::KMS::Key -- read
+                  - kms:DescribeKey
+                  - kms:GetKeyPolicy
+                  - kms:GetKeyRotationStatus
+                  - kms:ListResourceTags
+                  # AWS::KMS::Key -- update
+                  - kms:DisableKeyRotation
+                  - kms:EnableKey
+                  - kms:UntagResource
+                  - kms:UpdateKeyDescription
+                  # AWS::KMS::Key -- delete / list
+                  - kms:ScheduleKeyDeletion
+                  - kms:ListKeys
+                  # AWS::KMS::Alias -- create / read / update / delete / list
                   - kms:CreateAlias
+                  - kms:UpdateAlias
                   - kms:DeleteAlias
                   - kms:ListAliases
-                  - kms:ScheduleKeyDeletion
+                  # Retained: grant management used by other infra stacks
+                  - kms:CreateGrant
                 Resource: "*"
               - Sid: EventBridge
                 Effect: Allow
@@ -428,21 +525,46 @@ Resources:
                   - sqs:ListQueueTags
                   - sqs:TagQueue
                 Resource: "*"
+              # CloudTrail: complete CRUD+rollback permission set for the
+              # AWS::CloudTrail::Trail resource handler. cloudtrail: actions are
+              # not resource-scopable for the create handler (the trail ARN does
+              # not exist yet), so Resource "*" is required.
               - Sid: CloudTrail
                 Effect: Allow
                 Action:
+                  # create
                   - cloudtrail:CreateTrail
-                  - cloudtrail:DeleteTrail
+                  - cloudtrail:AddTags
+                  - cloudtrail:PutEventSelectors
+                  - cloudtrail:PutInsightSelectors
+                  - cloudtrail:PutEventConfiguration
+                  - cloudtrail:StartLogging
+                  # read / list
                   - cloudtrail:DescribeTrails
                   - cloudtrail:GetTrail
                   - cloudtrail:GetTrailStatus
-                  - cloudtrail:UpdateTrail
-                  - cloudtrail:StartLogging
-                  - cloudtrail:StopLogging
-                  - cloudtrail:PutEventSelectors
                   - cloudtrail:GetEventSelectors
-                  - cloudtrail:AddTags
+                  - cloudtrail:GetInsightSelectors
+                  - cloudtrail:GetEventConfiguration
                   - cloudtrail:ListTags
+                  - cloudtrail:ListTrails
+                  # update
+                  - cloudtrail:UpdateTrail
+                  - cloudtrail:RemoveTags
+                  - cloudtrail:StopLogging
+                  # delete
+                  - cloudtrail:DeleteTrail
+                Resource: "*"
+              # The AWS::CloudTrail::Trail create/update handler additionally
+              # requires organizations:DescribeOrganization and
+              # organizations:ListAWSServiceAccessForOrganization -- CloudTrail
+              # probes organization membership even for a single-account,
+              # non-organization trail. Read-only Organizations actions.
+              - Sid: CloudTrailOrganizationsProbe
+                Effect: Allow
+                Action:
+                  - organizations:DescribeOrganization
+                  - organizations:ListAWSServiceAccessForOrganization
                 Resource: "*"
 
 # Outputs are intentionally omitted. CloudFormation rejects a resource-import
