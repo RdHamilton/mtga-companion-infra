@@ -118,7 +118,6 @@ Resources:
               - iam:DeleteRole
               - iam:GetRole
               - iam:UpdateRole
-              - iam:UpdateRoleDescription
               - iam:UpdateAssumeRolePolicy
               - iam:CreateServiceLinkedRole
               - iam:PutRolePolicy
@@ -426,7 +425,6 @@ Resources:
     DeletionPolicy: Retain
     Properties:
       RoleName: github-actions-oidc-deploy
-      Description: OIDC role for GitHub Actions across MTGA-Companion and vault-mtg-web repos
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
@@ -665,7 +663,6 @@ Resources:
                   - iam:DeleteRole
                   - iam:GetRole
                   - iam:UpdateRole
-                  - iam:UpdateRoleDescription
                   - iam:UpdateAssumeRolePolicy
                   - iam:CreateServiceLinkedRole
                   - iam:PutRolePolicy
