@@ -738,16 +738,19 @@ Resources:
               - Sid: Route53
                 Effect: Allow
                 Action:
+                  - route53:ChangeResourceRecordSets
+                  - route53:ChangeTagsForResource
+                  - route53:CreateHealthCheck
                   - route53:CreateHostedZone
+                  - route53:DeleteHealthCheck
                   - route53:DeleteHostedZone
+                  - route53:GetChange
+                  - route53:GetHealthCheck
                   - route53:GetHostedZone
                   - route53:ListHostedZones
-                  - route53:ChangeResourceRecordSets
-                  - route53:GetChange
                   - route53:ListResourceRecordSets
-                  - route53:CreateHealthCheck
-                  - route53:DeleteHealthCheck
-                  - route53:GetHealthCheck
+                  - route53:ListTagsForResource
+                  - route53:UpdateHealthCheck
                 Resource: "*"
               - Sid: CloudWatch
                 Effect: Allow
@@ -778,13 +781,14 @@ Resources:
                 Action:
                   - sns:CreateTopic
                   - sns:DeleteTopic
+                  - sns:GetSubscriptionAttributes
                   - sns:GetTopicAttributes
+                  - sns:ListSubscriptionsByTopic
+                  - sns:ListTagsForResource
                   - sns:SetTopicAttributes
                   - sns:Subscribe
-                  - sns:Unsubscribe
-                  - sns:ListSubscriptionsByTopic
                   - sns:TagResource
-                  - sns:ListTagsForResource
+                  - sns:Unsubscribe
                 Resource: "*"
               - Sid: SSM
                 Effect: Allow
