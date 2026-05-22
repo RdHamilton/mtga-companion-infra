@@ -2,8 +2,12 @@ AWSTemplateFormatVersion: "2010-09-09"
 Description: |
   VaultMTG - CloudWatch alarms for the VaultMTG stack.
   Monitors disk utilisation and bff-staging service restart loops on the shared EC2 instance
-  (staging alarms), BFF HTTP 5xx rate, BFF-down synthetic health check (Route 53), EC2
-  CPU/memory, RDS latency/CPU, and TLS certificate expiry for production.
+  (staging alarms), BFF HTTP 5xx rate, BFF p99 latency, BFF-down synthetic health check
+  (Route 53), BFF production restart loops, EC2 CPU/memory, RDS latency/CPU/free-storage,
+  and TLS certificate expiry for production.
+  All alarms publish to a single shared SNS topic (vaultmtg-ENV-alerts) so that
+  additional alarm sources -- e.g. the S-06 security alarms once CloudTrail exists -- can
+  subscribe to the same topic via the exported vaultmtg-ENV-AlertTopicArn.
   Deploy order: ec2-sg -> rds -> ec2 -> cloudwatch-alarms.
 
 Parameters:
@@ -17,6 +21,16 @@ Parameters:
     Type: String
     Description: E-mail address that receives alarm notifications.
     Default: ray.hamilton@stablekernel.com
+
+  AlertWebhookUrl:
+    Type: String
+    Description: |
+      HTTPS endpoint for chat alert delivery (e.g. a Slack or Discord incoming
+      webhook). When set, an https subscription is added to the shared alerts
+      topic so alarm notifications are also posted to chat. Leave blank to
+      provision the topic with the e-mail subscription only.
+    Default: ""
+    NoEcho: true
 
   # ----- Staging-only parameters -----
 
@@ -83,7 +97,7 @@ Parameters:
     Type: Number
     Description: |
       RDS ReadLatency threshold in seconds (P99 proxy via Average).
-      Default 0.05 s (50 ms) — appropriate for t3.micro with pgvector workloads.
+      Default 0.05 s (50 ms) -- appropriate for t3.micro with pgvector workloads.
     Default: 0.05
 
   RdsWriteLatencyThreshold:
@@ -112,11 +126,58 @@ Parameters:
       Number of consecutive 5-minute periods above RdsCpuThreshold before alarm fires.
     Default: 3
 
+  # ----- RDS free-storage alarm -----
+
+  RdsFreeStorageThresholdBytes:
+    Type: Number
+    Description: |
+      RDS FreeStorageSpace threshold in bytes. The alarm fires when free storage
+      drops below this value. Default 4294967296 (4 GiB) -- 20% of the 20 GiB
+      allocated storage, leaving a comfortable window to extend storage or clean
+      up before the volume fills and the database becomes read-only.
+    Default: 4294967296
+
+  RdsFreeStorageEvaluationPeriods:
+    Type: Number
+    Description: |
+      Number of consecutive 5-minute periods below RdsFreeStorageThresholdBytes
+      before the alarm fires. Default 1 -- a low-storage condition does not
+      self-resolve, so there is no value in waiting multiple periods.
+    Default: 1
+
+  # ----- BFF p99 latency alarm -----
+
+  BffLatencyThresholdMs:
+    Type: Number
+    Description: |
+      BFF request latency threshold in milliseconds. The alarm fires when the
+      per-minute p99 request time published by the latency metric publisher
+      exceeds this value. Default 750 ms -- generous headroom over the expected
+      sub-100 ms BFF response time, so the alarm flags genuine degradation.
+    Default: 750
+
+  BffLatencyEvaluationPeriods:
+    Type: Number
+    Description: |
+      Number of consecutive 5-minute periods with p99 latency above
+      BffLatencyThresholdMs before the alarm fires. Default 3 (15 minutes)
+      reduces noise from transient spikes during deploys or cold caches.
+    Default: 3
+
+  # ----- BFF production restart-loop alarm -----
+
+  BffRestartCountThreshold:
+    Type: Number
+    Description: |
+      Number of production BFF (mtga-companion.service) restarts within the
+      5-minute evaluation window that triggers the restart-loop alarm.
+    Default: 3
+
   # ----- RDS identifier -----
 
   RdsInstanceIdentifier:
     Type: String
-    Description: RDS DB instance identifier (used to scope the latency and CPU alarms).
+    Description: RDS DB instance identifier (used to scope the latency, CPU and free-storage alarms).
     Default: mtga-companion-postgres
 
   # ----- BFF-down synthetic health check -----
@@ -153,16 +214,32 @@ Parameters:
       Default 30 gives one full renewal window to act before the cert expires.
     Default: 30
 
+Conditions:
+  # True when an AlertWebhookUrl was supplied -- gates the https chat subscription.
+  HasAlertWebhook: !Not [!Equals [!Ref AlertWebhookUrl, ""]]
+
 Resources:
 
   # ---------------------------------------------------------
-  # SNS topic - alarm notifications
+  # Shared SNS topic - operational alert notifications
+  #
+  # Single shared topic for all VaultMTG operational alarms.
+  # Every CloudWatch alarm in this stack publishes here, and the
+  # topic ARN is exported as vaultmtg-${Environment}-AlertTopicArn
+  # so additional alarm sources can subscribe later WITHOUT a topic
+  # replacement -- notably the S-06 security alarms (#2333) once the
+  # CloudTrail stack exists.
+  #
+  # Subscriptions:
+  #   - email : always added (AlarmEmail).
+  #   - https : added only when AlertWebhookUrl is supplied -- delivers
+  #             alarm notifications to a Slack/Discord chat webhook.
   # ---------------------------------------------------------
-  AlarmTopic:
+  AlertTopic:
     Type: AWS::SNS::Topic
     Properties:
-      TopicName: !Sub "vault-mtg-alarms-${Environment}"
-      DisplayName: VaultMTG Alarms
+      TopicName: !Sub "vaultmtg-${Environment}-alerts"
+      DisplayName: VaultMTG Operational Alerts
       Subscription:
         - Protocol: email
           Endpoint: !Ref AlarmEmail
@@ -171,6 +248,28 @@ Resources:
           Value: vault-mtg
         - Key: Environment
           Value: !Ref Environment
+
+  # ---------------------------------------------------------
+  # Chat webhook subscription (conditional)
+  #
+  # An https subscription that posts alarm notifications to a chat
+  # incoming webhook. Created only when AlertWebhookUrl is set.
+  # Separate resource (not inline on the topic) so the webhook can
+  # be added or rotated without touching the topic itself.
+  # ---------------------------------------------------------
+  AlertWebhookSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasAlertWebhook
+    Properties:
+      TopicArn: !Ref AlertTopic
+      Protocol: https
+      Endpoint: !Ref AlertWebhookUrl
+      DeliveryPolicy:
+        healthyRetryPolicy:
+          numRetries: 5
+          minDelayTarget: 10
+          maxDelayTarget: 60
+          backoffFunction: exponential
 
   # ---------------------------------------------------------
   # Disk utilisation alarm (staging)
@@ -218,9 +317,9 @@ Resources:
       # so missing-agent is visible rather than silent.
       TreatMissingData: breaching
       AlarmActions:
-        - !Ref AlarmTopic
+        - !Ref AlertTopic
       OKActions:
-        - !Ref AlarmTopic
+        - !Ref AlertTopic
       Tags:
         - Key: Project
           Value: vault-mtg
@@ -266,9 +365,9 @@ Resources:
       # OK when bff-staging is not running (pre-deploy). Only alarm on actual restarts.
       TreatMissingData: notBreaching
       AlarmActions:
-        - !Ref AlarmTopic
+        - !Ref AlertTopic
       OKActions:
-        - !Ref AlarmTopic
+        - !Ref AlertTopic
       Tags:
         - Key: Project
           Value: vault-mtg
@@ -317,9 +416,9 @@ Resources:
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching
       AlarmActions:
-        - !Ref AlarmTopic
+        - !Ref AlertTopic
       OKActions:
-        - !Ref AlarmTopic
+        - !Ref AlertTopic
       Tags:
         - Key: Project
           Value: vault-mtg
@@ -343,7 +442,7 @@ Resources:
         EC2 instance CPU utilisation has been above ${EC2CpuThreshold}% for
         ${EC2CpuEvaluationPeriods} consecutive 5-minute periods.
         1. Check which process is consuming CPU:
-             ssh (or SSM) → top -b -n1 -c | head -20
+             ssh (or SSM) -> top -b -n1 -c | head -20
         2. Check BFF goroutine/request logs for runaway queries or tight loops:
              sudo journalctl -u mtga-companion -n 500 --no-pager
         3. If the instance is undersized, escalate to Ray Hamilton for a resize.
@@ -360,9 +459,9 @@ Resources:
       ComparisonOperator: GreaterThanOrEqualToThreshold
       TreatMissingData: breaching
       AlarmActions:
-        - !Ref AlarmTopic
+        - !Ref AlertTopic
       OKActions:
-        - !Ref AlarmTopic
+        - !Ref AlertTopic
       Tags:
         - Key: Project
           Value: vault-mtg
@@ -387,9 +486,9 @@ Resources:
         EC2 instance memory utilisation has been above ${EC2MemThreshold}% for
         ${EC2MemEvaluationPeriods} consecutive minutes.
         1. Identify which process is consuming memory:
-             ssh (or SSM) → ps aux --sort=-%mem | head -15
+             ssh (or SSM) -> ps aux --sort=-%mem | head -15
         2. Check for BFF memory leaks:
-             sudo journalctl -u mtga-companion -n 500 --no-pager | grep -i "OOM\|out of memory"
+             sudo journalctl -u mtga-companion -n 500 --no-pager | grep -i OOM
         3. If OOM-killed, the kernel OOM reaper entry will appear in dmesg:
              sudo dmesg | tail -50
         Runbook: vault_mtg_docs/engineering/runbooks/cloudwatch-alarms-runbook.md
@@ -406,9 +505,9 @@ Resources:
       # INSUFFICIENT_DATA while CWAgent is not yet installed -- treat as alarm.
       TreatMissingData: breaching
       AlarmActions:
-        - !Ref AlarmTopic
+        - !Ref AlertTopic
       OKActions:
-        - !Ref AlarmTopic
+        - !Ref AlertTopic
       Tags:
         - Key: Project
           Value: vault-mtg
@@ -451,9 +550,9 @@ Resources:
       ComparisonOperator: GreaterThanOrEqualToThreshold
       TreatMissingData: notBreaching
       AlarmActions:
-        - !Ref AlarmTopic
+        - !Ref AlertTopic
       OKActions:
-        - !Ref AlarmTopic
+        - !Ref AlertTopic
       Tags:
         - Key: Project
           Value: vault-mtg
@@ -490,9 +589,9 @@ Resources:
       ComparisonOperator: GreaterThanOrEqualToThreshold
       TreatMissingData: notBreaching
       AlarmActions:
-        - !Ref AlarmTopic
+        - !Ref AlertTopic
       OKActions:
-        - !Ref AlarmTopic
+        - !Ref AlertTopic
       Tags:
         - Key: Project
           Value: vault-mtg
@@ -528,9 +627,185 @@ Resources:
       ComparisonOperator: GreaterThanOrEqualToThreshold
       TreatMissingData: breaching
       AlarmActions:
-        - !Ref AlarmTopic
+        - !Ref AlertTopic
       OKActions:
-        - !Ref AlarmTopic
+        - !Ref AlertTopic
+      Tags:
+        - Key: Project
+          Value: vault-mtg
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ---------------------------------------------------------
+  # RDS free-storage alarm (R-14)
+  #
+  # Fires when RDS FreeStorageSpace drops below
+  # RdsFreeStorageThresholdBytes (default 4 GiB) for
+  # RdsFreeStorageEvaluationPeriods consecutive 5-minute periods.
+  #
+  # Metric source: AWS/RDS namespace (built-in; emitted in bytes).
+  # When PostgreSQL runs out of storage the database is forced into
+  # read-only mode, so this alarm must page well before that point.
+  # Statistic=Minimum: alert on the worst observed value in the
+  # window rather than smoothing transient dips away.
+  #
+  # TreatMissingData=breaching: AWS/RDS emits FreeStorageSpace for
+  # every running instance. Missing data means the instance is not
+  # reporting -- itself a signal that something is wrong.
+  # ---------------------------------------------------------
+  RdsFreeStorageAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "vault-mtg-${Environment}-rds-free-storage-low"
+      AlarmDescription: !Sub |
+        RDS PostgreSQL free storage has dropped below ${RdsFreeStorageThresholdBytes} bytes.
+        If storage reaches zero the database is forced read-only and all writes fail.
+        1. Check current free space in RDS console -> Monitoring -> Free Storage Space.
+        2. Identify what is consuming space:
+             - bloated tables / indexes (run VACUUM FULL or pg_repack off-peak)
+             - WAL accumulation from a stuck replication slot
+             - large pg_stat_statements / temp files
+        3. To buy time immediately, extend AllocatedStorage in cloudformation/rds.yml
+           and deploy the rds stack -- storage can be increased online.
+        Runbook: vault_mtg_docs/engineering/runbooks/cloudwatch-alarms-runbook.md
+      Namespace: AWS/RDS
+      MetricName: FreeStorageSpace
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref RdsInstanceIdentifier
+      Statistic: Minimum
+      Period: 300
+      EvaluationPeriods: !Ref RdsFreeStorageEvaluationPeriods
+      Threshold: !Ref RdsFreeStorageThresholdBytes
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+      AlarmActions:
+        - !Ref AlertTopic
+      OKActions:
+        - !Ref AlertTopic
+      Tags:
+        - Key: Project
+          Value: vault-mtg
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ---------------------------------------------------------
+  # BFF p99 latency alarm (R-14)
+  #
+  # Fires when the per-minute p99 request latency published by the
+  # BFF latency metric publisher exceeds BffLatencyThresholdMs
+  # (default 750 ms) for BffLatencyEvaluationPeriods consecutive
+  # 5-minute periods.
+  #
+  # Metric source: a systemd timer on the EC2 instance that tails the
+  # nginx access log, computes the p99 of request_time over the last
+  # 60 s, and publishes it via cloudwatch put-metric-data.
+  # Install via scripts/install-bff-latency-metric.sh.
+  #
+  # Namespace : MTGA/BFF
+  # MetricName: BffP99LatencyMs
+  # Dimension : Environment=<environment>
+  #
+  # The publisher emits one pre-aggregated p99 value per minute, so
+  # the alarm aggregates with Maximum to alert on the worst minute in
+  # the 5-minute period rather than averaging spikes away.
+  #
+  # TreatMissingData=notBreaching: at very low traffic the publisher
+  # emits no value for a period. No requests == no latency problem.
+  # ---------------------------------------------------------
+  BffLatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "vault-mtg-${Environment}-bff-latency-high"
+      AlarmDescription: !Sub |
+        BFF p99 request latency has exceeded ${BffLatencyThresholdMs} ms for
+        ${BffLatencyEvaluationPeriods} consecutive 5-minute periods.
+        1. Check the RDS read/write latency alarms -- DB latency is the most
+           common cause of BFF slowdowns.
+        2. Check EC2 CPU and memory alarm state -- a saturated instance slows
+           every request.
+        3. Inspect slow endpoints in the BFF log:
+             sudo journalctl -u mtga-companion -n 500 --no-pager | grep -i latency
+        4. If a deploy just ran, a cold cache can cause a transient spike --
+           confirm it recovers within one evaluation window.
+        Runbook: vault_mtg_docs/engineering/runbooks/cloudwatch-alarms-runbook.md
+      Namespace: MTGA/BFF
+      MetricName: BffP99LatencyMs
+      Dimensions:
+        - Name: Environment
+          Value: !Ref Environment
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: !Ref BffLatencyEvaluationPeriods
+      Threshold: !Ref BffLatencyThresholdMs
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
+      OKActions:
+        - !Ref AlertTopic
+      Tags:
+        - Key: Project
+          Value: vault-mtg
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ---------------------------------------------------------
+  # BFF production restart-loop alarm (R-14)
+  #
+  # Fires when the custom metric BffRestartCount exceeds
+  # BffRestartCountThreshold (default 3) within a 5-minute window.
+  #
+  # NOTE ON THE UNIT NAME: issue #2331 refers to the production BFF
+  # unit as "vault-mtg-bff.service", but the production unit created
+  # by scripts/deploy/ec2-bootstrap.sh is "mtga-companion.service"
+  # (binary /usr/local/bin/mtga-bff). The metric publisher and this
+  # alarm intentionally track the REAL unit name to avoid the
+  # wrong-unit-name class of bug (cf. v0.3.1 #2192).
+  #
+  # Metric source: a systemd oneshot service + timer installed on the
+  # EC2 instance via scripts/install-restart-metric-production.sh.
+  # It runs every 60 s, counts mtga-companion.service restarts since
+  # the last run, and calls cloudwatch put-metric-data.
+  #
+  # Namespace : MTGA/BFF
+  # MetricName: BffRestartCount
+  # Dimension : Environment=<environment>
+  #
+  # TreatMissingData=notBreaching: a steady-state service emits zero;
+  # absence of data (pre-deploy) is not a restart loop.
+  # ---------------------------------------------------------
+  BffRestartAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "vault-mtg-${Environment}-bff-restart-loop"
+      AlarmDescription: !Sub |
+        The production BFF (mtga-companion.service) has restarted more than
+        ${BffRestartCountThreshold} times in a 5-minute window -- it is crash-looping.
+        1. Inspect the systemd journal for the crash cause:
+             sudo journalctl -u mtga-companion -n 200 --no-pager
+        2. Check the service status and last exit code:
+             sudo systemctl status mtga-companion
+        3. Common causes: bad config in /etc/mtga-companion/env, an unreachable
+           database, or a corrupt binary at /usr/local/bin/mtga-bff.
+        4. If a deploy just ran, check the deploy workflow run and consider
+           rolling back to the previous release.
+        Runbook: vault_mtg_docs/engineering/runbooks/cloudwatch-alarms-runbook.md
+      Namespace: MTGA/BFF
+      MetricName: BffRestartCount
+      Dimensions:
+        - Name: Environment
+          Value: !Ref Environment
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: !Ref BffRestartCountThreshold
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
+      OKActions:
+        - !Ref AlertTopic
       Tags:
         - Key: Project
           Value: vault-mtg
@@ -601,9 +876,9 @@ Resources:
       ComparisonOperator: LessThanThreshold
       TreatMissingData: breaching
       AlarmActions:
-        - !Ref AlarmTopic
+        - !Ref AlertTopic
       OKActions:
-        - !Ref AlarmTopic
+        - !Ref AlertTopic
       Tags:
         - Key: Project
           Value: vault-mtg
@@ -658,9 +933,9 @@ Resources:
       ComparisonOperator: LessThanOrEqualToThreshold
       TreatMissingData: breaching
       AlarmActions:
-        - !Ref AlarmTopic
+        - !Ref AlertTopic
       OKActions:
-        - !Ref AlarmTopic
+        - !Ref AlertTopic
       Tags:
         - Key: Project
           Value: vault-mtg
@@ -668,11 +943,13 @@ Resources:
           Value: !Ref Environment
 
 Outputs:
-  AlarmTopicArn:
-    Description: ARN of the SNS alarm notification topic.
-    Value: !Ref AlarmTopic
+  AlertTopicArn:
+    Description: |
+      ARN of the shared SNS operational-alerts topic. Other stacks (e.g. the
+      S-06 security alarms) import this to publish to the same topic.
+    Value: !Ref AlertTopic
     Export:
-      Name: !Sub "vault-mtg-${Environment}-AlarmTopicArn"
+      Name: !Sub "vaultmtg-${Environment}-AlertTopicArn"
 
   DiskFillAlarmArn:
     Description: ARN of the staging disk-fill CloudWatch alarm.
@@ -721,6 +998,24 @@ Outputs:
     Value: !GetAtt RdsCpuAlarm.Arn
     Export:
       Name: !Sub "vault-mtg-${Environment}-RdsCpuAlarmArn"
+
+  RdsFreeStorageAlarmArn:
+    Description: ARN of the RDS free-storage CloudWatch alarm.
+    Value: !GetAtt RdsFreeStorageAlarm.Arn
+    Export:
+      Name: !Sub "vault-mtg-${Environment}-RdsFreeStorageAlarmArn"
+
+  BffLatencyAlarmArn:
+    Description: ARN of the BFF p99 latency CloudWatch alarm.
+    Value: !GetAtt BffLatencyAlarm.Arn
+    Export:
+      Name: !Sub "vault-mtg-${Environment}-BffLatencyAlarmArn"
+
+  BffRestartAlarmArn:
+    Description: ARN of the production BFF restart-loop CloudWatch alarm.
+    Value: !GetAtt BffRestartAlarm.Arn
+    Export:
+      Name: !Sub "vault-mtg-${Environment}-BffRestartAlarmArn"
 
   BffHealthCheckId:
     Description: Route 53 health check ID for the BFF /healthz synthetic check.
