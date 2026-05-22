@@ -416,8 +416,9 @@ Resources:
           # ---------------------------------------------------------
           log "Updating packages..."
           dnf update -y --quiet
-          dnf install -y nginx logrotate aws-cli jq python3 python3-pip postgresql15 amazon-cloudwatch-agent
+          dnf install -y nginx logrotate aws-cli jq python3 python3-pip postgresql15 amazon-cloudwatch-agent cronie
           pip3 install --quiet certbot certbot-nginx
+          systemctl enable --now crond
 
           # ---------------------------------------------------------
           # 2. Application user and directories
@@ -683,10 +684,32 @@ Resources:
               else
                   log "Cert already present -- skipping."
               fi
-              # Ensure certbot renewal cron is active (related: issue #2315).
-              crontab -l 2>/dev/null | grep -q "certbot renew" || \
-                  (crontab -l 2>/dev/null; echo "0 3 * * * certbot renew --quiet --nginx && systemctl reload nginx") | crontab -
-              log "Certbot renewal cron confirmed."
+              # Ensure certbot renewal timer is active (issue #2315).
+              # AL2023 does not install crontab by default; use a systemd timer instead.
+              # cronie is installed above, but systemd timer is the correct AL2023 pattern.
+              if [ ! -f /etc/systemd/system/certbot.timer ]; then
+                  sed 's/^          //' > /etc/systemd/system/certbot.service <<'CERTSVC'
+          [Unit]
+          Description=Certbot Renewal
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/local/bin/certbot renew --quiet --nginx
+          PrivateTmp=true
+          CERTSVC
+                  sed 's/^          //' > /etc/systemd/system/certbot.timer <<'CERTTIMER'
+          [Unit]
+          Description=Run certbot twice daily
+          [Timer]
+          OnCalendar=*-*-* 00,12:00:00
+          RandomizedDelaySec=43200
+          Persistent=true
+          [Install]
+          WantedBy=timers.target
+          CERTTIMER
+                  systemctl daemon-reload
+              fi
+              systemctl enable --now certbot.timer
+              log "Certbot renewal timer enabled (next: $(systemctl show certbot.timer -p NextElapseUSecRealtime --value 2>/dev/null || echo unknown))."
           else
               log "No domain in SSM (/vaultmtg/app/production/domain-name or /mtga-companion/production/domain-name) -- skipping certbot."
               log "WARNING: set /vaultmtg/app/production/domain-name in SSM before deploying (issue #2316)."
