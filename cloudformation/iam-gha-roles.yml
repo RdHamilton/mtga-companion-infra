@@ -118,6 +118,10 @@ Resources:
               - iam:DeleteRole
               - iam:GetRole
               - iam:UpdateRole
+              # CFN calls iam:UpdateRoleDescription (not iam:UpdateRole) when
+              # Description is the only changing property on a role -- confirmed
+              # by 3 consecutive stack events. Required permanently.
+              - iam:UpdateRoleDescription
               - iam:UpdateAssumeRolePolicy
               - iam:CreateServiceLinkedRole
               - iam:PutRolePolicy
@@ -293,6 +297,11 @@ Resources:
   # ---------------------------------------------------------------------------
   GhaAppDeployRole:
     Type: AWS::IAM::Role
+    # DependsOn forces CloudFormation to apply any GhaCfnDeployPermissionsBoundary
+    # update BEFORE updating this role. Without it, CFN can update the role first
+    # and call iam:UpdateRoleDescription against a boundary that does not yet
+    # permit it -- the recurring ACCESS DENIED failure on this stack.
+    DependsOn: GhaCfnDeployPermissionsBoundary
     DeletionPolicy: Retain
     Properties:
       RoleName: github-actions-oidc-deploy
@@ -407,6 +416,9 @@ Resources:
   # ---------------------------------------------------------------------------
   GhaInfraSyncDeployRole:
     Type: AWS::IAM::Role
+    # DependsOn forces CloudFormation to apply any GhaCfnDeployPermissionsBoundary
+    # update BEFORE updating this role -- see GhaAppDeployRole rationale.
+    DependsOn: GhaCfnDeployPermissionsBoundary
     DeletionPolicy: Retain
     Properties:
       RoleName: gha-infra-sync-deploy
@@ -469,6 +481,12 @@ Resources:
   # ---------------------------------------------------------------------------
   GhaInfraCfnDeployRole:
     Type: AWS::IAM::Role
+    # No explicit DependsOn needed: the PermissionsBoundary: !Ref below already
+    # creates a dependency edge on GhaCfnDeployPermissionsBoundary, so CFN
+    # applies the boundary update before this role's update. (An explicit
+    # DependsOn here would be flagged redundant by cfn-lint W3005.) The two
+    # roles that do NOT !Ref the boundary -- GhaAppDeployRole and
+    # GhaInfraSyncDeployRole -- carry an explicit DependsOn instead.
     DeletionPolicy: Retain
     Properties:
       RoleName: gha-infra-cfn-deploy
@@ -534,6 +552,10 @@ Resources:
                   - iam:DeleteRole
                   - iam:GetRole
                   - iam:UpdateRole
+                  # CFN calls iam:UpdateRoleDescription (not iam:UpdateRole) when
+                  # Description is the only changing property on a role.
+                  # Mirrored into the GhaCfnDeployPermissionsBoundary IAM Sid.
+                  - iam:UpdateRoleDescription
                   - iam:UpdateAssumeRolePolicy
                   - iam:CreateServiceLinkedRole
                   - iam:PutRolePolicy
