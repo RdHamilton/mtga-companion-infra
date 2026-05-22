@@ -113,6 +113,7 @@ Resources:
             Effect: Allow
             Action:
               - iam:PassRole
+              # AWS::IAM::Role lifecycle (Create / Update / Delete / drift-read)
               - iam:CreateRole
               - iam:DeleteRole
               - iam:GetRole
@@ -129,6 +130,9 @@ Resources:
               - iam:ListAttachedRolePolicies
               - iam:TagRole
               - iam:UntagRole
+              - iam:ListRoleTags
+              - iam:PutRolePermissionsBoundary
+              - iam:DeleteRolePermissionsBoundary
               - iam:CreateInstanceProfile
               - iam:DeleteInstanceProfile
               - iam:GetInstanceProfile
@@ -140,15 +144,20 @@ Resources:
               - iam:UpdateOIDCProvider
               - iam:TagOIDCProvider
               - iam:ListOIDCProviders
-              - iam:PutRolePermissionsBoundary
+              # AWS::IAM::ManagedPolicy lifecycle (Create / Update / Delete / drift-read)
               - iam:CreatePolicy
               - iam:CreatePolicyVersion
+              - iam:SetDefaultPolicyVersion
               - iam:DeletePolicy
               - iam:DeletePolicyVersion
               - iam:GetPolicy
               - iam:GetPolicyVersion
               - iam:ListPolicies
               - iam:ListPolicyVersions
+              - iam:ListEntitiesForPolicy
+              - iam:TagPolicy
+              - iam:UntagPolicy
+              - iam:ListPolicyTags
             Resource: "*"
 
           - Sid: EC2
@@ -631,10 +640,17 @@ Resources:
                   - cloudformation:ListStacks
                   - cloudformation:DescribeStacks
                 Resource: "*"
+              # Complete CloudFormation-lifecycle IAM permission set for the
+              # AWS::IAM::Role and AWS::IAM::ManagedPolicy resource handlers,
+              # enumerated from the CFN resource-provider schemas rather than
+              # discovered one deploy failure at a time (see PR audit notes).
+              # Grouped by resource type. Any addition here MUST be mirrored
+              # into the GhaCfnDeployPermissionsBoundary IAM Sid in the SAME PR.
               - Sid: IAMPassAndManage
                 Effect: Allow
                 Action:
                   - iam:PassRole
+                  # AWS::IAM::Role lifecycle (Create / Update / Delete / drift-read)
                   - iam:CreateRole
                   - iam:DeleteRole
                   - iam:GetRole
@@ -651,6 +667,9 @@ Resources:
                   - iam:ListAttachedRolePolicies
                   - iam:TagRole
                   - iam:UntagRole
+                  - iam:ListRoleTags
+                  - iam:PutRolePermissionsBoundary
+                  - iam:DeleteRolePermissionsBoundary
                   - iam:CreateInstanceProfile
                   - iam:DeleteInstanceProfile
                   - iam:GetInstanceProfile
@@ -662,15 +681,20 @@ Resources:
                   - iam:UpdateOIDCProvider
                   - iam:TagOIDCProvider
                   - iam:ListOIDCProviders
-                  - iam:PutRolePermissionsBoundary
+                  # AWS::IAM::ManagedPolicy lifecycle (Create / Update / Delete / drift-read)
                   - iam:CreatePolicy
                   - iam:CreatePolicyVersion
+                  - iam:SetDefaultPolicyVersion
                   - iam:DeletePolicy
                   - iam:DeletePolicyVersion
                   - iam:GetPolicy
                   - iam:GetPolicyVersion
                   - iam:ListPolicies
                   - iam:ListPolicyVersions
+                  - iam:ListEntitiesForPolicy
+                  - iam:TagPolicy
+                  - iam:UntagPolicy
+                  - iam:ListPolicyTags
                 Resource: "*"
               - Sid: EC2
                 Effect: Allow
