@@ -20,7 +20,7 @@ Parameters:
     Default: vault-mtg-cloudwatch-alarms
     Description: |
       Name of the CloudWatch alarms stack whose SNS topic receives sync alarm notifications.
-      The stack must export vault-mtg-${Environment}-AlarmTopicArn.
+      The stack must export vaultmtg-${Environment}-AlertTopicArn.
   SubnetIdA:
     Type: AWS::EC2::Subnet::Id
     Default: subnet-021e2cc715f426da1
@@ -417,10 +417,10 @@ Resources:
       TreatMissingData: notBreaching
       AlarmActions:
         - !ImportValue
-          Fn::Sub: "vault-mtg-${Environment}-AlarmTopicArn"
+          Fn::Sub: "vaultmtg-${Environment}-AlertTopicArn"
       OKActions:
         - !ImportValue
-          Fn::Sub: "vault-mtg-${Environment}-AlarmTopicArn"
+          Fn::Sub: "vaultmtg-${Environment}-AlertTopicArn"
       Tags:
         - Key: Project
           Value: mtga-companion
@@ -463,10 +463,10 @@ Resources:
       TreatMissingData: notBreaching
       AlarmActions:
         - !ImportValue
-          Fn::Sub: "vault-mtg-${Environment}-AlarmTopicArn"
+          Fn::Sub: "vaultmtg-${Environment}-AlertTopicArn"
       OKActions:
         - !ImportValue
-          Fn::Sub: "vault-mtg-${Environment}-AlarmTopicArn"
+          Fn::Sub: "vaultmtg-${Environment}-AlertTopicArn"
       Tags:
         - Key: Project
           Value: mtga-companion
