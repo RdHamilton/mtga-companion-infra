@@ -117,6 +117,7 @@ Resources:
               - iam:DeleteRole
               - iam:GetRole
               - iam:UpdateRole
+              - iam:UpdateAssumeRolePolicy
               - iam:CreateServiceLinkedRole
               - iam:PutRolePolicy
               - iam:DeleteRolePolicy
@@ -261,6 +262,9 @@ Resources:
               - cloudwatch:DescribeAlarms
               - cloudwatch:ListTagsForResource
               - cloudwatch:TagResource
+              - cloudwatch:PutDashboard
+              - cloudwatch:DeleteDashboards
+              - cloudwatch:GetDashboard
             Resource: "*"
 
           - Sid: SNS
@@ -610,6 +614,7 @@ Resources:
                   - iam:DeleteRole
                   - iam:GetRole
                   - iam:UpdateRole
+                  - iam:UpdateAssumeRolePolicy
                   - iam:CreateServiceLinkedRole
                   - iam:PutRolePolicy
                   - iam:DeleteRolePolicy
@@ -802,6 +807,9 @@ Resources:
                   - cloudwatch:DescribeAlarms
                   - cloudwatch:ListTagsForResource
                   - cloudwatch:TagResource
+                  - cloudwatch:PutDashboard
+                  - cloudwatch:DeleteDashboards
+                  - cloudwatch:GetDashboard
                 Resource: "*"
               - Sid: SNS
                 Effect: Allow
