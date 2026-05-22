@@ -527,7 +527,15 @@ Resources:
               StringLike:
                 # S-05: pinned to main branch only; sync Lambda deploy runs
                 # from main via workflow_dispatch and repository_dispatch.
-                token.actions.githubusercontent.com:sub: !Sub repo:${GitHubOrg}/${InfraRepo}:ref:refs/heads/main
+                # deploy-sync-lambda.yml runs the deploy job in
+                # `environment: production`. When a job targets a named GitHub
+                # environment, the OIDC token sub becomes
+                # `repo:<org>/<repo>:environment:<name>` instead of a ref-based
+                # sub -- both must be allowed or AssumeRoleWithWebIdentity is
+                # denied. See P1 incident 2026-05-22 (post-PR #87 #2332).
+                token.actions.githubusercontent.com:sub:
+                  - !Sub repo:${GitHubOrg}/${InfraRepo}:ref:refs/heads/main
+                  - !Sub repo:${GitHubOrg}/${InfraRepo}:environment:production
       Policies:
         - PolicyName: sync-lambda-deploy
           PolicyDocument:
@@ -580,13 +588,21 @@ Resources:
               StringEquals:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
               StringLike:
-                # S-05: pinned to main branch and pull_request sub only.
-                # deploy.yml (workflow_dispatch) runs from main.
+                # S-05: pinned to main branch, pull_request, and the
+                # production environment sub only.
+                # deploy.yml (workflow_dispatch) and staging-rebuild-smoke-gate.yml
+                # run their deploy jobs in `environment: production`. A job
+                # targeting a named GitHub environment gets an OIDC token sub of
+                # `repo:<org>/<repo>:environment:<name>` -- NOT a ref-based sub --
+                # so the environment sub must be allowed explicitly or
+                # AssumeRoleWithWebIdentity is denied. See P1 incident
+                # 2026-05-22 (post-PR #87 #2332).
                 # cfn-changeset-gate.yml (pull_request) emits a pull_request sub.
                 # No feature-branch, fork, or tag ref can assume this role.
                 token.actions.githubusercontent.com:sub:
                   - !Sub repo:${GitHubOrg}/${InfraRepo}:ref:refs/heads/main
                   - !Sub repo:${GitHubOrg}/${InfraRepo}:pull_request
+                  - !Sub repo:${GitHubOrg}/${InfraRepo}:environment:production
       Policies:
         - PolicyName: cfn-stack-deploy
           PolicyDocument:
