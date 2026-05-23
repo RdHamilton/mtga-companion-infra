@@ -302,6 +302,14 @@ Resources:
             Condition:
               StringEquals:
                 aws:SourceAccount: !Ref "AWS::AccountId"
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: "sns:Publish"
+            Resource: !Ref AlertTopic
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
 
   # ---------------------------------------------------------
   # Chat webhook subscription (conditional)
