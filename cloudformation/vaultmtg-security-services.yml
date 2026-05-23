@@ -1,7 +1,43 @@
 AWSTemplateFormatVersion: "2010-09-09"
+
+# =========================================================================
+# S-15: EBS Default Encryption (account-level setting)
+# =========================================================================
+#
+# Setting: ec2:EnableEbsEncryptionByDefault (account-wide, per region)
+# KMS key: alias/aws/ebs (AWS-managed; no CMK required for this control)
+# Enabled: 2026-05-23 via #2352 in us-east-1 with:
+#   aws ec2 enable-ebs-encryption-by-default --region us-east-1 \
+#     --profile personal
+#
+# CloudFormation does NOT expose this account-level setting as a native
+# resource type. The setting is enabled imperatively (one-time, per region)
+# and continuously audited by the AWS Config managed rule
+# EC2_EBS_ENCRYPTION_BY_DEFAULT, which is included in the AWS Well-
+# Architected Security Pillar conformance pack deployed below
+# (see SecurityBaselineConformancePack). Any drift -- e.g., the setting
+# being toggled off out-of-band -- raises a Config non-compliance event
+# within the 24-hour evaluation window.
+#
+# Verification:
+#   aws ec2 get-ebs-encryption-by-default --region us-east-1 \
+#     --profile personal
+#   aws ec2 get-ebs-default-kms-key-id    --region us-east-1 \
+#     --profile personal
+#
+# Pre-existing root volume gap:
+# The current production EC2 root volume (vol-0ce953579f619787a, attached
+# to i-0226bf51fcf09b506) predates this setting and is unencrypted. It
+# will be re-created encrypted at the next EC2 instance replacement, which
+# is sequenced through R-02 / R-13 (the vaultmtg namespace cutover --
+# tracked under board #38, gated by #2373). All new volumes created in
+# this account/region after 2026-05-23 are encrypted by default.
+# =========================================================================
+
 Description: >
   VaultMTG security services baseline (S-08 Config + AWS-managed conformance
-  pack, S-09 GuardDuty detector, S-10 IAM Access Analyzer external + unused).
+  pack, S-09 GuardDuty detector, S-10 IAM Access Analyzer external + unused,
+  S-15 EBS default encryption documented + audited via conformance pack).
   Standalone stack; no cross-stack imports. R-11 imports ConfigRecorderName
   via cross-stack reference -- R-11 must NOT create its own recorder.
   See full rationale (FSBP vs. WAF Security Pillar substitution, R-11 sharing)
@@ -199,6 +235,12 @@ Resources:
   # bucket policy granting config-conforms.amazonaws.com PutObject. We pass an
   # empty DeliveryS3Bucket to let AWS use the service-managed bucket so we
   # don't need to widen the snapshot-bucket policy.
+  #
+  # S-15 dependency: this pack provisions the Config managed rule
+  # `EC2_EBS_ENCRYPTION_BY_DEFAULT`, which is the drift-detection layer for
+  # the account-level EBS default-encryption setting documented in the
+  # template header. Do not remove this conformance pack without first
+  # adding an equivalent standalone Config rule for that check.
   # -----------------------------------------------------------------------
   SecurityBaselineConformancePack:
     Type: AWS::Config::ConformancePack
