@@ -411,10 +411,8 @@ jobs:
   # surfaces over-broad grants, redundant statements, and other AWS best-
   # practice violations BEFORE the policy reaches the live account.
   #
-  # RULE-INFRA-01: this job is introduced with continue-on-error: true so
-  # the gate does not hard-block PRs against any pre-existing violations.
-  # All violations must be cleaned up before the next PR flips this to a
-  # hard-fail. The job still prints findings prominently in the log.
+  # Hard-fail gate (RULE-INFRA-01 resolved — #2491): pre-existing violations
+  # were cleaned up; this job now blocks merge on any findings.
   # ---------------------------------------------------------------------------
   validate-iam-policies:
     name: Validate IAM policies (S-10)
@@ -422,7 +420,6 @@ jobs:
     permissions:
       id-token: write   # required for OIDC role assumption
       contents: read
-    continue-on-error: true   # RULE-INFRA-01: soft launch; flip to false after cleanup PR
 
     env:
       AWS_REGION: us-east-1
@@ -600,7 +597,7 @@ jobs:
                   except Exception as e:
                       print(f'    validate-policy exception (skipping): {e}')
 
-          # Print summary; we return 0 (soft-fail) but emit a counter the runner can read.
+          # Print summary and emit a counter the runner reads to decide pass/fail.
           print(f'\n  TEMPLATE TOTAL: {findings_total} finding(s).')
           with open(os.environ.get('GITHUB_ENV', '/dev/null'), 'a') as fh:
               try:
@@ -615,7 +612,8 @@ jobs:
           echo "=========================================="
           echo "Validate-policy total findings: ${VALIDATE_FINDINGS_TOTAL:-0}"
           echo "=========================================="
-          echo ""
-          echo "NOTE: this gate is currently in soft-launch mode per RULE-INFRA-01."
-          echo "Findings are reported but do not block merge. After all reported"
-          echo "violations are cleaned up, flip continue-on-error to false on this job."
+          if [ "${VALIDATE_FINDINGS_TOTAL:-0}" -gt 0 ]; then
+            echo ""
+            echo "GATE: FAIL — IAM policy violations must be resolved before merge."
+            exit 1
+          fi
