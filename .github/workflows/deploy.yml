@@ -97,9 +97,15 @@ jobs:
         # Skipped on dry_run since real deploys are the only place we need
         # the gate; dry runs never execute the changeset.
         #
+        # Skipped for iam-gha-roles: this stack IS the source of the deploy
+        # role's permissions. Simulating before updating creates a chicken-and-egg
+        # deadlock — the stack cannot grant itself new permissions. iam-gha-roles
+        # changes are reviewed via PR; post-deploy the simulation gate on every
+        # other stack re-validates that the role was updated correctly.
+        #
         # When new services/actions are added to any template in this repo,
         # extend the --action-names list below.
-        if: inputs.dry_run != 'true'
+        if: inputs.dry_run != 'true' && inputs.stack != 'iam-gha-roles'
         run: |
           DEPLOY_ROLE_ARN=$(aws sts get-caller-identity --query Arn --output text | sed 's|:sts:|:iam:|' | sed 's|assumed-role/\([^/]*\)/.*|role/\1|')
           if ! echo "$DEPLOY_ROLE_ARN" | grep -qE '^arn:aws:iam::[0-9]+:role/'; then
