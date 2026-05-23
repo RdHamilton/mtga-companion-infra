@@ -1,0 +1,5 @@
+[
+  { "ParameterKey": "HostedZoneId", "ParameterValue": "Z0998299Z86TCLNNF1LS" },
+  { "ParameterKey": "ElasticIP",    "ParameterValue": "REPLACE_WITH_STAGING_EIP_AFTER_EC2_STAGING_DEPLOY" },
+  { "ParameterKey": "TTL",          "ParameterValue": "60" }
+]

@@ -1,0 +1,4 @@
+[
+  { "ParameterKey": "VpcId",       "ParameterValue": "vpc-01d097c495e941d32" },
+  { "ParameterKey": "Environment", "ParameterValue": "staging" }
+]

@@ -316,7 +316,9 @@ Resources:
             Version: "2012-10-17"
             Statement:
               # Allows the CloudWatch agent to create and write to the BFF and nginx
-              # log groups. Scoped to /vaultmtg/production/* log groups only.
+              # log groups. Scoped to /vaultmtg/${Environment}/* log groups so both
+              # the production instance (/vaultmtg/production/*) and the staging
+              # instance (/vaultmtg/staging/*) get the correct grant.
               - Effect: Allow
                 Action:
                   - logs:CreateLogGroup
@@ -324,8 +326,8 @@ Resources:
                   - logs:PutLogEvents
                   - logs:DescribeLogStreams
                 Resource:
-                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/vaultmtg/production/bff:*"
-                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/vaultmtg/production/nginx:*"
+                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/vaultmtg/${Environment}/bff:*"
+                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/vaultmtg/${Environment}/nginx:*"
               # DescribeLogGroups is not resource-scopeable; limit to the minimum needed.
               - Effect: Allow
                 Action:
