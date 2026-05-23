@@ -1,0 +1,7 @@
+[
+  {
+    "ResourceType": "AWS::S3::Bucket",
+    "LogicalResourceId": "ConfigSnapshotBucket",
+    "ResourceIdentifier": { "BucketName": "vaultmtg-config-snapshots-production-901347789205" }
+  }
+]

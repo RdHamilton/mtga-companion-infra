@@ -1,0 +1,59 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  IMPORT-only stub template for the vaultmtg-security-services stack.
+
+  Purpose: adopt the orphan ConfigSnapshotBucket
+  (vaultmtg-config-snapshots-<env>-<account>) that was retained from
+  prior CREATE_FAILED attempts (DeletionPolicy: Retain preserves audit
+  data). The full vaultmtg-security-services.yml template is applied
+  via a follow-up UPDATE deploy once this import has created the stack
+  with just the bucket adopted.
+
+  This template intentionally contains ONLY the resource(s) being
+  imported. CloudFormation IMPORT changesets reject any resource in
+  the template that is not listed in the resources-to-import file.
+
+  Workflow:
+    1. Deploy "vaultmtg-security-services-import" once  -- IMPORT, stack created with bucket only.
+    2. Deploy "vaultmtg-security-services"              -- UPDATE, adds Config recorder,
+       delivery channel, conformance pack, GuardDuty detector, and Access Analyzers.
+
+  Do NOT keep deploying "vaultmtg-security-services-import" -- it is a one-shot.
+
+Parameters:
+
+  Environment:
+    Type: String
+    Default: production
+    AllowedValues: [production, staging]
+    Description: Deployment environment (production or staging).
+
+Resources:
+
+  ConfigSnapshotBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub "vaultmtg-config-snapshots-${Environment}-${AWS::AccountId}"
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+            BucketKeyEnabled: true
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Project
+          Value: vaultmtg
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Stack
+          Value: vaultmtg-security-services
+        - Key: ManagedBy
+          Value: cloudformation
