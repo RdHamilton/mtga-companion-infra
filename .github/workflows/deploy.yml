@@ -114,7 +114,15 @@ jobs:
           fi
           echo "Simulating permissions for: $DEPLOY_ROLE_ARN"
 
-          DENIED=$(aws iam simulate-principal-policy \
+          ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+
+          # Run simulation in two passes because CFN, IAM, and S3 bucket actions are
+          # resource-scoped (wildcard "*" would return implicitDeny for those even when
+          # the role has access for valid stack/role/bucket ARNs).
+          #
+          # Pass 1: actions that use Resource:"*" in the inline policy (services that
+          # cannot scope by resource ARN or that use account-wide ARNs).
+          DENIED_GLOBAL=$(aws iam simulate-principal-policy \
             --policy-source-arn "$DEPLOY_ROLE_ARN" \
             --action-names \
               config:PutConfigurationRecorder config:StartConfigurationRecorder \
@@ -135,21 +143,51 @@ jobs:
               access-analyzer:DeleteArchiveRule access-analyzer:UpdateArchiveRule \
               access-analyzer:GetArchiveRule access-analyzer:ListFindings \
               access-analyzer:GetFinding access-analyzer:ListAnalyzedResources \
+              cloudformation:ValidateTemplate cloudformation:DescribeStacks \
+              cloudformation:ListStacks \
+            --resource-arns "*" \
+            --query 'EvaluationResults[?EvalDecision!=`allowed`].EvalActionName' \
+            --output text)
+
+          # Pass 2: CFN stack actions scoped to the mtga-companion-*/vaultmtg-* ARN patterns.
+          STACK_ARN="arn:aws:cloudformation:us-east-1:${ACCOUNT}:stack/vaultmtg-*/*"
+          DENIED_CFN=$(aws iam simulate-principal-policy \
+            --policy-source-arn "$DEPLOY_ROLE_ARN" \
+            --action-names \
               cloudformation:CreateChangeSet cloudformation:DeleteChangeSet \
               cloudformation:DescribeChangeSet cloudformation:ExecuteChangeSet \
-              cloudformation:DescribeStacks cloudformation:DescribeStackEvents \
-              cloudformation:GetTemplate cloudformation:ValidateTemplate \
+              cloudformation:DescribeStackEvents cloudformation:GetTemplate \
               cloudformation:CreateStack cloudformation:UpdateStack \
               cloudformation:DeleteStack \
-              s3:PutBucketPolicy s3:GetBucketPolicy \
-              s3:GetBucketAcl s3:GetEncryptionConfiguration \
+            --resource-arns "$STACK_ARN" \
+            --query 'EvaluationResults[?EvalDecision!=`allowed`].EvalActionName' \
+            --output text)
+
+          # Pass 3: IAM actions scoped to vaultmtg-* role ARNs.
+          IAM_ROLE_ARN="arn:aws:iam::${ACCOUNT}:role/vaultmtg-*"
+          DENIED_IAM=$(aws iam simulate-principal-policy \
+            --policy-source-arn "$DEPLOY_ROLE_ARN" \
+            --action-names \
               iam:CreateRole iam:DeleteRole iam:GetRole iam:PassRole \
               iam:AttachRolePolicy iam:DetachRolePolicy \
               iam:PutRolePolicy iam:DeleteRolePolicy \
               iam:TagRole iam:UntagRole \
-            --resource-arns "*" \
+            --resource-arns "$IAM_ROLE_ARN" \
             --query 'EvaluationResults[?EvalDecision!=`allowed`].EvalActionName' \
             --output text)
+
+          # Pass 4: S3 bucket-level actions scoped to a vaultmtg-* bucket.
+          S3_BUCKET_ARN="arn:aws:s3:::vaultmtg-*"
+          DENIED_S3=$(aws iam simulate-principal-policy \
+            --policy-source-arn "$DEPLOY_ROLE_ARN" \
+            --action-names \
+              s3:PutBucketPolicy s3:GetBucketPolicy \
+              s3:GetBucketAcl s3:GetEncryptionConfiguration \
+            --resource-arns "$S3_BUCKET_ARN" \
+            --query 'EvaluationResults[?EvalDecision!=`allowed`].EvalActionName' \
+            --output text)
+
+          DENIED=$(printf '%s\n%s\n%s\n%s' "$DENIED_GLOBAL" "$DENIED_CFN" "$DENIED_IAM" "$DENIED_S3" | grep -v '^$' || true)
 
           if [ -n "$DENIED" ]; then
             echo "::error::IAM simulation FAILED. Deploy role is missing permissions for:"
