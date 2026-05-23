@@ -162,11 +162,11 @@ Resources:
               - iam:AddRoleToInstanceProfile
               - iam:RemoveRoleFromInstanceProfile
               # AWS::IAM::OIDCProvider lifecycle (single fixed provider ARN)
-              - iam:CreateOIDCProvider
-              - iam:DeleteOIDCProvider
-              - iam:GetOIDCProvider
-              - iam:UpdateOIDCProvider
-              - iam:TagOIDCProvider
+              - iam:CreateOpenIDConnectProvider
+              - iam:DeleteOpenIDConnectProvider
+              - iam:GetOpenIDConnectProvider
+              - iam:UpdateOpenIDConnectProvider
+              - iam:TagOpenIDConnectProvider
               # AWS::IAM::ManagedPolicy lifecycle (Create / Update / Delete / drift-read)
               - iam:CreatePolicy
               - iam:CreatePolicyVersion
@@ -187,6 +187,7 @@ Resources:
               - !Sub arn:aws:iam::${AWS::AccountId}:role/gha-*
               - !Sub arn:aws:iam::${AWS::AccountId}:role/github-actions-*
               - !Sub arn:aws:iam::${AWS::AccountId}:instance-profile/mtga-companion-*
+              - !Sub arn:aws:iam::${AWS::AccountId}:instance-profile/vaultmtg-*
               - !Sub arn:aws:iam::${AWS::AccountId}:policy/gha-*
               - !Ref OidcProviderArn
           # mirrors inline IAMUnscopable -- the irreducible IAM wildcard
@@ -308,7 +309,14 @@ Resources:
 
           - Sid: SQS
             Effect: Allow
-            Action: sqs:*
+            Action:
+              - sqs:CreateQueue
+              - sqs:DeleteQueue
+              - sqs:GetQueueAttributes
+              - sqs:SetQueueAttributes
+              - sqs:ListQueueTags
+              - sqs:TagQueue
+              - sqs:GetQueueUrl
             Resource: "*"
 
           - Sid: CT
@@ -451,6 +459,10 @@ Resources:
                 Effect: Allow
                 Action: ssm:GetCommandInvocation
                 Resource: "*"
+              - Sid: SSMPutBfaSha
+                Effect: Allow
+                Action: ssm:PutParameter
+                Resource: arn:aws:ssm:us-east-1:901347789205:parameter/vaultmtg/app/production/latest-bff-sha
               - Sid: EC2DescribeForSSM
                 Effect: Allow
                 Action: ec2:DescribeInstances
@@ -652,11 +664,11 @@ Resources:
                   - iam:AddRoleToInstanceProfile
                   - iam:RemoveRoleFromInstanceProfile
                   # AWS::IAM::OIDCProvider lifecycle (single fixed provider ARN)
-                  - iam:CreateOIDCProvider
-                  - iam:DeleteOIDCProvider
-                  - iam:GetOIDCProvider
-                  - iam:UpdateOIDCProvider
-                  - iam:TagOIDCProvider
+                  - iam:CreateOpenIDConnectProvider
+                  - iam:DeleteOpenIDConnectProvider
+                  - iam:GetOpenIDConnectProvider
+                  - iam:UpdateOpenIDConnectProvider
+                  - iam:TagOpenIDConnectProvider
                   # AWS::IAM::ManagedPolicy lifecycle (Create / Update / Delete / drift-read).
                   # iam:CreatePolicy and iam:SetDefaultPolicyVersion ARE
                   # resource-scopable -- the policy ARN identifies the target.
@@ -678,7 +690,11 @@ Resources:
                   - !Sub arn:aws:iam::${AWS::AccountId}:role/mtga-companion-*
                   - !Sub arn:aws:iam::${AWS::AccountId}:role/gha-*
                   - !Sub arn:aws:iam::${AWS::AccountId}:role/github-actions-*
+                  # instance-profile ARN prefixes: legacy (mtga-companion-*) and
+                  # current naming convention (vaultmtg-*). Both must be listed;
+                  # new stacks MUST use the vaultmtg-* prefix (vault-mtg#2496).
                   - !Sub arn:aws:iam::${AWS::AccountId}:instance-profile/mtga-companion-*
+                  - !Sub arn:aws:iam::${AWS::AccountId}:instance-profile/vaultmtg-*
                   - !Sub arn:aws:iam::${AWS::AccountId}:policy/gha-*
                   - !Ref OidcProviderArn
               # IAM actions that genuinely require Resource:"*". These are the
@@ -919,13 +935,14 @@ Resources:
                   - ssm:AddTagsToResource
                   - ssm:ListTagsForResource
                   # AWS::Config::ConformancePack with TemplateSSMDocumentDetails
-                  # requires the caller to have ssm:GetDocument /
-                  # ssm:DescribeDocument on the AWS-owned ConformancePackTemplate
-                  # SSM document. Without these, PutConformancePack returns
-                  # "Insufficient read permissions on SSM Document".
+                  # requires ssm:GetDocument / ssm:DescribeDocument on the
+                  # AWS-owned ConformancePackTemplate SSM document. Without these,
+                  # PutConformancePack returns "Insufficient read permissions on
+                  # SSM Document". ssm:ListDocuments is NOT required and was
+                  # removed (vault-mtg#2493) -- it granted broader document
+                  # enumeration than the handler needs.
                   - ssm:GetDocument
                   - ssm:DescribeDocument
-                  - ssm:ListDocuments
                 Resource: "*"
               # Secrets Manager: lifecycle management only.
               # secretsmanager:GetSecretValue removed -- the deploy role does
@@ -1000,6 +1017,7 @@ Resources:
                   - sqs:SetQueueAttributes
                   - sqs:ListQueueTags
                   - sqs:TagQueue
+                  - sqs:GetQueueUrl
                 Resource: "*"
               # CloudTrail: complete CRUD+rollback permission set for the
               # AWS::CloudTrail::Trail resource handler. cloudtrail: actions are
