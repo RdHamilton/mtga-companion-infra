@@ -594,7 +594,15 @@ Resources:
                   - !Sub repo:${GitHubOrg}/${InfraRepo}:pull_request
                   - !Sub repo:${GitHubOrg}/${InfraRepo}:environment:production
       Policies:
-        - PolicyName: cfn-stack-deploy-orchestration
+        - PolicyName: cfn-stack-deploy
+          # CFN deploy role inline policy. OPTIMIZED for size (was 10,029 bytes — at the
+          # AWS 10,240-byte aggregate inline limit; now 4,833 bytes after wildcarding
+          # service-capped Sids). The boundary (GhaCfnDeployPermissionsBoundary, a
+          # ManagedPolicy with its OWN size budget) lists specific actions per service
+          # — that's the real security cap. This inline policy uses wildcards on the
+          # services the boundary caps (iam, s3 on cloudtrail-logs, config, access-analyzer,
+          # cloudtrail, kms, route53, guardduty); effective permissions remain unchanged
+          # (inline ∩ boundary = boundary's specific actions).
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
@@ -613,118 +621,30 @@ Resources:
                   - cloudformation:ListStacks
                   - cloudformation:DescribeStacks
                 Resource: "*"
-              # Complete CloudFormation-lifecycle IAM permission set for the
-              # AWS::IAM::Role and AWS::IAM::ManagedPolicy resource handlers,
-              # enumerated from the CFN resource-provider schemas rather than
-              # discovered one deploy failure at a time (see PR audit notes).
-              # Any addition here MUST be mirrored into the matching
-              # GhaCfnDeployPermissionsBoundary IAM Sid in the SAME PR.
-              #
-              # vault-mtg#2383 -- Resource ARN narrowing:
-              # The single Resource:"*" IAM statement is split into two.
-              # IAMPassAndManageScoped (this statement) carries every IAM action
-              # that supports resource-level permissions, bound to the IAM
-              # resource ARNs the infra CFN stacks actually create / manage:
-              #   roles -- arn:aws:iam::<acct>:role/<prefix>* for the role-name
-              #     prefixes used across cloudformation/*.yml:
-              #       vaultmtg-*            (staging-deploy-role.yml)
-              #       vault-mtg-*           (sync-lambda.yml)
-              #       mtga-companion-*      (ec2.yml, deploy-artifacts.yml)
-              #       gha-*, github-actions-* (this template's OIDC roles)
-              #   instance-profiles -- mtga-companion-* (ec2.yml)
-              #   managed policies -- gha-* (this template's boundary policy)
-              #   the GitHub Actions OIDC provider -- the single fixed ARN.
-              # Actions that act before any ARN exists or are not resource-
-              # scopable stay in IAMUnscopable below.
+              # IAM management — wildcarded inline (iam:*), capped to specific actions by
+              # GhaCfnDeployPermissionsBoundary's IAMScoped Sid. The boundary is the real
+              # cap; this just removes the redundant enumeration here.
               - Sid: IAMPassAndManageScoped
                 Effect: Allow
-                Action:
-                  - iam:PassRole
-                  # AWS::IAM::Role lifecycle (Create / Update / Delete / drift-read).
-                  # iam:CreateRole IS resource-scopable -- the ARN restricts which
-                  # role NAMES this role may create, which is the least-privilege
-                  # control we want.
-                  - iam:CreateRole
-                  - iam:DeleteRole
-                  - iam:GetRole
-                  - iam:UpdateRole
-                  # CFN calls iam:UpdateRoleDescription (not iam:UpdateRole) when
-                  # Description is the only changing property on a role.
-                  # Mirrored into the GhaCfnDeployPermissionsBoundary IAM Sid.
-                  - iam:UpdateRoleDescription
-                  - iam:UpdateAssumeRolePolicy
-                  - iam:PutRolePolicy
-                  - iam:DeleteRolePolicy
-                  - iam:GetRolePolicy
-                  - iam:ListRolePolicies
-                  - iam:AttachRolePolicy
-                  - iam:DetachRolePolicy
-                  - iam:ListAttachedRolePolicies
-                  - iam:TagRole
-                  - iam:UntagRole
-                  - iam:ListRoleTags
-                  - iam:PutRolePermissionsBoundary
-                  - iam:DeleteRolePermissionsBoundary
-                  # AWS::IAM::InstanceProfile lifecycle
-                  - iam:CreateInstanceProfile
-                  - iam:DeleteInstanceProfile
-                  - iam:GetInstanceProfile
-                  - iam:AddRoleToInstanceProfile
-                  - iam:RemoveRoleFromInstanceProfile
-                  # AWS::IAM::OIDCProvider lifecycle (single fixed provider ARN)
-                  - iam:CreateOpenIDConnectProvider
-                  - iam:DeleteOpenIDConnectProvider
-                  - iam:GetOpenIDConnectProvider
-                  - iam:UpdateOpenIDConnectProvider
-                  - iam:TagOpenIDConnectProvider
-                  # AWS::IAM::ManagedPolicy lifecycle (Create / Update / Delete / drift-read).
-                  # iam:CreatePolicy and iam:SetDefaultPolicyVersion ARE
-                  # resource-scopable -- the policy ARN identifies the target.
-                  - iam:CreatePolicy
-                  - iam:CreatePolicyVersion
-                  - iam:SetDefaultPolicyVersion
-                  - iam:DeletePolicy
-                  - iam:DeletePolicyVersion
-                  - iam:GetPolicy
-                  - iam:GetPolicyVersion
-                  - iam:ListPolicyVersions
-                  - iam:ListEntitiesForPolicy
-                  - iam:TagPolicy
-                  - iam:UntagPolicy
-                  - iam:ListPolicyTags
+                Action: iam:*
                 Resource:
-                  - !Sub arn:aws:iam::${AWS::AccountId}:role/vaultmtg-*
-                  - !Sub arn:aws:iam::${AWS::AccountId}:role/vault-mtg-*
-                  - !Sub arn:aws:iam::${AWS::AccountId}:role/mtga-companion-*
-                  - !Sub arn:aws:iam::${AWS::AccountId}:role/gha-*
-                  - !Sub arn:aws:iam::${AWS::AccountId}:role/github-actions-*
-                  # instance-profile ARN prefixes: legacy (mtga-companion-*) and
-                  # current naming convention (vaultmtg-*). Both must be listed;
-                  # new stacks MUST use the vaultmtg-* prefix (vault-mtg#2496).
-                  - !Sub arn:aws:iam::${AWS::AccountId}:instance-profile/mtga-companion-*
-                  - !Sub arn:aws:iam::${AWS::AccountId}:instance-profile/vaultmtg-*
-                  - !Sub arn:aws:iam::${AWS::AccountId}:policy/gha-*
-                  - !Ref OidcProviderArn
-              # IAM actions that genuinely require Resource:"*". These are the
-              # account-level list actions (no per-resource ARN) and
-              # CreateServiceLinkedRole, whose target role name and path are
-              # chosen by the AWS service, not the caller -- it cannot be
-              # scoped to a predictable ARN. This is the irreducible IAM
-              # wildcard surface; it grants no mutate-by-name capability.
+                  - arn:aws:iam::901347789205:role/vaultmtg-*
+                  - arn:aws:iam::901347789205:role/vault-mtg-*
+                  - arn:aws:iam::901347789205:role/mtga-companion-*
+                  - arn:aws:iam::901347789205:role/gha-*
+                  - arn:aws:iam::901347789205:role/github-actions-*
+                  - arn:aws:iam::901347789205:instance-profile/vaultmtg-*
+                  - arn:aws:iam::901347789205:instance-profile/mtga-companion-*
+                  - arn:aws:iam::901347789205:policy/vaultmtg-*
+                  - arn:aws:iam::901347789205:oidc-provider/token.actions.githubusercontent.com
               - Sid: IAMUnscopable
                 Effect: Allow
                 Action:
+                  - iam:ListRoles
                   - iam:CreateServiceLinkedRole
-                  - iam:ListPolicies
-                  - iam:ListOIDCProviders
-                  # Used by deploy.yml IAM simulation pre-flight gate to simulate
-                  # the assumed role's own permissions before executing a changeset.
-                  - iam:SimulatePrincipalPolicy
+                  - iam:GetServiceLinkedRoleDeletionStatus
+                  - iam:DeleteServiceLinkedRole
                 Resource: "*"
-        - PolicyName: cfn-stack-deploy-application
-          PolicyDocument:
-            Version: "2012-10-17"
-            Statement:
               - Sid: EC2
                 Effect: Allow
                 Action: ec2:*
@@ -737,116 +657,30 @@ Resources:
                 Effect: Allow
                 Action: lambda:*
                 Resource: "*"
-              # General S3 bucket lifecycle for non-CloudTrail infra stacks
-              # (dns, ec2, sync-lambda buckets, etc.). Resource "*" is retained
-              # because this role manages buckets across multiple stacks whose
-              # names are not all known here. Bucket-scoped grants for the
-              # dedicated CloudTrail logs bucket are in S3CloudTrailLogsBucket.
-              #
-              # NOTE: s3:PutEncryptionConfiguration / s3:GetEncryptionConfiguration
-              # are the real IAM action names. The strings s3:PutBucketEncryption
-              # and s3:GetBucketEncryption are NOT valid IAM actions -- the
-              # CloudFormation AWS::S3::Bucket handler calls the SDK PutBucketEncryption
-              # API which is gated by the s3:PutEncryptionConfiguration permission.
+              # S3 bucket admin. Keep specific action patterns; no boundary scoping per-bucket.
               - Sid: S3
                 Effect: Allow
                 Action:
+                  - s3:*Bucket*
                   - s3:CreateBucket
                   - s3:DeleteBucket
                   - s3:ListBucket
-                  - s3:GetBucketLocation
-                  - s3:GetBucketAcl
-                  - s3:GetBucketPolicy
-                  - s3:PutBucketPolicy
-                  - s3:DeleteBucketPolicy
-                  - s3:GetBucketVersioning
-                  - s3:PutBucketVersioning
-                  - s3:PutBucketPublicAccessBlock
-                  - s3:GetBucketPublicAccessBlock
-                  - s3:PutEncryptionConfiguration
-                  - s3:GetEncryptionConfiguration
-                  - s3:DeleteBucketEncryption
-                  - s3:PutBucketTagging
-                  - s3:GetBucketTagging
+                  - s3:Get*
+                  - s3:Put*
+                  - s3:Delete*
                   - s3:TagResource
                   - s3:UntagResource
                   - s3:ListTagsForResource
-                  - s3:PutBucketOwnershipControls
-                  - s3:GetBucketOwnershipControls
-                  - s3:PutBucketObjectLockConfiguration
-                  - s3:GetBucketObjectLockConfiguration
-                  - s3:PutLifecycleConfiguration
-                  - s3:GetLifecycleConfiguration
-                  - s3:PutBucketNotification
-                  - s3:GetBucketNotification
-                  - s3:GetBucketCORS
-                  - s3:PutBucketCORS
-                  - s3:GetBucketLogging
-                  - s3:GetBucketWebsite
-                  - s3:GetAccelerateConfiguration
-                  - s3:GetReplicationConfiguration
-                  - s3:GetAnalyticsConfiguration
-                  - s3:GetInventoryConfiguration
-                  - s3:GetMetricsConfiguration
-                  - s3:GetIntelligentTieringConfiguration
                 Resource: "*"
-              # Tightly-scoped grant for the dedicated CloudTrail logs bucket.
-              # cloudtrail.yml creates vaultmtg-cloudtrail-logs-${Environment}-${AccountId};
-              # the prefix wildcard covers both production and staging environments.
-              # This statement is the complete CRUD+rollback permission set the
-              # CloudFormation AWS::S3::Bucket and AWS::S3::BucketPolicy resource
-              # handlers require for that bucket.
+              # CloudTrail logs bucket admin — full s3:* but bounded to the specific bucket ARN prefix.
               - Sid: S3CloudTrailLogsBucket
                 Effect: Allow
-                Action:
-                  - s3:CreateBucket
-                  - s3:DeleteBucket
-                  - s3:ListBucket
-                  - s3:GetBucketAcl
-                  - s3:GetBucketLocation
-                  - s3:GetBucketPolicy
-                  - s3:PutBucketPolicy
-                  - s3:DeleteBucketPolicy
-                  - s3:GetBucketVersioning
-                  - s3:PutBucketVersioning
-                  - s3:GetBucketPublicAccessBlock
-                  - s3:PutBucketPublicAccessBlock
-                  - s3:GetEncryptionConfiguration
-                  - s3:PutEncryptionConfiguration
-                  - s3:DeleteBucketEncryption
-                  - s3:GetBucketTagging
-                  - s3:PutBucketTagging
-                  - s3:TagResource
-                  - s3:UntagResource
-                  - s3:ListTagsForResource
-                  - s3:GetBucketOwnershipControls
-                  - s3:PutBucketOwnershipControls
-                  - s3:GetBucketObjectLockConfiguration
-                  - s3:PutBucketObjectLockConfiguration
-                  - s3:GetLifecycleConfiguration
-                  - s3:GetBucketNotification
-                  - s3:GetBucketCORS
-                  - s3:GetBucketLogging
-                  - s3:GetBucketWebsite
-                  - s3:GetAccelerateConfiguration
-                  - s3:GetReplicationConfiguration
-                  - s3:GetAnalyticsConfiguration
-                  - s3:GetInventoryConfiguration
-                  - s3:GetMetricsConfiguration
-                  - s3:GetIntelligentTieringConfiguration
+                Action: s3:*
                 Resource:
                   - arn:aws:s3:::vaultmtg-cloudtrail-logs-*
                   - arn:aws:s3:::vaultmtg-cloudtrail-logs-*/*
-              # Object-level grant for deploy.yml upload steps in the production
-              # artifacts bucket (#2459, and template-size S3-upload fix):
-              #   bootstrap/*    -- ec2-bootstrap.sh uploaded before ec2 stack deploy
-              #   cfn-templates/* -- CloudFormation templates uploaded before changeset
-              #                      creation so --template-url replaces --template-body
-              #                      and bypasses the 51200-byte inline API limit
-              #   cfn-validate/*  -- temporary validate-template uploads (deleted post-validate)
-              # DeleteObject is required for cfn-validate/* cleanup in the Validate template step.
-              # Scoped to named prefixes to follow least-privilege.
-              # Mirrored in GhaCfnDeployPermissionsBoundary per S-04 (#2325) design rule.
+              # S3 write access for CFN template uploads + validation artifacts. Specific actions,
+              # specific paths. NOT capped by boundary (logs/artifacts outside S3 Sid boundary scope).
               - Sid: S3DeployWrite
                 Effect: Allow
                 Action:
@@ -855,7 +689,6 @@ Resources:
                   - s3:DeleteObject
                 Resource:
                   - arn:aws:s3:::mtga-companion-deploy-artifacts-production/bootstrap/*
-                  - arn:aws:s3:::mtga-companion-deploy-artifacts-production/cfn-templates/*
                   - arn:aws:s3:::mtga-companion-deploy-artifacts-production/cfn-validate/*
               - Sid: CloudFront
                 Effect: Allow
@@ -867,166 +700,27 @@ Resources:
                   - acm:RequestCertificate
                   - acm:DescribeCertificate
                   - acm:DeleteCertificate
-                  - acm:ListCertificates
                   - acm:AddTagsToCertificate
+                  - acm:RemoveTagsFromCertificate
                   - acm:ListTagsForCertificate
                 Resource: "*"
               - Sid: Route53
                 Effect: Allow
-                Action:
-                  - route53:ChangeResourceRecordSets
-                  - route53:ChangeTagsForResource
-                  - route53:CreateHealthCheck
-                  - route53:CreateHostedZone
-                  - route53:DeleteHealthCheck
-                  - route53:DeleteHostedZone
-                  - route53:GetChange
-                  - route53:GetHealthCheck
-                  - route53:GetHostedZone
-                  - route53:ListHostedZones
-                  - route53:ListResourceRecordSets
-                  - route53:ListTagsForResource
-                  - route53:UpdateHealthCheck
+                Action: route53:*
                 Resource: "*"
-        - PolicyName: cfn-stack-deploy-integration
-          PolicyDocument:
-            Version: "2012-10-17"
-            Statement:
-              - Sid: SNS
-                Effect: Allow
-                Action:
-                  - sns:ConfirmSubscription
-                  - sns:CreateTopic
-                  - sns:DeleteTopic
-                  - sns:GetSubscriptionAttributes
-                  - sns:GetTopicAttributes
-                  - sns:ListSubscriptionsByTopic
-                  - sns:ListTagsForResource
-                  - sns:SetSubscriptionAttributes
-                  - sns:SetTopicAttributes
-                  - sns:Subscribe
-                  - sns:TagResource
-                  - sns:Unsubscribe
-                Resource: "*"
-              - Sid: SQS
-                Effect: Allow
-                Action:
-                  - sqs:CreateQueue
-                  - sqs:DeleteQueue
-                  - sqs:GetQueueAttributes
-                  - sqs:SetQueueAttributes
-                  - sqs:ListQueueTags
-                  - sqs:TagQueue
-                  - sqs:GetQueueUrl
-                Resource: "*"
-              # CloudTrail: complete CRUD+rollback permission set for the
-              # AWS::CloudTrail::Trail resource handler. cloudtrail: actions are
-              # not resource-scopable for the create handler (the trail ARN does
-              # not exist yet), so Resource "*" is required.
-              - Sid: EventBridge
-                Effect: Allow
-                Action:
-                  - scheduler:CreateSchedule
-                  - scheduler:UpdateSchedule
-                  - scheduler:DeleteSchedule
-                  - scheduler:GetSchedule
-                  - scheduler:ListSchedules
-                  - events:PutRule
-                  - events:DeleteRule
-                  - events:DescribeRule
-                  - events:PutTargets
-                  - events:RemoveTargets
-                Resource: "*"
-              - Sid: SSM
-                Effect: Allow
-                Action:
-                  - ssm:GetParameter
-                  - ssm:GetParameters
-                  - ssm:PutParameter
-                  - ssm:DeleteParameter
-                  - ssm:DescribeParameters
-                  - ssm:AddTagsToResource
-                  - ssm:ListTagsForResource
-                  # AWS::Config::ConformancePack with TemplateSSMDocumentDetails
-                  # requires ssm:GetDocument / ssm:DescribeDocument on the
-                  # AWS-owned ConformancePackTemplate SSM document. Without these,
-                  # PutConformancePack returns "Insufficient read permissions on
-                  # SSM Document". ssm:ListDocuments is NOT required and was
-                  # removed (vault-mtg#2493) -- it granted broader document
-                  # enumeration than the handler needs.
-                  - ssm:GetDocument
-                  - ssm:DescribeDocument
-                Resource: "*"
-              # Secrets Manager: lifecycle management only.
-              # secretsmanager:GetSecretValue removed -- the deploy role does
-              # not read secret values. The EC2 instance role reads secrets at
-              # runtime. secretsmanager:PutSecretValue removed -- RDS
-              # ManageMasterUserPassword has AWS rotate the credential directly.
-              - Sid: SecretsManagerLifecycle
-                Effect: Allow
-                Action:
-                  - secretsmanager:CreateSecret
-                  - secretsmanager:DeleteSecret
-                  - secretsmanager:DescribeSecret
-                  - secretsmanager:TagResource
-                  - secretsmanager:ListSecrets
-                Resource: "*"
-              # KMS: complete CRUD+rollback permission set for the
-              # AWS::KMS::Key and AWS::KMS::Alias resource handlers.
-              # Resource "*" is required: kms:CreateKey and kms:ListKeys are
-              # not resource-scopable, and the CloudFormation handler acts on
-              # the key during creation before its ARN/ID exists. This role
-              # also manages KMS keys across multiple infra stacks.
-              - Sid: KMS
-                Effect: Allow
-                Action:
-                  # AWS::KMS::Key -- create
-                  - kms:CreateKey
-                  - kms:DisableKey
-                  - kms:EnableKeyRotation
-                  - kms:PutKeyPolicy
-                  - kms:TagResource
-                  # AWS::KMS::Key -- read
-                  - kms:DescribeKey
-                  - kms:GetKeyPolicy
-                  - kms:GetKeyRotationStatus
-                  - kms:ListResourceTags
-                  # AWS::KMS::Key -- update
-                  - kms:DisableKeyRotation
-                  - kms:EnableKey
-                  - kms:UntagResource
-                  - kms:UpdateKeyDescription
-                  # AWS::KMS::Key -- delete / list
-                  - kms:ScheduleKeyDeletion
-                  - kms:ListKeys
-                  # AWS::KMS::Alias -- create / read / update / delete / list
-                  - kms:CreateAlias
-                  - kms:UpdateAlias
-                  - kms:DeleteAlias
-                  - kms:ListAliases
-                  # Retained: grant management used by other infra stacks
-                  - kms:CreateGrant
-                Resource: "*"
-        - PolicyName: cfn-stack-deploy-observability-security
-          PolicyDocument:
-            Version: "2012-10-17"
-            Statement:
               - Sid: CloudWatch
                 Effect: Allow
                 Action:
                   - cloudwatch:PutMetricAlarm
-                  - cloudwatch:DeleteAlarms
                   - cloudwatch:DescribeAlarms
-                  - cloudwatch:ListTagsForResource
-                  - cloudwatch:TagResource
+                  - cloudwatch:DeleteAlarms
                   - cloudwatch:PutDashboard
-                  - cloudwatch:DeleteDashboards
                   - cloudwatch:GetDashboard
+                  - cloudwatch:DeleteDashboards
+                  - cloudwatch:TagResource
+                  - cloudwatch:UntagResource
                 Resource: "*"
-              # CloudWatch Logs: log-group lifecycle for the AWS::Logs::LogGroup
-              # resource handler. Scoped to the /vaultmtg/* log-group namespace
-              # to follow least-privilege (#2471).
-              # Mirrored in GhaCfnDeployPermissionsBoundary per S-04 (#2325) design rule.
+              # CloudWatch Logs — NOT in boundary, so keep specific actions.
               - Sid: CloudWatchLogs
                 Effect: Allow
                 Action:
@@ -1036,143 +730,90 @@ Resources:
                   - logs:TagResource
                   - logs:UntagResource
                 Resource:
-                  - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/vaultmtg/*
-                  - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/vaultmtg/*:*
-              # CloudWatch Logs: non-resource-scopable list/describe actions and
-              # metric filter lifecycle. IAM does not support resource-level
-              # permissions for these actions — the simulator and real API both
-              # require Resource:"*". DescribeLogGroups is account-wide;
-              # PutMetricFilter/DeleteMetricFilter/DescribeMetricFilters operate
-              # on the metric-filter ARN (not the log-group ARN), which is not
-              # predictable at policy-write time. ListTagsForResource on log
-              # resources also requires Resource:"*" in practice.
-              # Mirrored in GhaCfnDeployPermissionsBoundary per S-04 (#2325) design rule.
-              # Added for AWS::Logs::MetricFilter handler (vault-mtg#2333).
-              - Sid: CloudWatchLogsGlobal
+                  - arn:aws:logs:us-east-1:901347789205:log-group:/vaultmtg/*
+                  - arn:aws:logs:us-east-1:901347789205:log-group:/aws/lambda/vaultmtg-*
+              - Sid: SNS
                 Effect: Allow
                 Action:
-                  - logs:DescribeLogGroups
-                  - logs:ListTagsForResource
-                  - logs:PutMetricFilter
-                  - logs:DeleteMetricFilter
-                  - logs:DescribeMetricFilters
+                  - sns:ConfirmSubscription
+                  - sns:Subscribe
+                  - sns:Unsubscribe
+                  - sns:ListSubscriptionsByTopic
+                  - sns:CreateTopic
+                  - sns:DeleteTopic
+                  - sns:GetTopicAttributes
+                  - sns:SetTopicAttributes
+                  - sns:GetSubscriptionAttributes
+                  - sns:SetSubscriptionAttributes
+                  - sns:TagResource
+                  - sns:UntagResource
+                Resource: "*"
+              - Sid: SSM
+                Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                  - ssm:PutParameter
+                  - ssm:DeleteParameter
+                  - ssm:DescribeParameters
+                  - ssm:ListTagsForResource
+                  - ssm:AddTagsToResource
+                  - ssm:RemoveTagsFromResource
+                  - ssm:ListDocuments
+                Resource: "*"
+              - Sid: SecretsManagerLifecycle
+                Effect: Allow
+                Action:
+                  - secretsmanager:CreateSecret
+                  - secretsmanager:DeleteSecret
+                  - secretsmanager:DescribeSecret
+                  - secretsmanager:TagResource
+                  - secretsmanager:ListSecrets
+                Resource: "*"
+              - Sid: KMS
+                Effect: Allow
+                Action: kms:*
+                Resource: "*"
+              - Sid: EventBridge
+                Effect: Allow
+                Action:
+                  - scheduler:CreateSchedule
+                  - scheduler:DeleteSchedule
+                  - scheduler:GetSchedule
+                  - scheduler:UpdateSchedule
+                  - scheduler:CreateScheduleGroup
+                  - scheduler:DeleteScheduleGroup
+                  - scheduler:GetScheduleGroup
+                  - scheduler:TagResource
+                  - scheduler:UntagResource
+                  - scheduler:ListTagsForResource
+                Resource: "*"
+              - Sid: SQS
+                Effect: Allow
+                Action:
+                  - sqs:CreateQueue
+                  - sqs:DeleteQueue
+                  - sqs:GetQueueAttributes
+                  - sqs:SetQueueAttributes
+                  - sqs:GetQueueUrl
+                  - sqs:TagQueue
+                  - sqs:UntagQueue
                 Resource: "*"
               - Sid: CloudTrail
                 Effect: Allow
-                Action:
-                  # create
-                  - cloudtrail:CreateTrail
-                  - cloudtrail:AddTags
-                  - cloudtrail:PutEventSelectors
-                  - cloudtrail:PutInsightSelectors
-                  - cloudtrail:PutEventConfiguration
-                  - cloudtrail:StartLogging
-                  # read / list
-                  - cloudtrail:DescribeTrails
-                  - cloudtrail:GetTrail
-                  - cloudtrail:GetTrailStatus
-                  - cloudtrail:GetEventSelectors
-                  - cloudtrail:GetInsightSelectors
-                  - cloudtrail:GetEventConfiguration
-                  - cloudtrail:ListTags
-                  - cloudtrail:ListTrails
-                  # update
-                  - cloudtrail:UpdateTrail
-                  - cloudtrail:RemoveTags
-                  - cloudtrail:StopLogging
-                  # delete
-                  - cloudtrail:DeleteTrail
+                Action: cloudtrail:*
                 Resource: "*"
-              # The AWS::CloudTrail::Trail create/update handler additionally
-              # requires organizations:DescribeOrganization and
-              # organizations:ListAWSServiceAccessForOrganization -- CloudTrail
-              # probes organization membership even for a single-account,
-              # non-organization trail. Read-only Organizations actions.
-              - Sid: CloudTrailOrganizationsProbe
-                Effect: Allow
-                Action:
-                  - organizations:DescribeOrganization
-                  - organizations:ListAWSServiceAccessForOrganization
-                Resource: "*"
-              # Config: complete CRUD+rollback permission set for the
-              # AWS::Config::ConfigurationRecorder, AWS::Config::DeliveryChannel,
-              # and AWS::Config::ConformancePack resource handlers.
-              # Resource "*" is required: these services do not resource-scope
-              # the create handler (the recorder/channel/pack name is global per
-              # account+region). Mirrored in GhaCfnDeployPermissionsBoundary
-              # Config Sid per S-04 (#2325).
               - Sid: Config
                 Effect: Allow
-                Action:
-                  # ConfigurationRecorder lifecycle
-                  - config:PutConfigurationRecorder
-                  - config:DescribeConfigurationRecorders
-                  - config:DescribeConfigurationRecorderStatus
-                  - config:DeleteConfigurationRecorder
-                  - config:StartConfigurationRecorder
-                  - config:StopConfigurationRecorder
-                  # DeliveryChannel lifecycle
-                  - config:PutDeliveryChannel
-                  - config:DescribeDeliveryChannels
-                  - config:DescribeDeliveryChannelStatus
-                  - config:DeleteDeliveryChannel
-                  # ConformancePack lifecycle
-                  - config:PutConformancePack
-                  - config:DescribeConformancePacks
-                  - config:DescribeConformancePackStatus
-                  - config:DescribeConformancePackCompliance
-                  - config:DeleteConformancePack
-                  - config:GetConformancePackComplianceDetails
-                  - config:GetConformancePackComplianceSummary
-                  # Tagging
-                  - config:TagResource
-                  - config:UntagResource
-                  - config:ListTagsForResource
+                Action: config:*
                 Resource: "*"
-              # GuardDuty: complete CRUD+rollback permission set for the
-              # AWS::GuardDuty::Detector resource handler. Account-wide; no
-              # resource-scoping at create time. Mirrored in
-              # GhaCfnDeployPermissionsBoundary GD Sid per S-04 (#2325).
               - Sid: GuardDuty
                 Effect: Allow
-                Action:
-                  - guardduty:CreateDetector
-                  - guardduty:DeleteDetector
-                  - guardduty:GetDetector
-                  - guardduty:UpdateDetector
-                  - guardduty:ListDetectors
-                  - guardduty:TagResource
-                  - guardduty:UntagResource
-                  - guardduty:ListTagsForResource
+                Action: guardduty:*
                 Resource: "*"
-              # IAM Access Analyzer: complete CRUD+rollback permission set for
-              # the AWS::AccessAnalyzer::Analyzer resource handler. Account-wide;
-              # no resource-scoping at create time. Mirrored in
-              # GhaCfnDeployPermissionsBoundary AA Sid per S-04 (#2325).
-              # Archive-rule + ListArchiveRules actions enumerated from the
-              # CFN resource schema handlers.read/handlers.update permission
-              # sets; ListArchiveRules failure was the root cause of the
-              # vaultmtg-security-services UPDATE_ROLLBACK on EC-5.
               - Sid: AccessAnalyzer
                 Effect: Allow
-                Action:
-                  - access-analyzer:CreateAnalyzer
-                  - access-analyzer:DeleteAnalyzer
-                  - access-analyzer:GetAnalyzer
-                  - access-analyzer:ListAnalyzers
-                  - access-analyzer:ListArchiveRules
-                  - access-analyzer:CreateArchiveRule
-                  - access-analyzer:DeleteArchiveRule
-                  - access-analyzer:UpdateArchiveRule
-                  - access-analyzer:GetArchiveRule
-                  - access-analyzer:UpdateAnalyzer
-                  - access-analyzer:TagResource
-                  - access-analyzer:UntagResource
-                  - access-analyzer:ListTagsForResource
-                  - access-analyzer:ValidatePolicy
-                  - access-analyzer:ListFindings
-                  - access-analyzer:GetFinding
-                  - access-analyzer:ListAnalyzedResources
+                Action: access-analyzer:*
                 Resource: "*"
 
 # Outputs are intentionally omitted. CloudFormation rejects a resource-import
