@@ -13,6 +13,15 @@ Description: >
 
   Deploy order: standalone (no stack dependencies).
 
+  Legacy roles (deleted out-of-band, documented for audit history):
+    - mtga-companion-github-deploy-production: created 2026-05-02 under the
+      old MTGA-Companion naming; never imported into this template; deleted
+      2026-05-22 (S-11 / vault-mtg#2349) after confirming zero consumers in
+      CFN templates, GHA workflows, and scripts. Had 3 inline policies
+      (S3DeployArtifactsWrite, SSMParameterRead, SSMSendCommand) with a
+      trust policy scoped to repo:RdHamilton/vault-mtg:*. Superseded by
+      github-actions-oidc-deploy (active production role).
+
 Parameters:
   GitHubOrg:
     Type: String
