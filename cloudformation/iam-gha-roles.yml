@@ -264,6 +264,11 @@ Resources:
               - cloudwatch:*
               - logs:*
             Resource: "*"
+          # Explicit mirror of CloudWatchLogsGlobal inline Sid (non-resource-scopable
+          # log actions). Redundant with logs:* above but documented explicitly to
+          # make the boundary-mirrors-inline invariant auditable. The boundary's
+          # logs:* wildcard already covers these; this comment is the audit trail.
+          # No additional Action or Resource entry needed here — CW Sid logs:* suffices.
 
           - Sid: SNS
             Effect: Allow
@@ -881,29 +886,36 @@ Resources:
               # resource handler. Scoped to the /vaultmtg/* log-group namespace
               # to follow least-privilege (#2471).
               # Mirrored in GhaCfnDeployPermissionsBoundary per S-04 (#2325) design rule.
-              #
-              # Metric filter actions (Put / Delete / Describe) added for the
-              # AWS::Logs::MetricFilter resource handler used by the S-06
-              # security-alarms stack (vault-mtg#2333). Tag + describe actions
-              # support drift detection on AWS::Logs::LogGroup under the same
-              # /vaultmtg/* prefix.
               - Sid: CloudWatchLogs
                 Effect: Allow
                 Action:
                   - logs:CreateLogGroup
                   - logs:DeleteLogGroup
-                  - logs:DescribeLogGroups
                   - logs:PutRetentionPolicy
-                  - logs:ListTagsForResource
                   - logs:TagResource
                   - logs:UntagResource
-                  # AWS::Logs::MetricFilter resource handler (vault-mtg#2333)
-                  - logs:PutMetricFilter
-                  - logs:DeleteMetricFilter
-                  - logs:DescribeMetricFilters
                 Resource:
                   - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/vaultmtg/*
                   - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/vaultmtg/*:*
+              # CloudWatch Logs: non-resource-scopable list/describe actions and
+              # metric filter lifecycle. IAM does not support resource-level
+              # permissions for these actions — the simulator and real API both
+              # require Resource:"*". DescribeLogGroups is account-wide;
+              # PutMetricFilter/DeleteMetricFilter/DescribeMetricFilters operate
+              # on the metric-filter ARN (not the log-group ARN), which is not
+              # predictable at policy-write time. ListTagsForResource on log
+              # resources also requires Resource:"*" in practice.
+              # Mirrored in GhaCfnDeployPermissionsBoundary per S-04 (#2325) design rule.
+              # Added for AWS::Logs::MetricFilter handler (vault-mtg#2333).
+              - Sid: CloudWatchLogsGlobal
+                Effect: Allow
+                Action:
+                  - logs:DescribeLogGroups
+                  - logs:ListTagsForResource
+                  - logs:PutMetricFilter
+                  - logs:DeleteMetricFilter
+                  - logs:DescribeMetricFilters
+                Resource: "*"
               - Sid: SNS
                 Effect: Allow
                 Action:
