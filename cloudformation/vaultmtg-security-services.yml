@@ -151,15 +151,25 @@ Resources:
           Value: cloudformation
 
   # -----------------------------------------------------------------------
-  # Config configuration recorder
+  # Config configuration recorder + delivery channel
   #
   # AllSupported: true + IncludeGlobalResourceTypes: true gives full
   # account-wide coverage. R-11 (drift detection) imports this recorder
   # name via cross-stack export -- it MUST NOT create its own recorder
   # (only one configuration recorder is allowed per account per region).
+  #
+  # Known circular dependency: AWS::Config::ConfigurationRecorder fails to
+  # stabilize with NoAvailableDeliveryChannelException unless a delivery
+  # channel exists, and AWS::Config::DeliveryChannel.PutDeliveryChannel
+  # fails with NoAvailableConfigurationRecorderException unless a recorder
+  # exists. The standard workaround is to give BOTH resources a DependsOn
+  # pointing at the bucket policy only, so CFN creates them in parallel;
+  # AWS internally pairs them once both PutXxx API calls have returned.
   # -----------------------------------------------------------------------
   ConfigRecorder:
     Type: AWS::Config::ConfigurationRecorder
+    DependsOn:
+      - ConfigSnapshotBucketPolicy
     Properties:
       Name: !Sub "vaultmtg-${Environment}-recorder"
       RoleARN: !GetAtt ConfigRecorderRole.Arn
@@ -167,17 +177,10 @@ Resources:
         AllSupported: true
         IncludeGlobalResourceTypes: true
 
-  # -----------------------------------------------------------------------
-  # Config delivery channel
-  #
-  # Pairs the recorder with the snapshot bucket. The bucket policy must
-  # be in place before the delivery channel is created, hence DependsOn.
-  # -----------------------------------------------------------------------
   ConfigDeliveryChannel:
     Type: AWS::Config::DeliveryChannel
     DependsOn:
       - ConfigSnapshotBucketPolicy
-      - ConfigRecorder
     Properties:
       Name: !Sub "vaultmtg-${Environment}-delivery-channel"
       S3BucketName: !Ref ConfigSnapshotBucket
@@ -200,6 +203,7 @@ Resources:
   SecurityBaselineConformancePack:
     Type: AWS::Config::ConformancePack
     DependsOn:
+      - ConfigRecorder
       - ConfigDeliveryChannel
     Properties:
       ConformancePackName: vaultmtg-security-baseline
