@@ -1066,6 +1066,10 @@ Resources:
               # the AWS::AccessAnalyzer::Analyzer resource handler. Account-wide;
               # no resource-scoping at create time. Mirrored in
               # GhaCfnDeployPermissionsBoundary AA Sid per S-04 (#2325).
+              # Archive-rule + ListArchiveRules actions enumerated from the
+              # CFN resource schema handlers.read/handlers.update permission
+              # sets; ListArchiveRules failure was the root cause of the
+              # vaultmtg-security-services UPDATE_ROLLBACK on EC-5.
               - Sid: AccessAnalyzer
                 Effect: Allow
                 Action:
@@ -1073,6 +1077,10 @@ Resources:
                   - access-analyzer:DeleteAnalyzer
                   - access-analyzer:GetAnalyzer
                   - access-analyzer:ListAnalyzers
+                  - access-analyzer:ListArchiveRules
+                  - access-analyzer:CreateArchiveRule
+                  - access-analyzer:DeleteArchiveRule
+                  - access-analyzer:UpdateArchiveRule
                   - access-analyzer:UpdateAnalyzer
                   - access-analyzer:TagResource
                   - access-analyzer:UntagResource
