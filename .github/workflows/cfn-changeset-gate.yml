@@ -234,12 +234,12 @@ jobs:
               CHANGE_TYPE="UPDATE"
             else
               CHANGE_TYPE="CREATE"
-              echo "  Stack does not exist yet (status: $STACK_STATUS) — CREATE changeset."
+              echo "  Stack does not exist yet (status: $STACK_STATUS) -- CREATE changeset."
               echo "  CREATE changesets have no Replacement field; gate passes automatically."
               return 0
             fi
 
-            echo "  Stack status: $STACK_STATUS — running $CHANGE_TYPE changeset."
+            echo "  Stack status: $STACK_STATUS -- running $CHANGE_TYPE changeset."
 
             # Resolve parameters file (use stack-input name for parameters dir)
             local STACK_INPUT
@@ -249,16 +249,31 @@ jobs:
               PARAMS_ARG="--parameters file://cloudformation/parameters/${STACK_INPUT}.json"
             fi
 
+            # Upload template to S3 so --template-url is used instead of --template-body.
+            # Mirrors the deploy.yml path exactly — both now use the same S3-upload mechanism
+            # so templates exceeding the 51200-byte --template-body inline limit (#2499) are
+            # caught at the pre-merge gate rather than only at deploy time.
+            # IAM: gha-infra-cfn-deploy has s3:PutObject on
+            #   mtga-companion-deploy-artifacts-production/cfn-templates/* (S3DeployWrite Sid).
+            local GATE_BUCKET="mtga-companion-deploy-artifacts-production"
+            local GATE_S3_KEY="cfn-templates/gate-pr${{ github.event.pull_request.number }}/${CHANGESET_NAME}/${STACK_INPUT}.yml"
+            aws s3 cp "$TEMPLATE_FILE" "s3://${GATE_BUCKET}/${GATE_S3_KEY}" > /dev/null
+            local TEMPLATE_URL="https://${GATE_BUCKET}.s3.us-east-1.amazonaws.com/${GATE_S3_KEY}"
+            echo "  Template uploaded: s3://${GATE_BUCKET}/${GATE_S3_KEY}"
+
             # Create the changeset
             aws cloudformation create-change-set \
               --stack-name "$STACK_NAME" \
-              --template-body "file://$TEMPLATE_FILE" \
+              --template-url "$TEMPLATE_URL" \
               --change-set-name "$CHANGESET_NAME" \
               --change-set-type "$CHANGE_TYPE" \
               --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
               $PARAMS_ARG \
               --description "P-10 pre-merge gate: PR #${{ github.event.pull_request.number }}" \
               > /dev/null
+
+            # Clean up the uploaded template object (best-effort; orphan is harmless)
+            aws s3 rm "s3://${GATE_BUCKET}/${GATE_S3_KEY}" 2>/dev/null || true
 
             # Track for cleanup regardless of outcome. Append to the workspace
             # file so the if: always() cleanup step picks it up even if this

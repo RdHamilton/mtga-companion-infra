@@ -826,19 +826,26 @@ Resources:
                 Resource:
                   - arn:aws:s3:::vaultmtg-cloudtrail-logs-*
                   - arn:aws:s3:::vaultmtg-cloudtrail-logs-*/*
-              # Object-level grant for the bootstrap script upload step in deploy.yml.
-              # gha-infra-cfn-deploy uploads scripts/deploy/ec2-bootstrap.sh to the
-              # production artifacts bucket before deploying the ec2 stack (#2459).
-              # Scoped to bootstrap/* to follow least-privilege; the infra role must
-              # not have broad write access to the release artifact path.
+              # Object-level grant for deploy.yml upload steps in the production
+              # artifacts bucket (#2459, and template-size S3-upload fix):
+              #   bootstrap/*    -- ec2-bootstrap.sh uploaded before ec2 stack deploy
+              #   cfn-templates/* -- CloudFormation templates uploaded before changeset
+              #                      creation so --template-url replaces --template-body
+              #                      and bypasses the 51200-byte inline API limit
+              #   cfn-validate/*  -- temporary validate-template uploads (deleted post-validate)
+              # DeleteObject is required for cfn-validate/* cleanup in the Validate template step.
+              # Scoped to named prefixes to follow least-privilege.
               # Mirrored in GhaCfnDeployPermissionsBoundary per S-04 (#2325) design rule.
-              - Sid: S3BootstrapWrite
+              - Sid: S3DeployWrite
                 Effect: Allow
                 Action:
                   - s3:PutObject
                   - s3:GetObject
+                  - s3:DeleteObject
                 Resource:
                   - arn:aws:s3:::mtga-companion-deploy-artifacts-production/bootstrap/*
+                  - arn:aws:s3:::mtga-companion-deploy-artifacts-production/cfn-templates/*
+                  - arn:aws:s3:::mtga-companion-deploy-artifacts-production/cfn-validate/*
               - Sid: CloudFront
                 Effect: Allow
                 Action: cloudfront:*
