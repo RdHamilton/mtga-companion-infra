@@ -174,10 +174,10 @@ jobs:
           echo "Rebuild started at $(date -u --iso-8601=seconds) (epoch: $EPOCH)"
 
       - name: Checkout infra repo
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6 — SHA pinned (ticket #2385 AC3)
 
       - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v6
+        uses: aws-actions/configure-aws-credentials@796449b3e38e3c256861227399e58b780e0e5538  # v6 — SHA pinned (ticket #2385 AC3)
         with:
           role-to-assume: ${{ secrets.AWS_CFN_DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
@@ -317,7 +317,7 @@ jobs:
 
     steps:
       - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v6
+        uses: aws-actions/configure-aws-credentials@796449b3e38e3c256861227399e58b780e0e5538  # v6 — SHA pinned (ticket #2385 AC3)
         with:
           role-to-assume: ${{ secrets.AWS_CFN_DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
@@ -693,7 +693,7 @@ jobs:
 
     steps:
       - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v6
+        uses: aws-actions/configure-aws-credentials@796449b3e38e3c256861227399e58b780e0e5538  # v6 — SHA pinned (ticket #2385 AC3)
         with:
           role-to-assume: ${{ secrets.AWS_CFN_DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}

@@ -51,7 +51,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6 — SHA pinned (ticket #2385 AC3)
         with:
           fetch-depth: 0   # needed for git diff against base branch
 
@@ -133,7 +133,7 @@ jobs:
 
       - name: Configure AWS credentials
         if: steps.cfn_check.outputs.has_cfn_changes == 'true'
-        uses: aws-actions/configure-aws-credentials@v6
+        uses: aws-actions/configure-aws-credentials@796449b3e38e3c256861227399e58b780e0e5538  # v6 — SHA pinned (ticket #2385 AC3)
         with:
           role-to-assume: ${{ secrets.AWS_CFN_DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
@@ -172,7 +172,15 @@ jobs:
           TEMPLATES="$CHANGED_TEMPLATES"
           GATE_FAILED=false
           VIOLATIONS=""
-          CHANGESETS_TO_CLEAN=()
+
+          # Track every changeset we create in a workspace file so the
+          # follow-on "Cleanup gate changesets" step (if: always()) can
+          # delete them even when this step exits early due to a failure
+          # in check_stack, an aws CLI error, or set -euo pipefail.
+          # Format: one "STACK|CHANGESET" pair per line.
+          CHANGESET_TRACK_FILE="$RUNNER_TEMP/gate-changesets.txt"
+          : > "$CHANGESET_TRACK_FILE"
+          echo "changeset_track_file=$CHANGESET_TRACK_FILE" >> "$GITHUB_OUTPUT"
 
           # ---------------------------------------------------------------------------
           # Helper: resolve stack name from template filename.
@@ -252,8 +260,10 @@ jobs:
               --description "P-10 pre-merge gate: PR #${{ github.event.pull_request.number }}" \
               > /dev/null
 
-            # Track for cleanup regardless of outcome
-            CHANGESETS_TO_CLEAN+=("$STACK_NAME|$CHANGESET_NAME")
+            # Track for cleanup regardless of outcome. Append to the workspace
+            # file so the if: always() cleanup step picks it up even if this
+            # step exits early due to set -euo pipefail.
+            echo "${STACK_NAME}|${CHANGESET_NAME}" >> "$CHANGESET_TRACK_FILE"
 
             # Wait for changeset computation (FAILED is normal when there are no changes)
             aws cloudformation wait change-set-create-complete \
@@ -349,19 +359,11 @@ jobs:
           done
 
           # ---------------------------------------------------------------------------
-          # Cleanup: delete all gate changesets regardless of outcome
+          # NOTE: Changeset cleanup is performed in a separate step below with
+          # if: always() so that orphans are deleted even when this step exits
+          # early due to a failed aws CLI call, a python parse failure, or any
+          # other set -euo pipefail trigger (ticket #2385 AC2).
           # ---------------------------------------------------------------------------
-          echo ""
-          echo "Cleaning up gate changesets..."
-          for ENTRY in "${CHANGESETS_TO_CLEAN[@]:-}"; do
-            if [ -z "$ENTRY" ]; then continue; fi
-            CLEAN_STACK="${ENTRY%%|*}"
-            CLEAN_CS="${ENTRY##*|}"
-            aws cloudformation delete-change-set \
-              --stack-name "$CLEAN_STACK" \
-              --change-set-name "$CLEAN_CS" 2>/dev/null || true
-            echo "  Deleted: $CLEAN_STACK / $CLEAN_CS"
-          done
 
           # ---------------------------------------------------------------------------
           # Gate decision
@@ -403,6 +405,45 @@ jobs:
           fi
           echo "=========================================="
 
+      # ---------------------------------------------------------------------------
+      # Cleanup gate changesets (ticket #2385 AC2).
+      #
+      # Runs with if: always() so orphan changesets are deleted on every outcome:
+      #   - gate PASS / FAIL / BYPASS
+      #   - any earlier step exiting via set -euo pipefail (aws CLI error,
+      #     python parse failure, missing parameters file, etc.)
+      #   - workflow cancellation
+      #
+      # Reads the track file written by the gate step. Each line is
+      # "STACK|CHANGESET". Missing track file means the gate step exited before
+      # creating any changesets — nothing to do.
+      # ---------------------------------------------------------------------------
+      - name: Cleanup gate changesets
+        if: always() && steps.cfn_check.outputs.has_cfn_changes == 'true'
+        env:
+          CHANGESET_TRACK_FILE: ${{ steps.gate.outputs.changeset_track_file }}
+        run: |
+          set +e  # best-effort cleanup; never fail the workflow here
+
+          if [ -z "${CHANGESET_TRACK_FILE:-}" ] || [ ! -f "$CHANGESET_TRACK_FILE" ]; then
+            echo "No changeset track file found — gate step exited before creating any changesets. Nothing to clean."
+            exit 0
+          fi
+
+          echo "Cleaning up gate changesets recorded in $CHANGESET_TRACK_FILE..."
+          CLEANED=0
+          while IFS='|' read -r CLEAN_STACK CLEAN_CS; do
+            if [ -z "$CLEAN_STACK" ] || [ -z "$CLEAN_CS" ]; then
+              continue
+            fi
+            aws cloudformation delete-change-set \
+              --stack-name "$CLEAN_STACK" \
+              --change-set-name "$CLEAN_CS" 2>/dev/null
+            echo "  Deleted: $CLEAN_STACK / $CLEAN_CS"
+            CLEANED=$((CLEANED + 1))
+          done < "$CHANGESET_TRACK_FILE"
+          echo "Cleanup complete — ${CLEANED} changeset(s) removed."
+
   # ---------------------------------------------------------------------------
   # S-10: Validate IAM policies in changed CloudFormation templates
   #
@@ -426,7 +467,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6 — SHA pinned (ticket #2385 AC3)
         with:
           fetch-depth: 0
 
@@ -458,7 +499,7 @@ jobs:
 
       - name: Configure AWS credentials
         if: steps.cfn_check.outputs.has_cfn_changes == 'true'
-        uses: aws-actions/configure-aws-credentials@v6
+        uses: aws-actions/configure-aws-credentials@796449b3e38e3c256861227399e58b780e0e5538  # v6 — SHA pinned (ticket #2385 AC3)
         with:
           role-to-assume: ${{ secrets.AWS_CFN_DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}

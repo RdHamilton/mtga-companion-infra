@@ -250,6 +250,60 @@ Resources:
           Value: !Ref Environment
 
   # ---------------------------------------------------------
+  # Explicit topic access control (Sarah #54, ticket #2385 AC1).
+  #
+  # Without an explicit TopicPolicy, SNS falls back to an implicit policy
+  # that grants the topic owner full management, but service-principal
+  # Publish access is undefined for cross-account / cross-service callers.
+  # CloudWatch and EventBridge inside the same account CAN publish without
+  # an explicit policy, but the gap leaves us no audit trail and no way to
+  # add additional publishers safely. This policy makes the trust surface
+  # explicit:
+  #
+  #   - cloudwatch.amazonaws.com  : CloudWatch Alarm actions in this stack
+  #                                 plus the S-06 security alarms stack
+  #                                 (security-alarms.yml) that imports
+  #                                 vaultmtg-${Environment}-AlertTopicArn.
+  #   - events.amazonaws.com      : EventBridge (forward-compatible — not
+  #                                 currently used, but lets us add EventBridge
+  #                                 rule targets without re-deploying this
+  #                                 stack first).
+  #
+  # The aws:SourceAccount condition restricts each principal to publishing
+  # only from this AWS account, preventing the confused-deputy pattern.
+  #
+  # Publish is the only action allowed; topic management (Subscribe, Delete,
+  # SetTopicAttributes, etc.) remains restricted to the topic owner under
+  # the implicit default policy.
+  # ---------------------------------------------------------
+  AlertTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics:
+        - !Ref AlertTopic
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowCloudWatchAlarmsPublish
+            Effect: Allow
+            Principal:
+              Service: cloudwatch.amazonaws.com
+            Action: sns:Publish
+            Resource: !Ref AlertTopic
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref "AWS::AccountId"
+          - Sid: AllowEventBridgePublish
+            Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sns:Publish
+            Resource: !Ref AlertTopic
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref "AWS::AccountId"
+
+  # ---------------------------------------------------------
   # Chat webhook subscription (conditional)
   #
   # An https subscription that posts alarm notifications to a chat
