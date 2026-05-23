@@ -93,6 +93,8 @@ Resources:
   # ===========================================================================
   GhaCfnDeployPermissionsBoundary:
     Type: AWS::IAM::ManagedPolicy
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       ManagedPolicyName: gha-cfn-deploy-permissions-boundary
       Description: "Permissions boundary for gha-infra-cfn-deploy: excludes secretsmanager GetSecretValue/PutSecretValue and grants only specific iam: actions (never iam:*). See RdHamilton/vault-mtg#2325."
@@ -367,6 +369,7 @@ Resources:
     # permit it -- the recurring ACCESS DENIED failure on this stack.
     DependsOn: GhaCfnDeployPermissionsBoundary
     DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       RoleName: github-actions-oidc-deploy
       AssumeRolePolicyDocument:
@@ -488,6 +491,7 @@ Resources:
     # update BEFORE updating this role -- see GhaAppDeployRole rationale.
     DependsOn: GhaCfnDeployPermissionsBoundary
     DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       RoleName: gha-infra-sync-deploy
       Description: GitHub Actions OIDC role for mtga-companion-infra sync Lambda deploy workflow (main branch only)
@@ -556,6 +560,7 @@ Resources:
     # roles that do NOT !Ref the boundary -- GhaAppDeployRole and
     # GhaInfraSyncDeployRole -- carry an explicit DependsOn instead.
     DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       RoleName: gha-infra-cfn-deploy
       Description: GitHub Actions OIDC role for mtga-companion-infra CloudFormation deploy workflow
