@@ -298,7 +298,46 @@ jobs:
               --change-set-name "$CHANGESET_NAME" || true
           fi
 
+      - name: Detect empty changeset
+        # Issue #2460: when triggered from the auto-deploy-on-merge workflow,
+        # a push may touch a CloudFormation template with no resource-level
+        # effect (comment edit, whitespace, parameter reordering). The
+        # resulting changeset has status FAILED with reason
+        # "The submitted information didn't contain changes" (or "No updates
+        # are to be performed.") and cannot be executed.
+        #
+        # Treat that case as a successful no-op: delete the empty changeset
+        # and short-circuit the rest of the job so no-op merges don't break
+        # auto-deploy. Any other changeset failure is still fatal.
+        id: empty_check
+        run: |
+          STATUS=$(aws cloudformation describe-change-set \
+            --stack-name "${{ env.STACK_NAME }}" \
+            --change-set-name "${{ steps.changeset.outputs.changeset_name }}" \
+            --query 'Status' --output text)
+          REASON=$(aws cloudformation describe-change-set \
+            --stack-name "${{ env.STACK_NAME }}" \
+            --change-set-name "${{ steps.changeset.outputs.changeset_name }}" \
+            --query 'StatusReason' --output text)
+          echo "Changeset status: $STATUS"
+          echo "Changeset reason: $REASON"
+
+          # No-change detection — match both wordings AWS uses for empty changesets.
+          if [ "$STATUS" = "FAILED" ] && echo "$REASON" | grep -qE "didn't contain changes|No updates are to be performed"; then
+            echo "Empty changeset detected (no resource changes). Cleaning up and exiting cleanly."
+            aws cloudformation delete-change-set \
+              --stack-name "${{ env.STACK_NAME }}" \
+              --change-set-name "${{ steps.changeset.outputs.changeset_name }}" || true
+            echo "empty=true" >> "$GITHUB_OUTPUT"
+          elif [ "$STATUS" = "FAILED" ]; then
+            echo "::error::Changeset creation FAILED for a non-empty-changeset reason: $REASON"
+            exit 1
+          else
+            echo "empty=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Show changeset
+        if: steps.empty_check.outputs.empty != 'true'
         run: |
           aws cloudformation describe-change-set \
             --stack-name "${{ env.STACK_NAME }}" \
@@ -313,8 +352,9 @@ jobs:
         # re-run the workflow with confirm_replacements=true.
         #
         # Skipped on dry_run because dry_run never executes the changeset anyway.
+        # Skipped on empty changeset (issue #2460) — no changes means no replacements.
         id: replacement_check
-        if: ${{ !inputs.dry_run }}
+        if: ${{ !inputs.dry_run && steps.empty_check.outputs.empty != 'true' }}
         run: |
           CHANGES=$(aws cloudformation describe-change-set \
             --stack-name "${{ env.STACK_NAME }}" \
@@ -347,7 +387,8 @@ jobs:
             || true  # best-effort; don't fail the workflow if already gone
 
       - name: Execute changeset
-        if: ${{ !inputs.dry_run }}
+        # Skipped on empty changeset (issue #2460) — nothing to execute.
+        if: ${{ !inputs.dry_run && steps.empty_check.outputs.empty != 'true' }}
         run: |
           aws cloudformation execute-change-set \
             --stack-name "${{ env.STACK_NAME }}" \
@@ -371,7 +412,8 @@ jobs:
         # This step forces the retention policy onto each imported log group so that
         # the live state matches the template immediately after import.
         # Idempotent: safe to re-run; no-op if retention is already correct.
-        if: ${{ inputs.stack == 'logs-import' && !inputs.dry_run }}
+        # Skipped on empty changeset (issue #2460) — no import occurred.
+        if: ${{ inputs.stack == 'logs-import' && !inputs.dry_run && steps.empty_check.outputs.empty != 'true' }}
         run: |
           RETENTION_DAYS=30
           for LG in \
