@@ -1,0 +1,55 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  VaultMTG - Route 53 A record for staging-api.vaultmtg.app.
+  Points the staging API subdomain at the staging EC2 Elastic IP.
+  Deploy after the ec2-sg-staging and ec2-staging stacks are stable.
+  Deploy order: ec2-sg-staging -> ec2-staging -> dns-staging
+
+Parameters:
+  HostedZoneId:
+    Type: AWS::Route53::HostedZone::Id
+    Description: >
+      Route 53 hosted zone ID for vaultmtg.app.
+      Value: Z0998299Z86TCLNNF1LS
+
+  ElasticIP:
+    Type: String
+    Description: >
+      Staging EC2 Elastic IP address (output ElasticIPAddress from mtga-companion-ec2-staging stack).
+      Update parameters/dns-staging.json with this value before deploying.
+
+  TTL:
+    Type: Number
+    Default: 60
+    MinValue: 60
+    MaxValue: 86400
+    Description: DNS record TTL in seconds (60s for staging to allow fast iteration)
+
+Resources:
+
+  # ---------------------------------------------------------
+  # A record: staging-api.vaultmtg.app -> staging EC2 Elastic IP
+  # ---------------------------------------------------------
+  StagingApiARecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: staging-api.vaultmtg.app.
+      Type: A
+      TTL: !Ref TTL
+      ResourceRecords:
+        - !Ref ElasticIP
+      Comment: VaultMTG staging API subdomain - points at dedicated staging EC2 (not production)
+
+Outputs:
+  StagingApiDomain:
+    Description: Staging API domain pointing to staging EC2
+    Value: https://staging-api.vaultmtg.app
+    Export:
+      Name: !Sub "${AWS::StackName}-StagingApiDomain"
+
+  StagingApiIP:
+    Description: Staging EC2 EIP for the staging API A record
+    Value: !Ref ElasticIP
+    Export:
+      Name: !Sub "${AWS::StackName}-StagingApiIP"

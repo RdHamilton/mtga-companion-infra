@@ -10,8 +10,11 @@ on:
         options:
           - deploy-artifacts
           - ec2-sg
+          - ec2-sg-staging
           - rds
           - ec2
+          - ec2-staging
+          - dns-staging
           - vpc
           - rhamiltoneng-dns
           - sync-lambda
@@ -75,6 +78,9 @@ jobs:
             staging-deploy-role)        STACK_NAME="mtga-companion-staging-deploy-role" ; TEMPLATE_NAME="${{ inputs.stack }}" ;;
             logs-import)                STACK_NAME="mtga-companion-logs" ;                TEMPLATE_NAME="logs" ;;
             rhamiltoneng-cdn)           STACK_NAME="rhamiltoneng-cdn" ;                   TEMPLATE_NAME="${{ inputs.stack }}" ;;
+            ec2-sg-staging)             STACK_NAME="mtga-companion-ec2-sg-staging" ;      TEMPLATE_NAME="ec2-sg" ;;
+            ec2-staging)                STACK_NAME="mtga-companion-ec2-staging" ;         TEMPLATE_NAME="ec2" ;;
+            dns-staging)                STACK_NAME="mtga-companion-dns-staging" ;         TEMPLATE_NAME="dns-staging" ;;
             *)                          STACK_NAME="mtga-companion-${{ inputs.stack }}" ; TEMPLATE_NAME="${{ inputs.stack }}" ;;
           esac
           echo "STACK_NAME=$STACK_NAME" >> $GITHUB_ENV
@@ -315,18 +321,26 @@ jobs:
           fi
           echo "✓ Template valid"
 
-      - name: Upload bootstrap script (ec2 stack only)
-        # Uploads scripts/deploy/ec2-bootstrap.sh to the production artifacts bucket
-        # before the ec2 stack is created/updated. The UserData stub fetches this script
-        # at instance launch. Skipped for all other stacks.
-        # S3 path: s3://mtga-companion-deploy-artifacts-production/bootstrap/ec2-bootstrap.sh
-        # IAM: gha-infra-cfn-deploy has s3:PutObject on that bucket path (iam-gha-roles.yml).
-        if: ${{ inputs.stack == 'ec2' && !inputs.dry_run }}
+      - name: Upload bootstrap script (ec2 / ec2-staging stacks only)
+        # Uploads the appropriate bootstrap script to the artifacts bucket before
+        # the ec2 or ec2-staging stack is created/updated. The UserData stub
+        # fetches s3://<bucket>/bootstrap/ec2-bootstrap.sh at instance launch.
+        # Production: scripts/deploy/ec2-bootstrap.sh        -> s3://mtga-companion-deploy-artifacts-production/bootstrap/
+        # Staging:    scripts/deploy/ec2-bootstrap-staging.sh -> s3://mtga-companion-deploy-artifacts-staging/bootstrap/
+        # IAM: gha-infra-cfn-deploy has s3:PutObject on both bucket paths (iam-gha-roles.yml).
+        if: ${{ (inputs.stack == 'ec2' || inputs.stack == 'ec2-staging') && !inputs.dry_run }}
         run: |
-          aws s3 cp scripts/deploy/ec2-bootstrap.sh \
-            s3://mtga-companion-deploy-artifacts-production/bootstrap/ec2-bootstrap.sh \
+          if [ "${{ inputs.stack }}" = "ec2-staging" ]; then
+            BOOTSTRAP_BUCKET="mtga-companion-deploy-artifacts-staging"
+            BOOTSTRAP_SRC="scripts/deploy/ec2-bootstrap-staging.sh"
+          else
+            BOOTSTRAP_BUCKET="mtga-companion-deploy-artifacts-production"
+            BOOTSTRAP_SRC="scripts/deploy/ec2-bootstrap.sh"
+          fi
+          aws s3 cp "${BOOTSTRAP_SRC}" \
+            s3://${BOOTSTRAP_BUCKET}/bootstrap/ec2-bootstrap.sh \
             --region us-east-1
-          echo "Bootstrap script uploaded to S3"
+          echo "Bootstrap script uploaded to s3://${BOOTSTRAP_BUCKET}/bootstrap/ec2-bootstrap.sh"
 
       - name: Load parameters
         id: params
