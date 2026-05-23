@@ -82,7 +82,12 @@ Resources:
           # Path B -- GitHub OIDC (end state).
           # staging-deploy.yml assumes this role in the GHA runner after the
           # Bob-owned Path B refactor lands (vault-mtg#2364 sect4A.3).
-          # sub claim pinned to refs/heads/main: only the canonical deploy branch.
+          # sub claims:
+          #   refs/heads/main  -- canonical push-to-main / workflow_dispatch deploy path
+          #   environment:staging -- staging-deploy.yml runs under environment: staging;
+          #                         its OIDC sub is repo:org/repo:environment:staging,
+          #                         not a ref sub. Both must be accepted or the
+          #                         assume-role call fails at cutover.
           - Sid: GitHubOIDCTrust
             Effect: Allow
             Principal:
@@ -91,7 +96,9 @@ Resources:
             Condition:
               StringEquals:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
-                token.actions.githubusercontent.com:sub: !Sub "repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/main"
+                token.actions.githubusercontent.com:sub:
+                  - !Sub "repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/main"
+                  - !Sub "repo:${GitHubOrg}/${GitHubRepo}:environment:staging"
       Policies:
         # SSM reads: exactly the staging parameter paths provision-staging-env.sh
         # enumerates. Both the current flat paths and the post-cutover app sub-path
