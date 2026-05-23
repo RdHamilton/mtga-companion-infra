@@ -429,23 +429,64 @@ Resources:
           Value: !Ref Environment
 
   # ---------------------------------------------------------
+  # BFF HTTP 5xx metric filter (R-23, ticket #2363)
+  #
+  # Counts HTTP 5xx response lines in the nginx access log group
+  # and emits one custom metric per matched event into MTGA/BFF::Http5xxCount.
+  #
+  # This metric filter replaces the previous systemd-timer-based
+  # publisher (scripts/install-bff-5xx-metric.sh) which required
+  # an out-of-band SSM step on every EC2 replacement -- a classic
+  # operational change activation coupling defect: the alarm shipped
+  # to production with no metric source running, so it remained
+  # silently in OK regardless of real 5xx rate.
+  #
+  # The filter operates on the log group already provisioned by
+  # cloudformation/logs.yml (NginxLogGroup, /vaultmtg/${Environment}/nginx)
+  # which is fed by the CloudWatch Agent installed via ec2-bootstrap.sh.
+  # No additional IAM is required; metric filters operate inside CWL.
+  #
+  # Pattern: standard nginx combined-log format positional filter.
+  # Field 6 (status_code) prefix-matches "5*" to capture 5xx responses.
+  # Tested via aws logs test-metric-filter against real production logs;
+  # matches 500, 503; excludes 200, 301.
+  #
+  # Cost: one custom metric (MTGA/BFF::Http5xxCount @ Environment dim).
+  # Standard CWL data-ingest charges already apply for the log group.
+  # ---------------------------------------------------------
+  Bff5xxMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Sub "/vaultmtg/${Environment}/nginx"
+      FilterName: !Sub "vault-mtg-${Environment}-bff-5xx"
+      FilterPattern: '[ip, ident, user, ts, request, status_code=5*, size, ...]'
+      MetricTransformations:
+        - MetricNamespace: MTGA/BFF
+          MetricName: Http5xxCount
+          MetricValue: "1"
+          DefaultValue: 0
+          Unit: Count
+          Dimensions:
+            - Key: Environment
+              Value: !Ref Environment
+
+  # ---------------------------------------------------------
   # BFF HTTP 5xx rate alarm (AC1)
   #
   # Fires when the count of HTTP 5xx responses served by nginx
   # in front of the BFF exceeds Bff5xxThreshold within a
   # 5-minute window for Bff5xxEvaluationPeriods consecutive periods.
   #
-  # Metric source: a systemd timer on the EC2 instance that
-  # tails the nginx access log, counts 5xx lines in the last
-  # 60 s, and publishes the count via cloudwatch put-metric-data.
-  # Install via scripts/install-bff-5xx-metric.sh.
+  # Metric source: Bff5xxMetricFilter (above) extracts the count
+  # from the nginx access log group /vaultmtg/${Environment}/nginx.
   #
   # Namespace : MTGA/BFF
   # MetricName: Http5xxCount
   # Dimension : Environment=<environment>
   #
   # TreatMissingData=notBreaching: at very low traffic the metric
-  # may not be emitted in every period. No 5xx data == no errors.
+  # filter emits zero per matched event; sum over a period with no
+  # 5xx events is the DefaultValue (0). No 5xx data == no errors.
   # ---------------------------------------------------------
   Bff5xxAlarm:
     Type: AWS::CloudWatch::Alarm
