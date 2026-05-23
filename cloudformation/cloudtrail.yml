@@ -1,7 +1,8 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
   VaultMTG - Basic single-region (us-east-1) CloudTrail trail capturing
-  management events only, delivering to one dedicated KMS-encrypted S3 bucket.
+  management events only, delivering to one dedicated KMS-encrypted S3 bucket
+  AND to a dedicated CloudWatch Logs log group for real-time metric filters.
   Deploy order: standalone (no cross-stack imports required).
 
   Scope decision (Ramone, 2026-05-21): the enterprise-tier gold-plating
@@ -9,6 +10,13 @@ Description: >
   S3 data-event selectors) was descoped. The account is solo-operated, so a
   basic audit trail is the right observability floor for a solo-dev beta.
   See ADR-0025.
+
+  CloudWatch Logs integration (vault-mtg#2333, S-06):
+  The trail now also publishes events to a dedicated log group so the
+  security-alarms stack can attach CloudWatch metric filters for root account
+  usage and IAM credential writes. The CWL log group + delivery IAM role are
+  managed by this stack so they share the trail's lifecycle; the metric
+  filters and alarms are owned by cloudformation/security-alarms.yml.
 
 # ---------------------------------------------------------------------------
 # Parameters
@@ -176,6 +184,71 @@ Resources:
                 aws:SecureTransport: "false"
 
   # -----------------------------------------------------------------------
+  # CloudWatch Logs -- destination for real-time trail events
+  #
+  # CloudTrail can fan out events to a CloudWatch Logs log group in addition
+  # to the S3 bucket. We use this fanout to attach metric filters that drive
+  # the S-06 security alarms (root account usage, IAM credential writes).
+  # See cloudformation/security-alarms.yml for the filters and alarms.
+  #
+  # Retention: 90 days. Long-term archival lives in the S3 bucket above
+  # (retained indefinitely); the CWL group is for near-real-time analysis.
+  # KMS: AWS-managed key (the CloudTrail KMS key cannot be used here without
+  # a separate grant; the solo-dev threat model does not justify the extra
+  # operational surface).
+  # -----------------------------------------------------------------------
+  CloudTrailLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: !Sub "/vaultmtg/cloudtrail/${Environment}"
+      RetentionInDays: 90
+      Tags:
+        - Key: Project
+          Value: vault-mtg
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: cloudformation
+
+  # IAM role assumed by the CloudTrail service to write events into the
+  # log group above. The role name is bound to the vaultmtg-* prefix so
+  # the gha-infra-cfn-deploy role's IAMPassAndManageScoped statement can
+  # pass it to CloudTrail.
+  CloudTrailLogsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "vaultmtg-cloudtrail-cwl-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: cloudtrail-cwl-publish
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: AWSCloudTrailCreateLogStream
+                Effect: Allow
+                Action: logs:CreateLogStream
+                Resource: !GetAtt CloudTrailLogGroup.Arn
+              - Sid: AWSCloudTrailPutLogEvents
+                Effect: Allow
+                Action: logs:PutLogEvents
+                Resource: !GetAtt CloudTrailLogGroup.Arn
+      Tags:
+        - Key: Project
+          Value: vault-mtg
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: cloudformation
+
+  # -----------------------------------------------------------------------
   # CloudTrail trail -- single-region, management events only
   #
   # IsMultiRegionTrail: false  -- single-region (us-east-1) trail.
@@ -183,6 +256,10 @@ Resources:
   #   events still land in this trail.
   # EnableLogFileValidation: descoped (see ADR-0025).
   # No S3 data-event selectors (descoped).
+  #
+  # CloudWatchLogsLogGroupArn + CloudWatchLogsRoleArn: fan trail events
+  # into the CloudTrailLogGroup above so the security-alarms stack can
+  # attach metric filters (vault-mtg#2333, S-06).
   # -----------------------------------------------------------------------
   CloudTrailTrail:
     Type: AWS::CloudTrail::Trail
@@ -195,6 +272,8 @@ Resources:
       IsMultiRegionTrail: false
       IsLogging: true
       KMSKeyId: !GetAtt CloudTrailKMSKey.Arn
+      CloudWatchLogsLogGroupArn: !GetAtt CloudTrailLogGroup.Arn
+      CloudWatchLogsRoleArn: !GetAtt CloudTrailLogsRole.Arn
 
       # Management events only (read + write). No data-event selectors.
       EventSelectors:
@@ -237,3 +316,18 @@ Outputs:
     Value: !Ref CloudTrailKMSKey
     Export:
       Name: !Sub "vaultmtg-${Environment}-CloudTrailKMSKeyId"
+
+  CloudTrailLogGroupName:
+    Description: |
+      Name of the CloudWatch Logs log group receiving CloudTrail events.
+      Imported by cloudformation/security-alarms.yml to attach the S-06
+      metric filters.
+    Value: !Ref CloudTrailLogGroup
+    Export:
+      Name: !Sub "vaultmtg-${Environment}-CloudTrailLogGroupName"
+
+  CloudTrailLogGroupArn:
+    Description: ARN of the CloudWatch Logs log group receiving CloudTrail events.
+    Value: !GetAtt CloudTrailLogGroup.Arn
+    Export:
+      Name: !Sub "vaultmtg-${Environment}-CloudTrailLogGroupArn"

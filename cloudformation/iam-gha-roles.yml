@@ -869,14 +869,31 @@ Resources:
               # resource handler. Scoped to the /vaultmtg/* log-group namespace
               # to follow least-privilege (#2471).
               # Mirrored in GhaCfnDeployPermissionsBoundary per S-04 (#2325) design rule.
+              #
+              # Metric filter actions (Put / Delete / Describe) added for the
+              # AWS::Logs::MetricFilter resource handler used by the S-06
+              # security-alarms stack (vault-mtg#2333). Tag + describe + KMS
+              # association actions support drift detection on AWS::Logs::LogGroup
+              # under the same /vaultmtg/* prefix.
               - Sid: CloudWatchLogs
                 Effect: Allow
                 Action:
                   - logs:CreateLogGroup
-                  - logs:PutRetentionPolicy
                   - logs:DeleteLogGroup
+                  - logs:DescribeLogGroups
+                  - logs:PutRetentionPolicy
+                  - logs:ListTagsForResource
+                  - logs:TagResource
+                  - logs:UntagResource
+                  - logs:AssociateKmsKey
+                  - logs:DisassociateKmsKey
+                  # AWS::Logs::MetricFilter resource handler (vault-mtg#2333)
+                  - logs:PutMetricFilter
+                  - logs:DeleteMetricFilter
+                  - logs:DescribeMetricFilters
                 Resource:
                   - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/vaultmtg/*
+                  - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/vaultmtg/*:*
               - Sid: SNS
                 Effect: Allow
                 Action:

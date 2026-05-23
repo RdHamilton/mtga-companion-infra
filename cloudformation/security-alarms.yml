@@ -1,0 +1,154 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: |
+  VaultMTG S-06 core security alarms (vault-mtg#2333). CIS AWS Foundations
+  Benchmark v3.0.0 controls 3.3 (root account usage) and 3.4 (IAM credential
+  writes). Two CloudWatch metric filters attached to the CloudTrail log group,
+  each backing an alarm that publishes to the shared alerts SNS topic.
+  Imports: CloudTrailLogGroupName (cloudtrail stack), AlertTopicArn
+  (cloudwatch-alarms stack). Deploy order: cloudtrail -> cloudwatch-alarms
+  -> security-alarms.
+
+Parameters:
+
+  Environment:
+    Type: String
+    Default: production
+    AllowedValues: [production, staging]
+    Description: Deployment environment (production or staging).
+
+  MetricNamespace:
+    Type: String
+    Default: VaultMTG/Security
+    Description: |
+      CloudWatch namespace under which the S-06 metric filters publish
+      their counts. Bound to the project so the metrics group with other
+      VaultMTG/* dashboards.
+
+Resources:
+
+  # ---------------------------------------------------------------------
+  # Root account usage metric filter
+  #
+  # CIS 3.3: detect any use of the AWS account root user.
+  # The exclusion of invokedBy + AwsServiceEvent suppresses the routine
+  # AWS-service-internal events (e.g. billing reports) that surface as
+  # root activity but are not a human signing in.
+  # ---------------------------------------------------------------------
+  RootAccountUsageMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName:
+        Fn::ImportValue: !Sub "vaultmtg-${Environment}-CloudTrailLogGroupName"
+      FilterName: !Sub "vaultmtg-${Environment}-root-account-usage"
+      FilterPattern: '{ $.userIdentity.type = "Root" && $.userIdentity.invokedBy NOT EXISTS && $.eventType != "AwsServiceEvent" }'
+      MetricTransformations:
+        - MetricNamespace: !Ref MetricNamespace
+          MetricName: RootAccountUsageEventCount
+          MetricValue: "1"
+          DefaultValue: 0
+          Unit: Count
+
+  RootAccountUsageAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "vaultmtg-${Environment}-root-account-usage"
+      AlarmDescription: |
+        The AWS account root user invoked an API. The root user must never be
+        used for day-to-day work; a single hit warrants immediate investigation.
+
+        1. Identify the actor:
+             aws cloudtrail lookup-events --lookup-attributes \
+               AttributeKey=Username,AttributeValue=Root --max-results 5
+        2. Confirm whether the activity was sanctioned (rare break-glass tasks
+           such as root-only billing changes). If unsanctioned, treat as P0:
+             - rotate the root password
+             - reset the root MFA device
+             - audit recent IAM and billing console activity
+        3. File an incident report regardless of outcome (CIS 3.3).
+        Runbook: vault-mtg-docs/engineering/runbooks/cloudwatch-alarms-runbook.md
+      Namespace: !Ref MetricNamespace
+      MetricName: RootAccountUsageEventCount
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      # No events == no root usage. The alarm should sit in OK, not in
+      # INSUFFICIENT_DATA, when the trail is healthy and quiet.
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - Fn::ImportValue: !Sub "vaultmtg-${Environment}-AlertTopicArn"
+      OKActions:
+        - Fn::ImportValue: !Sub "vaultmtg-${Environment}-AlertTopicArn"
+
+  # ---------------------------------------------------------------------
+  # IAM credential writes metric filter
+  #
+  # CIS 3.4: detect changes to IAM identity policies and attachments.
+  # Routine CloudFormation deploys produce these events when the IAM
+  # stack is updated, so the alarm is informational rather than P0 by
+  # itself -- but any unexpected hit outside a known deploy window is a
+  # privilege-escalation signal.
+  # ---------------------------------------------------------------------
+  IAMCredentialWritesMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName:
+        Fn::ImportValue: !Sub "vaultmtg-${Environment}-CloudTrailLogGroupName"
+      FilterName: !Sub "vaultmtg-${Environment}-iam-credential-writes"
+      FilterPattern: '{ ($.eventName = DeleteGroupPolicy) || ($.eventName = DeleteRolePolicy) || ($.eventName = DeleteUserPolicy) || ($.eventName = PutGroupPolicy) || ($.eventName = PutRolePolicy) || ($.eventName = PutUserPolicy) || ($.eventName = CreatePolicy) || ($.eventName = DeletePolicy) || ($.eventName = CreatePolicyVersion) || ($.eventName = DeletePolicyVersion) || ($.eventName = SetDefaultPolicyVersion) || ($.eventName = AttachRolePolicy) || ($.eventName = DetachRolePolicy) || ($.eventName = AttachUserPolicy) || ($.eventName = DetachUserPolicy) || ($.eventName = AttachGroupPolicy) || ($.eventName = DetachGroupPolicy) }'
+      MetricTransformations:
+        - MetricNamespace: !Ref MetricNamespace
+          MetricName: IAMCredentialWriteEventCount
+          MetricValue: "1"
+          DefaultValue: 0
+          Unit: Count
+
+  IAMCredentialWritesAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "vaultmtg-${Environment}-iam-credential-writes"
+      AlarmDescription: |
+        One or more IAM identity-policy writes were detected. Expected during
+        an iam-gha-roles or other IAM CloudFormation deploy; unexpected at
+        all other times.
+
+        1. Correlate with active deploys:
+             gh run list --repo RdHamilton/mtga-companion-infra --workflow deploy.yml --limit 5
+           If a deploy ran within the alarm window and the change set targets
+           the IAM resources, the hit is sanctioned -- acknowledge and move on.
+        2. If no deploy is in flight, look up the offending events:
+             aws cloudtrail lookup-events --lookup-attributes \
+               AttributeKey=EventName,AttributeValue=PutRolePolicy --max-results 10
+           (repeat for the other event names in the filter pattern)
+        3. If the actor is not a sanctioned automation principal, treat as P1:
+             - revoke the offending session
+             - revert the IAM change via the previous CFN stack version
+             - file an incident report (CIS 3.4)
+        Runbook: vault-mtg-docs/engineering/runbooks/cloudwatch-alarms-runbook.md
+      Namespace: !Ref MetricNamespace
+      MetricName: IAMCredentialWriteEventCount
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - Fn::ImportValue: !Sub "vaultmtg-${Environment}-AlertTopicArn"
+      OKActions:
+        - Fn::ImportValue: !Sub "vaultmtg-${Environment}-AlertTopicArn"
+
+Outputs:
+
+  RootAccountUsageAlarmArn:
+    Description: ARN of the CIS 3.3 root account usage CloudWatch alarm.
+    Value: !GetAtt RootAccountUsageAlarm.Arn
+    Export:
+      Name: !Sub "vaultmtg-${Environment}-RootAccountUsageAlarmArn"
+
+  IAMCredentialWritesAlarmArn:
+    Description: ARN of the CIS 3.4 IAM credential writes CloudWatch alarm.
+    Value: !GetAtt IAMCredentialWritesAlarm.Arn
+    Export:
+      Name: !Sub "vaultmtg-${Environment}-IAMCredentialWritesAlarmArn"
