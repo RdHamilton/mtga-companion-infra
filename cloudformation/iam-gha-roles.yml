@@ -1090,11 +1090,15 @@ Resources:
                   - access-analyzer:CreateArchiveRule
                   - access-analyzer:DeleteArchiveRule
                   - access-analyzer:UpdateArchiveRule
+                  - access-analyzer:GetArchiveRule
                   - access-analyzer:UpdateAnalyzer
                   - access-analyzer:TagResource
                   - access-analyzer:UntagResource
                   - access-analyzer:ListTagsForResource
                   - access-analyzer:ValidatePolicy
+                  - access-analyzer:ListFindings
+                  - access-analyzer:GetFinding
+                  - access-analyzer:ListAnalyzedResources
                 Resource: "*"
 
 # Outputs are intentionally omitted. CloudFormation rejects a resource-import
