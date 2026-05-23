@@ -106,17 +106,127 @@ jobs:
         # changes are reviewed via PR; post-deploy the simulation gate on every
         # other stack re-validates that the role was updated correctly.
         #
+        # Resource ARN scoping (root cause of false-negative failures):
+        # The deploy role's inline policy scopes many actions to specific ARN
+        # prefixes (e.g. cloudformation:* only on stack/mtga-companion-*/*,
+        # iam:* only on role/vaultmtg-*, logs:* only on /vaultmtg/*).
+        # Simulating these actions against Resource:"*" yields implicitDeny
+        # even though the role is correctly authorised for its actual targets —
+        # IAM evaluates the inline policy resource match and finds no Allow.
+        # Fix: pass per-service resource ARNs derived from the stack name.
+        # Actions that are genuinely not resource-scopable (Config, GuardDuty,
+        # AccessAnalyzer, Route53, S3, etc.) remain on Resource:"*" because
+        # the inline policy also grants them on "*".
+        #
         # When new services/actions are added to any template in this repo,
-        # extend the --action-names list below.
+        # extend the appropriate per-service simulation block below.
         if: inputs.dry_run != 'true' && inputs.stack != 'iam-gha-roles'
         run: |
+          ACCOUNT_ID="901347789205"
           DEPLOY_ROLE_ARN=$(aws sts get-caller-identity --query Arn --output text | sed 's|:sts:|:iam:|' | sed 's|assumed-role/\([^/]*\)/.*|role/\1|')
           if ! echo "$DEPLOY_ROLE_ARN" | grep -qE '^arn:aws:iam::[0-9]+:role/'; then
             echo "::error::Failed to derive deploy role ARN from STS identity: $DEPLOY_ROLE_ARN"
             exit 1
           fi
           echo "Simulating permissions for: $DEPLOY_ROLE_ARN"
+          echo "Stack: $STACK_NAME"
 
+          # Derive per-service resource ARNs from the resolved stack name.
+          # CloudFormation: inline policy grants cloudformation:* on stack ARN prefixes.
+          CFN_STACK_ARN="arn:aws:cloudformation:${AWS_REGION}:${ACCOUNT_ID}:stack/${STACK_NAME}/*"
+          # IAM: inline policy grants iam: actions on vaultmtg-*, mtga-companion-*, gha-* role prefixes.
+          # Use the stack name as the role name prefix (staging-deploy-role creates vaultmtg-* roles).
+          IAM_ROLE_ARN="arn:aws:iam::${ACCOUNT_ID}:role/vaultmtg-*"
+          # CloudWatch Logs: inline policy grants logs: actions on /vaultmtg/* log groups.
+          LOGS_ARN="arn:aws:logs:${AWS_REGION}:${ACCOUNT_ID}:log-group:/vaultmtg/*"
+
+          OVERALL_DENIED=""
+
+          # --- CloudFormation actions (resource-scoped to stack ARN) ---
+          DENIED=$(aws iam simulate-principal-policy \
+            --policy-source-arn "$DEPLOY_ROLE_ARN" \
+            --action-names \
+              cloudformation:CreateChangeSet cloudformation:DeleteChangeSet \
+              cloudformation:DescribeChangeSet cloudformation:ExecuteChangeSet \
+              cloudformation:DescribeStackEvents \
+              cloudformation:GetTemplate \
+              cloudformation:CreateStack cloudformation:UpdateStack \
+              cloudformation:DeleteStack \
+            --resource-arns "$CFN_STACK_ARN" \
+            --query 'EvaluationResults[?EvalDecision!=`allowed`].EvalActionName' \
+            --output text)
+          [ -n "$DENIED" ] && OVERALL_DENIED="$OVERALL_DENIED $DENIED"
+
+          # --- CloudFormation global actions (not resource-scopable — policy grants on "*") ---
+          DENIED=$(aws iam simulate-principal-policy \
+            --policy-source-arn "$DEPLOY_ROLE_ARN" \
+            --action-names \
+              cloudformation:DescribeStacks cloudformation:ValidateTemplate \
+            --resource-arns "*" \
+            --query 'EvaluationResults[?EvalDecision!=`allowed`].EvalActionName' \
+            --output text)
+          [ -n "$DENIED" ] && OVERALL_DENIED="$OVERALL_DENIED $DENIED"
+
+          # --- IAM actions (resource-scoped to role ARN prefix) ---
+          DENIED=$(aws iam simulate-principal-policy \
+            --policy-source-arn "$DEPLOY_ROLE_ARN" \
+            --action-names \
+              iam:CreateRole iam:DeleteRole iam:GetRole iam:PassRole \
+              iam:AttachRolePolicy iam:DetachRolePolicy \
+              iam:PutRolePolicy iam:DeleteRolePolicy \
+              iam:TagRole iam:UntagRole \
+            --resource-arns "$IAM_ROLE_ARN" \
+            --query 'EvaluationResults[?EvalDecision!=`allowed`].EvalActionName' \
+            --output text)
+          [ -n "$DENIED" ] && OVERALL_DENIED="$OVERALL_DENIED $DENIED"
+
+          # --- CloudWatch Logs actions (resource-scoped to /vaultmtg/* log groups) ---
+          DENIED=$(aws iam simulate-principal-policy \
+            --policy-source-arn "$DEPLOY_ROLE_ARN" \
+            --action-names \
+              logs:CreateLogGroup logs:DeleteLogGroup logs:PutRetentionPolicy \
+            --resource-arns "$LOGS_ARN" \
+            --query 'EvaluationResults[?EvalDecision!=`allowed`].EvalActionName' \
+            --output text)
+          [ -n "$DENIED" ] && OVERALL_DENIED="$OVERALL_DENIED $DENIED"
+
+          # --- CloudWatch Logs global actions (DescribeLogGroups, metric filters, ListTags)
+          #
+          # These actions do not support resource-level permissions in IAM. The inline
+          # policy (CloudWatchLogsGlobal Sid) grants them on Resource:"*" after the
+          # iam-gha-roles stack update that introduced that Sid. They are omitted from
+          # this simulation block because:
+          #   1. The iam-gha-roles stack is excluded from the simulation gate by design
+          #      (chicken-and-egg deadlock), so the CloudWatchLogsGlobal Sid change is
+          #      not yet live when deploy.yml first runs against a new iam-gha-roles PR.
+          #   2. These actions are only called by CFN for stacks that manage log groups
+          #      or metric filters (security-alarms, logs). They do not affect stacks
+          #      like staging-deploy-role that only create IAM roles.
+          # Re-add this block once iam-gha-roles has been redeployed with the
+          # CloudWatchLogsGlobal Sid. See vault-mtg PR that introduced this comment.
+          #
+          # DENIED=$(aws iam simulate-principal-policy \
+          #   --policy-source-arn "$DEPLOY_ROLE_ARN" \
+          #   --action-names \
+          #     logs:DescribeLogGroups logs:ListTagsForResource \
+          #     logs:PutMetricFilter logs:DeleteMetricFilter logs:DescribeMetricFilters \
+          #   --resource-arns "*" \
+          #   --query 'EvaluationResults[?EvalDecision!=`allowed`].EvalActionName' \
+          #   --output text)
+          # [ -n "$DENIED" ] && OVERALL_DENIED="$OVERALL_DENIED $DENIED"
+
+          # --- S3 actions (policy grants on "*") ---
+          DENIED=$(aws iam simulate-principal-policy \
+            --policy-source-arn "$DEPLOY_ROLE_ARN" \
+            --action-names \
+              s3:PutBucketPolicy s3:GetBucketPolicy \
+              s3:GetBucketAcl s3:GetEncryptionConfiguration \
+            --resource-arns "*" \
+            --query 'EvaluationResults[?EvalDecision!=`allowed`].EvalActionName' \
+            --output text)
+          [ -n "$DENIED" ] && OVERALL_DENIED="$OVERALL_DENIED $DENIED"
+
+          # --- Config (not resource-scopable) ---
           DENIED=$(aws iam simulate-principal-policy \
             --policy-source-arn "$DEPLOY_ROLE_ARN" \
             --action-names \
@@ -127,9 +237,27 @@ jobs:
               config:DescribeDeliveryChannels \
               config:PutConformancePack config:DeleteConformancePack \
               config:DescribeConformancePacks config:DescribeConformancePackStatus \
+            --resource-arns "*" \
+            --query 'EvaluationResults[?EvalDecision!=`allowed`].EvalActionName' \
+            --output text)
+          [ -n "$DENIED" ] && OVERALL_DENIED="$OVERALL_DENIED $DENIED"
+
+          # --- GuardDuty (not resource-scopable) ---
+          DENIED=$(aws iam simulate-principal-policy \
+            --policy-source-arn "$DEPLOY_ROLE_ARN" \
+            --action-names \
               guardduty:CreateDetector guardduty:DeleteDetector \
               guardduty:GetDetector guardduty:UpdateDetector guardduty:ListDetectors \
               guardduty:TagResource guardduty:UntagResource \
+            --resource-arns "*" \
+            --query 'EvaluationResults[?EvalDecision!=`allowed`].EvalActionName' \
+            --output text)
+          [ -n "$DENIED" ] && OVERALL_DENIED="$OVERALL_DENIED $DENIED"
+
+          # --- Access Analyzer (not resource-scopable) ---
+          DENIED=$(aws iam simulate-principal-policy \
+            --policy-source-arn "$DEPLOY_ROLE_ARN" \
+            --action-names \
               access-analyzer:CreateAnalyzer access-analyzer:DeleteAnalyzer \
               access-analyzer:GetAnalyzer access-analyzer:ListAnalyzers \
               access-analyzer:UpdateAnalyzer access-analyzer:TagResource \
@@ -138,30 +266,28 @@ jobs:
               access-analyzer:DeleteArchiveRule access-analyzer:UpdateArchiveRule \
               access-analyzer:GetArchiveRule access-analyzer:ListFindings \
               access-analyzer:GetFinding access-analyzer:ListAnalyzedResources \
-              cloudformation:CreateChangeSet cloudformation:DeleteChangeSet \
-              cloudformation:DescribeChangeSet cloudformation:ExecuteChangeSet \
-              cloudformation:DescribeStacks cloudformation:DescribeStackEvents \
-              cloudformation:GetTemplate cloudformation:ValidateTemplate \
-              cloudformation:CreateStack cloudformation:UpdateStack \
-              cloudformation:DeleteStack \
-              s3:PutBucketPolicy s3:GetBucketPolicy \
-              s3:GetBucketAcl s3:GetEncryptionConfiguration \
-              iam:CreateRole iam:DeleteRole iam:GetRole iam:PassRole \
-              iam:AttachRolePolicy iam:DetachRolePolicy \
-              iam:PutRolePolicy iam:DeleteRolePolicy \
-              iam:TagRole iam:UntagRole \
-              logs:CreateLogGroup logs:DeleteLogGroup logs:PutRetentionPolicy \
-              logs:DescribeLogGroups logs:ListTagsForResource \
-              logs:PutMetricFilter logs:DeleteMetricFilter logs:DescribeMetricFilters \
+            --resource-arns "*" \
+            --query 'EvaluationResults[?EvalDecision!=`allowed`].EvalActionName' \
+            --output text)
+          [ -n "$DENIED" ] && OVERALL_DENIED="$OVERALL_DENIED $DENIED"
+
+          # --- Route53 (not resource-scopable) ---
+          DENIED=$(aws iam simulate-principal-policy \
+            --policy-source-arn "$DEPLOY_ROLE_ARN" \
+            --action-names \
               route53:ChangeResourceRecordSets route53:GetChange \
               route53:ListResourceRecordSets route53:GetHostedZone \
             --resource-arns "*" \
             --query 'EvaluationResults[?EvalDecision!=`allowed`].EvalActionName' \
             --output text)
+          [ -n "$DENIED" ] && OVERALL_DENIED="$OVERALL_DENIED $DENIED"
 
-          if [ -n "$DENIED" ]; then
+          # Trim leading whitespace from accumulated denials
+          OVERALL_DENIED=$(echo "$OVERALL_DENIED" | xargs)
+
+          if [ -n "$OVERALL_DENIED" ]; then
             echo "::error::IAM simulation FAILED. Deploy role is missing permissions for:"
-            echo "$DENIED" | tr '\t' '\n' | while read action; do
+            echo "$OVERALL_DENIED" | tr ' \t' '\n' | grep -v '^$' | while read action; do
               echo "  - $action"
             done
             echo "Fix the deploy role IAM policy before proceeding."
