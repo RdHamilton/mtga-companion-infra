@@ -77,6 +77,9 @@ jobs:
       # with the `inputs.stack` choice list in .github/workflows/deploy.yml.
       # Each entry is the resolved AWS stack name (NOT the template filename).
       # Stacks must fall under the IAM scope listed in the workflow header.
+      # Note: rhamiltoneng-cdn and rhamiltoneng-dns are out of the gha-infra-cfn-deploy
+      # role's CFN scope (mtga-companion-*, vaultmtg-*, vault-mtg-* only) and would 403
+      # if added here.  Follow-up ticket required to widen IAM scope before adding.
       STACKS: >-
         mtga-companion-cloudwatch-alarms
         mtga-companion-deploy-artifacts
@@ -91,6 +94,7 @@ jobs:
         vaultmtg-app-cdn
         vaultmtg-cloudtrail
         vaultmtg-cloudwatch-dashboards
+        vaultmtg-dns
         vaultmtg-security-services
 
     steps:
