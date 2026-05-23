@@ -341,6 +341,15 @@ jobs:
             echo "No resource replacements detected in changeset."
           fi
 
+      - name: Cleanup orphaned changeset on guard failure
+        if: failure()
+        run: |
+          aws cloudformation delete-change-set \
+            --stack-name "${{ env.STACK_NAME }}" \
+            --change-set-name "${{ steps.changeset.outputs.changeset_name }}" \
+            --region us-east-1 \
+            || true  # best-effort; don't fail the workflow if already gone
+
       - name: Execute changeset
         if: ${{ !inputs.dry_run }}
         run: |
