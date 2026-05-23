@@ -350,6 +350,22 @@ Resources:
   # ---------------------------------------------------------
   # EC2 Instance
   # ---------------------------------------------------------
+  #
+  # S-15 (EBS encryption) notes:
+  #   - The account-level setting ec2:EnableEbsEncryptionByDefault was
+  #     enabled 2026-05-23 (#2352) -- any new EBS volume created in
+  #     us-east-1 is now encrypted with alias/aws/ebs by default, with no
+  #     BlockDeviceMappings override required here.
+  #   - The CURRENT production root volume (vol-0ce953579f619787a) predates
+  #     that setting and is unencrypted. It will be re-created encrypted
+  #     when this instance is replaced as part of the R-02 / R-13 vaultmtg
+  #     namespace cutover (board #38, gated by #2373).
+  #   - Intentionally not adding BlockDeviceMappings + Encrypted:true here:
+  #     that property change forces instance replacement, which is the work
+  #     R-13 owns. Triggering it here would short-circuit R-13's sequencing
+  #     and DNS coordination. When R-13 lands, it can add an explicit
+  #     BlockDeviceMappings override for defense-in-depth.
+  #
   EC2Instance:
     Type: AWS::EC2::Instance
     DeletionPolicy: Retain
