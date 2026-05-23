@@ -399,8 +399,16 @@ log "rsyslog configured."
 
 # Fix nginx log group ownership so cwagent (added to the nginx group)
 # can read existing and future log files.
+#
+# A running cwagent process retains its original supplementary group list — adding
+# it to the nginx group via `usermod` has no effect on an already-running daemon.
+# Restart the agent immediately so the new group membership takes effect before
+# it tries to tail /var/log/nginx/*.log. Without this restart, the agent silently
+# emits "permission denied" on every nginx log read and the BFF 5xx CWL metric
+# filter (R-23, #2363) sees zero events on real 5xx traffic. Ref: #143.
 chown nginx:nginx /var/log/nginx/access.log /var/log/nginx/error.log 2>/dev/null || true
 usermod -a -G nginx cwagent 2>/dev/null || true
+systemctl restart amazon-cloudwatch-agent 2>/dev/null || true
 
 # ---------------------------------------------------------
 # 10. CloudWatch Agent configuration
