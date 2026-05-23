@@ -1,11 +1,9 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
-  MTGA Companion - Deploy artifacts S3 buckets and GitHub Actions OIDC deploy role.
-  Provides the production S3 bucket for BFF binary artifacts and the IAM role
-  that GitHub Actions assumes via OIDC to upload binaries and trigger SSM deploys.
-  The staging bucket (mtga-companion-deploy-artifacts-staging) was created out-of-band
-  by the staging-deploy workflow and is referenced here only by ARN for IAM grants;
-  importing it into this stack is tracked separately.
+  MTGA Companion - Deploy artifacts S3 bucket and GitHub Actions OIDC provider.
+  Provides the production S3 bucket for BFF binary artifacts and the OIDC provider
+  for GitHub Actions federation. The deploy IAM role (mtga-companion-github-deploy-production)
+  was removed in PR #113 and now lives in iam-gha-roles.yml.
   Deploy order: deploy-artifacts (standalone, no dependencies).
 
 Parameters:
@@ -15,23 +13,6 @@ Parameters:
     AllowedValues: [production, staging]
     Description: Deployment environment
 
-  GitHubOrg:
-    Type: String
-    Default: RdHamilton
-    Description: GitHub organization or user name
-
-  GitHubRepo:
-    Type: String
-    Default: vault-mtg
-    Description: GitHub repository name (app repo)
-
-  StagingArtifactsBucketName:
-    Type: String
-    Default: mtga-companion-deploy-artifacts-staging
-    Description: >
-      Name of the staging deploy artifacts bucket. The bucket is currently
-      managed out-of-band by the staging-deploy workflow; this template only
-      grants the GitHub Actions deploy role access to it by ARN.
 
 Resources:
 
@@ -84,159 +65,9 @@ Resources:
         - Key: Environment
           Value: !Ref Environment
 
-  # ---------------------------------------------------------
-  # IAM role assumed by GitHub Actions via OIDC
-  # Covers both production and staging artifact buckets so that
-  # staging-deploy.yml and release.yml can use the same role ARN
-  # stored in the AWS_DEPLOY_ROLE_ARN repository secret.
-  # ---------------------------------------------------------
-  GitHubActionsDeployRole:
-    Type: AWS::IAM::Role
-    Properties:
-      RoleName: !Sub "mtga-companion-github-deploy-${Environment}"
-      AssumeRolePolicyDocument:
-        Version: "2012-10-17"
-        Statement:
-          - Effect: Allow
-            Principal:
-              Federated: !Ref GitHubOIDCProvider
-            Action: sts:AssumeRoleWithWebIdentity
-            Condition:
-              StringEquals:
-                token.actions.githubusercontent.com:aud: sts.amazonaws.com
-              StringLike:
-                token.actions.githubusercontent.com:sub: !Sub "repo:${GitHubOrg}/${GitHubRepo}:*"
-      Policies:
-        - PolicyName: S3DeployArtifactsWrite
-          PolicyDocument:
-            Version: "2012-10-17"
-            Statement:
-              # Production deploy artifacts bucket
-              - Sid: ProductionBucketAccess
-                Effect: Allow
-                Action:
-                  - s3:PutObject
-                  - s3:GetObject
-                  - s3:DeleteObject
-                  - s3:ListBucket
-                Resource:
-                  - !GetAtt DeployArtifactsBucket.Arn
-                  - !Sub "${DeployArtifactsBucket.Arn}/*"
-              # Staging deploy artifacts bucket
-              # The bucket is managed out-of-band; grant access by ARN.
-              # PutBucketVersioning/GetBucketVersioning are required because
-              # staging-deploy.yml calls `aws s3api put-bucket-versioning`
-              # to ensure versioning is enabled idempotently.
-              - Sid: StagingBucketAccess
-                Effect: Allow
-                Action:
-                  - s3:PutObject
-                  - s3:GetObject
-                  - s3:DeleteObject
-                  - s3:ListBucket
-                  - s3:CreateBucket
-                  - s3:PutBucketVersioning
-                  - s3:GetBucketVersioning
-                Resource:
-                  - !Sub "arn:aws:s3:::${StagingArtifactsBucketName}"
-                  - !Sub "arn:aws:s3:::${StagingArtifactsBucketName}/*"
-        - PolicyName: SSMSendCommand
-          PolicyDocument:
-            Version: "2012-10-17"
-            Statement:
-              - Effect: Allow
-                Action:
-                  - ssm:SendCommand
-                Resource:
-                  - !Sub "arn:aws:ssm:us-east-1::document/AWS-RunShellScript"
-              - Effect: Allow
-                Action:
-                  - ssm:SendCommand
-                Resource:
-                  - !Sub "arn:aws:ec2:us-east-1:${AWS::AccountId}:instance/*"
-                Condition:
-                  StringEquals:
-                    aws:ResourceTag/Project: mtga-companion
-              - Effect: Allow
-                Action:
-                  - ssm:GetCommandInvocation
-                  - ssm:ListCommandInvocations
-                Resource: "*"
-        # Grants the deploy runner read access to SSM parameters used during
-        # the BFF deploy pipeline (ALLOWED_ORIGINS, CLERK_SECRET_KEY, db-*, etc.)
-        # and the SPA/marketing deploy pipeline (spa-*, marketing-* under
-        # /vaultmtg/{production,staging}/).
-        #
-        # OQ-4 resolution (2026-05-21): deploy-spa.yml and deploy-spa-staging.yml
-        # use the same AWS_DEPLOY_ROLE_ARN secret (this role), so the SPA pipeline's
-        # /vaultmtg/{production,staging}/spa-* and marketing-* paths must be retained
-        # as a separate statement. They are enumerated explicitly (not wildcard) to
-        # avoid re-exposing integration tokens under /vaultmtg/staging/*.
-        #
-        # SecureString parameters require kms:Decrypt on the SSM KMS key.
-        - PolicyName: SSMParameterRead
-          PolicyDocument:
-            Version: "2012-10-17"
-            Statement:
-              # ---------------------------------------------------------------
-              # BFF deploy paths — legacy /mtga-companion/* (retained during
-              # Phase 5c cutover window; removed in Phase 5d).
-              # ---------------------------------------------------------------
-              - Sid: LegacyMtgaCompanionBffPaths
-                Effect: Allow
-                Action:
-                  - ssm:GetParameter
-                  - ssm:GetParameters
-                Resource:
-                  - !Sub "arn:aws:ssm:us-east-1:${AWS::AccountId}:parameter/mtga-companion/production/*"
-                  - !Sub "arn:aws:ssm:us-east-1:${AWS::AccountId}:parameter/mtga-companion/staging/*"
-              # ---------------------------------------------------------------
-              # BFF deploy paths — new canonical /vaultmtg/app/{env}/* namespace
-              # (R-13). Replaces the over-broad /vaultmtg/{production,staging}/*
-              # blanket grants from Phase 5a.
-              # ---------------------------------------------------------------
-              - Sid: VaultmtgAppBffPaths
-                Effect: Allow
-                Action:
-                  - ssm:GetParameter
-                  - ssm:GetParameters
-                Resource:
-                  - !Sub "arn:aws:ssm:us-east-1:${AWS::AccountId}:parameter/vaultmtg/app/production/*"
-                  - !Sub "arn:aws:ssm:us-east-1:${AWS::AccountId}:parameter/vaultmtg/app/staging/*"
-              # ---------------------------------------------------------------
-              # SPA/marketing deploy paths — /vaultmtg/{production,staging}/spa-*
-              # and marketing-*. Enumerated explicitly to avoid granting access to
-              # integration tokens (/vaultmtg/staging/clerk-*, resend, discord, etc.)
-              # that also live under /vaultmtg/staging/*.
-              #
-              # OQ-4: these paths are needed because deploy-spa.yml and
-              # deploy-spa-staging.yml assume this same role.
-              # ---------------------------------------------------------------
-              - Sid: SpaMktDeployPaths
-                Effect: Allow
-                Action:
-                  - ssm:GetParameter
-                  - ssm:GetParameters
-                Resource:
-                  - !Sub "arn:aws:ssm:us-east-1:${AWS::AccountId}:parameter/vaultmtg/production/spa-bucket-name"
-                  - !Sub "arn:aws:ssm:us-east-1:${AWS::AccountId}:parameter/vaultmtg/production/spa-distribution-id"
-                  - !Sub "arn:aws:ssm:us-east-1:${AWS::AccountId}:parameter/vaultmtg/production/marketing-bucket-name"
-                  - !Sub "arn:aws:ssm:us-east-1:${AWS::AccountId}:parameter/vaultmtg/production/marketing-distribution-id"
-                  - !Sub "arn:aws:ssm:us-east-1:${AWS::AccountId}:parameter/vaultmtg/staging/spa-bucket-name"
-                  - !Sub "arn:aws:ssm:us-east-1:${AWS::AccountId}:parameter/vaultmtg/staging/spa-distribution-id"
-              - Sid: SSMKMSDecrypt
-                Effect: Allow
-                Action:
-                  - kms:Decrypt
-                Resource: !Sub "arn:aws:kms:us-east-1:${AWS::AccountId}:key/*"
-                Condition:
-                  StringEquals:
-                    kms:ViaService: ssm.us-east-1.amazonaws.com
-      Tags:
-        - Key: Project
-          Value: mtga-companion
-        - Key: Environment
-          Value: !Ref Environment
+  # NOTE: GitHubActionsDeployRole (mtga-companion-github-deploy-production) was
+  # deleted from IAM via PR #113. The resource block has been removed from this
+  # template to reconcile drift. The replacement role lives in iam-gha-roles.yml.
 
 Outputs:
   DeployBucketName:
@@ -245,14 +76,3 @@ Outputs:
     Export:
       Name: !Sub "${AWS::StackName}-DeployBucketName"
 
-  StagingDeployBucketName:
-    Description: S3 bucket name for staging deploy artifacts (managed out-of-band)
-    Value: !Ref StagingArtifactsBucketName
-    Export:
-      Name: !Sub "${AWS::StackName}-StagingDeployBucketName"
-
-  GitHubActionsDeployRoleArn:
-    Description: IAM role ARN for GitHub Actions to assume via OIDC
-    Value: !GetAtt GitHubActionsDeployRole.Arn
-    Export:
-      Name: !Sub "${AWS::StackName}-GitHubActionsDeployRoleArn"
