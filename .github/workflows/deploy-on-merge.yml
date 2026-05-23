@@ -98,7 +98,6 @@ jobs:
             [cloudwatch-dashboards.yml]="cloudwatch-dashboards"
             [deploy-artifacts.yml]="deploy-artifacts"
             [dns-staging.yml]="dns-staging"
-            [dns.yml]="dns"
             [ec2-sg.yml]="ec2-sg"
             [ec2.yml]="ec2"
             [iam-break-glass.yml]="iam-break-glass"
