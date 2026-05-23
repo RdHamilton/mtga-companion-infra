@@ -24,6 +24,7 @@ on:
           - logs-import
           - cdn
           - iam-gha-roles
+          - iam-break-glass
           - cloudtrail
           - security-alarms
           - staging-deploy-role
@@ -69,6 +70,7 @@ jobs:
             rhamiltoneng-dns)           STACK_NAME="rhamiltoneng-dns" ;                   TEMPLATE_NAME="${{ inputs.stack }}" ;;
             dns-staging)                STACK_NAME="mtga-companion-dns-staging" ;         TEMPLATE_NAME="${{ inputs.stack }}" ;;
             iam-gha-roles)              STACK_NAME="mtga-companion-iam-gha-roles" ;       TEMPLATE_NAME="${{ inputs.stack }}" ;;
+            iam-break-glass)            STACK_NAME="vaultmtg-iam-break-glass" ;           TEMPLATE_NAME="${{ inputs.stack }}" ;;
             cloudwatch-alarms-staging)  STACK_NAME="mtga-companion-cloudwatch-alarms-staging" ; TEMPLATE_NAME="cloudwatch-alarms" ;;
             cloudtrail)                 STACK_NAME="vaultmtg-cloudtrail" ;                TEMPLATE_NAME="${{ inputs.stack }}" ;;
             security-alarms)            STACK_NAME="vaultmtg-security-alarms" ;          TEMPLATE_NAME="${{ inputs.stack }}" ;;
