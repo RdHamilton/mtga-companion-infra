@@ -107,6 +107,7 @@ Resources:
               - arn:aws:cloudformation:us-east-1:901347789205:stack/mtga-companion-*/*
               - arn:aws:cloudformation:us-east-1:901347789205:stack/vaultmtg-*/*
               - arn:aws:cloudformation:us-east-1:901347789205:stack/vault-mtg-*/*
+              - arn:aws:cloudformation:us-east-1:901347789205:stack/rhamiltoneng-*/*
 
           # mirrors inline CloudFormationGlobal
           - Sid: CfnGlobal
@@ -592,6 +593,7 @@ Resources:
                   - arn:aws:cloudformation:us-east-1:901347789205:stack/mtga-companion-*/*
                   - arn:aws:cloudformation:us-east-1:901347789205:stack/vaultmtg-*/*
                   - arn:aws:cloudformation:us-east-1:901347789205:stack/vault-mtg-*/*
+                  - arn:aws:cloudformation:us-east-1:901347789205:stack/rhamiltoneng-*/*
               - Sid: CloudFormationGlobal
                 Effect: Allow
                 Action:
@@ -905,12 +907,14 @@ Resources:
               - Sid: SNS
                 Effect: Allow
                 Action:
+                  - sns:ConfirmSubscription
                   - sns:CreateTopic
                   - sns:DeleteTopic
                   - sns:GetSubscriptionAttributes
                   - sns:GetTopicAttributes
                   - sns:ListSubscriptionsByTopic
                   - sns:ListTagsForResource
+                  - sns:SetSubscriptionAttributes
                   - sns:SetTopicAttributes
                   - sns:Subscribe
                   - sns:TagResource
