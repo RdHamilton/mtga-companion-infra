@@ -165,10 +165,11 @@ jobs:
         id: gate
         env:
           ALLOW_REPLACEMENT: ${{ vars.ALLOW_REPLACEMENT }}
+          CHANGED_TEMPLATES: ${{ steps.detect.outputs.changed_templates }}
         run: |
           set -euo pipefail
 
-          TEMPLATES="${{ steps.detect.outputs.changed_templates }}"
+          TEMPLATES="$CHANGED_TEMPLATES"
           GATE_FAILED=false
           VIOLATIONS=""
           CHANGESETS_TO_CLEAN=()
@@ -467,11 +468,13 @@ jobs:
 
       - name: Run accessanalyzer validate-policy on every PolicyDocument
         if: steps.cfn_check.outputs.has_cfn_changes == 'true'
+        env:
+          CHANGED_TEMPLATES_RAW: ${{ steps.cfn_check.outputs.changed_templates }}
         run: |
           set -euo pipefail
 
           # Iterate over every changed template
-          CHANGED_TEMPLATES=$(echo "${{ steps.cfn_check.outputs.changed_templates }}" | tr '\n' ' ')
+          CHANGED_TEMPLATES=$(echo "$CHANGED_TEMPLATES_RAW" | tr '\n' ' ')
           TOTAL_FINDINGS=0
           OVERALL_OK=true
 
