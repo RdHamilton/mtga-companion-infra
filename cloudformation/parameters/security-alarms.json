@@ -1,0 +1,4 @@
+[
+  { "ParameterKey": "Environment",     "ParameterValue": "production" },
+  { "ParameterKey": "MetricNamespace", "ParameterValue": "VaultMTG/Security" }
+]

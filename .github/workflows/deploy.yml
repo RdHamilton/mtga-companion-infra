@@ -24,6 +24,7 @@ on:
           - cdn
           - iam-gha-roles
           - cloudtrail
+          - security-alarms
           - staging-deploy-role
           - vaultmtg-security-services
           - vaultmtg-security-services-import
@@ -68,6 +69,7 @@ jobs:
             iam-gha-roles)              STACK_NAME="mtga-companion-iam-gha-roles" ;       TEMPLATE_NAME="${{ inputs.stack }}" ;;
             cloudwatch-alarms-staging)  STACK_NAME="mtga-companion-cloudwatch-alarms-staging" ; TEMPLATE_NAME="cloudwatch-alarms" ;;
             cloudtrail)                 STACK_NAME="vaultmtg-cloudtrail" ;                TEMPLATE_NAME="${{ inputs.stack }}" ;;
+            security-alarms)            STACK_NAME="vaultmtg-security-alarms" ;          TEMPLATE_NAME="${{ inputs.stack }}" ;;
             vaultmtg-security-services) STACK_NAME="vaultmtg-security-services" ;        TEMPLATE_NAME="${{ inputs.stack }}" ;;
             vaultmtg-security-services-import) STACK_NAME="vaultmtg-security-services" ; TEMPLATE_NAME="${{ inputs.stack }}" ;;
             cloudwatch-dashboards)      STACK_NAME="vaultmtg-cloudwatch-dashboards" ;     TEMPLATE_NAME="${{ inputs.stack }}" ;;
@@ -149,6 +151,9 @@ jobs:
               iam:AttachRolePolicy iam:DetachRolePolicy \
               iam:PutRolePolicy iam:DeleteRolePolicy \
               iam:TagRole iam:UntagRole \
+              logs:CreateLogGroup logs:DeleteLogGroup logs:PutRetentionPolicy \
+              logs:DescribeLogGroups logs:ListTagsForResource \
+              logs:PutMetricFilter logs:DeleteMetricFilter logs:DescribeMetricFilters \
             --resource-arns "*" \
             --query 'EvaluationResults[?EvalDecision!=`allowed`].EvalActionName' \
             --output text)
