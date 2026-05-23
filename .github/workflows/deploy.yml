@@ -28,7 +28,6 @@ on:
           - security-alarms
           - staging-deploy-role
           - vaultmtg-security-services
-          - vaultmtg-security-services-import
           - rhamiltoneng-cdn
       dry_run:
         description: Dry run — validate and show changeset only, do not deploy
@@ -74,7 +73,6 @@ jobs:
             cloudtrail)                 STACK_NAME="vaultmtg-cloudtrail" ;                TEMPLATE_NAME="${{ inputs.stack }}" ;;
             security-alarms)            STACK_NAME="vaultmtg-security-alarms" ;          TEMPLATE_NAME="${{ inputs.stack }}" ;;
             vaultmtg-security-services) STACK_NAME="vaultmtg-security-services" ;        TEMPLATE_NAME="${{ inputs.stack }}" ;;
-            vaultmtg-security-services-import) STACK_NAME="vaultmtg-security-services" ; TEMPLATE_NAME="${{ inputs.stack }}" ;;
             cloudwatch-dashboards)      STACK_NAME="vaultmtg-cloudwatch-dashboards" ;     TEMPLATE_NAME="${{ inputs.stack }}" ;;
             staging-deploy-role)        STACK_NAME="mtga-companion-staging-deploy-role" ; TEMPLATE_NAME="${{ inputs.stack }}" ;;
             logs-import)                STACK_NAME="mtga-companion-logs" ;                TEMPLATE_NAME="logs" ;;
@@ -229,17 +227,7 @@ jobs:
           #   by the AWS::EarlyValidation::ResourceExistenceCheck hook. IMPORT adopts
           #   them into CFN management without recreating them. Subsequent updates use
           #   the normal UPDATE path (select "logs" once the stack exists).
-          #
-          # vaultmtg-security-services-import:
-          #   The ConfigSnapshotBucket (vaultmtg-config-snapshots-<env>-<account>) was
-          #   retained from prior CREATE_FAILED attempts because the template uses
-          #   DeletionPolicy: Retain (audit history preservation). The orphan bucket
-          #   now blocks re-deploy with EarlyValidation::ResourceExistenceCheck. This
-          #   one-shot import adopts the bucket into a fresh stack using a stub
-          #   template containing only the bucket; then deploy "vaultmtg-security-services"
-          #   normally (UPDATE) to add Config recorder, delivery channel, conformance
-          #   pack, GuardDuty detector, and Access Analyzers.
-          if [ "${{ inputs.stack }}" = "logs-import" ] || [ "${{ inputs.stack }}" = "vaultmtg-security-services-import" ]; then
+          if [ "${{ inputs.stack }}" = "logs-import" ]; then
             CHANGE_TYPE="IMPORT"
             echo "change_type=$CHANGE_TYPE" >> $GITHUB_OUTPUT
             echo "Changeset type: $CHANGE_TYPE (resource import)"
@@ -249,10 +237,6 @@ jobs:
               logs-import)
                 PARAMS_FILE="cloudformation/parameters/logs.json"
                 IMPORT_FILE="cloudformation/parameters/logs-import.json"
-                ;;
-              vaultmtg-security-services-import)
-                PARAMS_FILE="cloudformation/parameters/vaultmtg-security-services.json"
-                IMPORT_FILE="cloudformation/parameters/vaultmtg-security-services-import.json"
                 ;;
             esac
 
@@ -265,7 +249,7 @@ jobs:
               --change-set-name "$CHANGESET_NAME" \
               --change-set-type IMPORT \
               --resources-to-import "file://$IMPORT_FILE" \
-              --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
+              --capabilities CAPABILITY_IAM \
               $PARAMS_ARG
 
             aws cloudformation wait change-set-create-complete \
