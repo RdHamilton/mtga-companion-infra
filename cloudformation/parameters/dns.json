@@ -8,10 +8,6 @@
     "ParameterValue": "Z0998299Z86TCLNNF1LS"
   },
   {
-    "ParameterKey": "ApiAEipAddress",
-    "ParameterValue": "34.234.7.126"
-  },
-  {
     "ParameterKey": "TTL",
     "ParameterValue": "300"
   }

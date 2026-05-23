@@ -5,7 +5,8 @@ Description: >
   by weekly drift detection (R-11).  Cutover (one-shot) requires console
   deletion of each existing record then CREATE of this stack -- see PR #2335
   body for the runbook.  AWS::Route53::RecordSet is NOT importable.
-  Every record has DeletionPolicy: Retain.  See ApiARecord TODO re R-02 (#2322).
+  Every record has DeletionPolicy: Retain.  ApiARecord uses Fn::ImportValue
+  of the EIP exported by the mtga-companion-ec2 stack (R-02 / #2322 resolved).
 
 Parameters:
   Environment:
@@ -18,15 +19,6 @@ Parameters:
     Type: AWS::Route53::HostedZone::Id
     Default: Z0998299Z86TCLNNF1LS
     Description: Route 53 hosted zone ID for vaultmtg.app
-
-  ApiAEipAddress:
-    Type: String
-    Default: "34.234.7.126"
-    Description: >
-      Elastic IP for api.vaultmtg.app.  Sourced from the mtga-companion-ec2 stack
-      output ElasticIPAddress.  See TODO on ApiARecord -- when R-02 wires the
-      cross-stack import safely (without record replacement), swap this for
-      Fn::ImportValue mtga-companion-ec2-ElasticIPAddress.
 
   TTL:
     Type: Number
@@ -92,13 +84,12 @@ Resources:
         EvaluateTargetHealth: false
       Comment: VaultMTG production SPA - CloudFront alias
 
-  # api.vaultmtg.app -> EC2 (Elastic IP)
-  # TODO (R-02 follow-up #2322): when the EC2 stack's EIP export can be safely
-  # referenced via Fn::ImportValue without forcing a record replacement (which
-  # would briefly remove the live record), swap ApiAEipAddress parameter for
-  # !ImportValue mtga-companion-ec2-ElasticIPAddress.  Cross-stack import in a
-  # RecordSet ResourceRecords does not force replacement -- the change is safe
-  # once R-02 confirms the EIP allocation is stable across stack updates.
+  # api.vaultmtg.app -> EC2 (Elastic IP) via cross-stack ImportValue.
+  # The EIP is allocated and exported by the mtga-companion-ec2 stack as
+  # ElasticIPAddress.  Using Fn::ImportValue here means the DNS stack is
+  # always in sync with the live EIP without a manual parameter update.
+  # Cross-stack import in RecordSet ResourceRecords does not force record
+  # replacement; an EIP change would update in place.
   ApiARecord:
     Type: AWS::Route53::RecordSet
     DeletionPolicy: Retain
@@ -109,8 +100,8 @@ Resources:
       Type: A
       TTL: !Ref TTL
       ResourceRecords:
-        - !Ref ApiAEipAddress
-      Comment: VaultMTG production BFF API - EC2 Elastic IP (R-02 deferred; see TODO)
+        - !ImportValue mtga-companion-ec2-ElasticIPAddress
+      Comment: VaultMTG production BFF API - EC2 Elastic IP (cross-stack import)
 
   # ---------------------------------------------------------------------
   # ACM certificate validation CNAMEs (vaultmtg.app + subdomains)
