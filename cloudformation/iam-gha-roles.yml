@@ -100,6 +100,7 @@ Resources:
       Description: "Permissions boundary for gha-infra-cfn-deploy: excludes secretsmanager GetSecretValue/PutSecretValue and grants only specific iam: actions (never iam:*). See RdHamilton/vault-mtg#2325."
       PolicyDocument:
         Version: "2012-10-17"
+        Id: vaultmtg-reconcile-20260523-boundary
         Statement:
           # mirrors inline CloudFormationStackOperations
           - Sid: CfnStack
@@ -406,6 +407,7 @@ Resources:
         - PolicyName: github-actions-deploy-permissions
           PolicyDocument:
             Version: "2012-10-17"
+            Id: vaultmtg-reconcile-20260523-app-deploy
             Statement:
               - Sid: S3DeployBuckets
                 Effect: Allow
@@ -595,6 +597,7 @@ Resources:
         - PolicyName: cfn-stack-deploy
           PolicyDocument:
             Version: "2012-10-17"
+            Id: vaultmtg-reconcile-20260523-cfn-deploy
             Statement:
               - Sid: CloudFormationStackOperations
                 Effect: Allow
