@@ -5,11 +5,7 @@
   },
   {
     "ParameterKey": "HostedZoneId",
-    "ParameterValue": "Z0998299Z86TCLNNF1LS"
-  },
-  {
-    "ParameterKey": "ApiAEipAddress",
-    "ParameterValue": "34.234.7.126"
+    "ParameterValue": "Z03270731AI8C2XXNO5IB"
   },
   {
     "ParameterKey": "TTL",

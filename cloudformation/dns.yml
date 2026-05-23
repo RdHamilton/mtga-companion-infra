@@ -1,82 +1,381 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
-  MTGA Companion - Route 53 DNS records.
-  Points the domain A record at the EC2 Elastic IP.
-  Deploy after ec2 stack is stable and domain is registered in Route 53.
-  Deploy order: ec2-sg -> rds -> ec2 -> dns.
+  VaultMTG production DNS (Route 53) - vaultmtg.app hosted zone.
+  Codifies every production record so live state matches IaC and is covered
+  by weekly drift detection (R-11).  Cutover (one-shot) requires console
+  deletion of each existing record then CREATE of this stack -- see PR #2335
+  body for the runbook.  AWS::Route53::RecordSet is NOT importable.
+  Every record has DeletionPolicy: Retain.  See ApiARecord TODO re R-02 (#2322).
 
 Parameters:
   Environment:
     Type: String
     Default: production
-    AllowedValues: [production, staging]
-    Description: Deployment environment
-
-  DomainName:
-    Type: String
-    Default: mtgacompanion.com
-    Description: >
-      Root domain name (without trailing dot).
-      Must match a hosted zone in Route 53.
+    AllowedValues: [production]
+    Description: Deployment environment (production only; staging records live in dns-staging.yml)
 
   HostedZoneId:
     Type: AWS::Route53::HostedZone::Id
-    Description: >
-      Route 53 hosted zone ID for the domain (e.g. Z1D633PJN98FT9).
-      Find it in the Route 53 console under Hosted Zones.
+    Default: Z0998299Z86TCLNNF1LS
+    Description: Route 53 hosted zone ID for vaultmtg.app
 
-  ElasticIP:
+  ApiAEipAddress:
     Type: String
+    Default: "34.234.7.126"
     Description: >
-      EC2 Elastic IP address to point the domain at.
-      Retrieve from the ec2 stack output PublicIP, then associate an EIP.
+      Elastic IP for api.vaultmtg.app.  Sourced from the mtga-companion-ec2 stack
+      output ElasticIPAddress.  See TODO on ApiARecord -- when R-02 wires the
+      cross-stack import safely (without record replacement), swap this for
+      Fn::ImportValue mtga-companion-ec2-ElasticIPAddress.
 
   TTL:
     Type: Number
     Default: 300
     MinValue: 60
     MaxValue: 86400
-    Description: DNS record TTL in seconds (300 for fast initial propagation)
+    Description: Default TTL for non-alias records (seconds)
+
+  # CloudFront alias targets always use the global CloudFront hosted zone.
+  # This is a fixed AWS constant; not configurable.
+
+Mappings:
+  CloudFront:
+    Aliases:
+      HostedZoneId: Z2FDTNDATAQYW2  # AWS-fixed global CloudFront zone ID
 
 Resources:
 
-  # ---------------------------------------------------------
-  # A record: mtgacompanion.com -> Elastic IP
-  # ---------------------------------------------------------
-  RootARecord:
+  # =====================================================================
+  # vaultmtg.app (apex) -> CloudFront marketing distribution
+  # =====================================================================
+  ApexARecord:
     Type: AWS::Route53::RecordSet
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       HostedZoneId: !Ref HostedZoneId
-      Name: !Sub "${DomainName}."
+      Name: "vaultmtg.app."
       Type: A
-      TTL: !Ref TTL
-      ResourceRecords:
-        - !Ref ElasticIP
-      Comment: !Sub "MTGA Companion ${Environment} root A record"
+      AliasTarget:
+        HostedZoneId: !FindInMap [CloudFront, Aliases, HostedZoneId]
+        DNSName: !ImportValue vaultmtg-production-MarketingDistributionDomain
+        EvaluateTargetHealth: false
+      Comment: VaultMTG apex - marketing site CloudFront alias
 
-  # ---------------------------------------------------------
-  # A record: www.mtgacompanion.com -> Elastic IP
-  # ---------------------------------------------------------
+  # www.vaultmtg.app -> CloudFront marketing (same distribution as apex)
   WwwARecord:
     Type: AWS::Route53::RecordSet
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       HostedZoneId: !Ref HostedZoneId
-      Name: !Sub "www.${DomainName}."
+      Name: "www.vaultmtg.app."
+      Type: A
+      AliasTarget:
+        HostedZoneId: !FindInMap [CloudFront, Aliases, HostedZoneId]
+        DNSName: !ImportValue vaultmtg-production-MarketingDistributionDomain
+        EvaluateTargetHealth: false
+      Comment: VaultMTG www - marketing site CloudFront alias
+
+  # app.vaultmtg.app -> CloudFront SPA distribution
+  AppARecord:
+    Type: AWS::Route53::RecordSet
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: "app.vaultmtg.app."
+      Type: A
+      AliasTarget:
+        HostedZoneId: !FindInMap [CloudFront, Aliases, HostedZoneId]
+        DNSName: !ImportValue vaultmtg-production-SPADistributionDomain
+        EvaluateTargetHealth: false
+      Comment: VaultMTG production SPA - CloudFront alias
+
+  # api.vaultmtg.app -> EC2 (Elastic IP)
+  # TODO (R-02 follow-up #2322): when the EC2 stack's EIP export can be safely
+  # referenced via Fn::ImportValue without forcing a record replacement (which
+  # would briefly remove the live record), swap ApiAEipAddress parameter for
+  # !ImportValue mtga-companion-ec2-ElasticIPAddress.  Cross-stack import in a
+  # RecordSet ResourceRecords does not force replacement -- the change is safe
+  # once R-02 confirms the EIP allocation is stable across stack updates.
+  ApiARecord:
+    Type: AWS::Route53::RecordSet
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: "api.vaultmtg.app."
       Type: A
       TTL: !Ref TTL
       ResourceRecords:
-        - !Ref ElasticIP
-      Comment: !Sub "MTGA Companion ${Environment} www A record"
+        - !Ref ApiAEipAddress
+      Comment: VaultMTG production BFF API - EC2 Elastic IP (R-02 deferred; see TODO)
+
+  # ---------------------------------------------------------------------
+  # ACM certificate validation CNAMEs (vaultmtg.app + subdomains)
+  #
+  # These records are produced by AWS Certificate Manager and consumed
+  # by ACM itself to prove domain control.  They must remain in place
+  # for as long as the certificate is in use; deleting them invalidates
+  # the cert.  Hence DeletionPolicy: Retain on every one.
+  # ---------------------------------------------------------------------
+
+  AcmValidationApex:
+    Type: AWS::Route53::RecordSet
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: "_8e247ca9b77ab28b0c4536ade64dbc95.vaultmtg.app."
+      Type: CNAME
+      TTL: !Ref TTL
+      ResourceRecords:
+        - "_ced1533dd36f6317488353a093dd7f59.jkddzztszm.acm-validations.aws."
+      Comment: ACM validation for vaultmtg.app (CloudFront cert)
+
+  AcmValidationWww:
+    Type: AWS::Route53::RecordSet
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: "_f728e5ab9d2cd27b310c644147ffd113.www.vaultmtg.app."
+      Type: CNAME
+      TTL: !Ref TTL
+      ResourceRecords:
+        - "_cc6e31361e5bf8949d300cb0ac000586.jkddzztszm.acm-validations.aws."
+      Comment: ACM validation for www.vaultmtg.app
+
+  AcmValidationApp:
+    Type: AWS::Route53::RecordSet
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: "_421b515cfd7cd22dca48523c4daadf45.app.vaultmtg.app."
+      Type: CNAME
+      TTL: !Ref TTL
+      ResourceRecords:
+        - "_fd878034fc4c5e487e089e4b7edfb8b7.jkddzztszm.acm-validations.aws."
+      Comment: ACM validation for app.vaultmtg.app
+
+  # ---------------------------------------------------------------------
+  # Apex TXT - Google Site Verification
+  # ---------------------------------------------------------------------
+  ApexTxtRecord:
+    Type: AWS::Route53::RecordSet
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: "vaultmtg.app."
+      Type: TXT
+      TTL: !Ref TTL
+      ResourceRecords:
+        - '"google-site-verification=RkcRB5ivecNKyifEubvVUIPHh60OK1ZEEtks1x6SWPM"'
+      Comment: Google Search Console domain verification
+
+  # ---------------------------------------------------------------------
+  # Clerk authentication - production (vaultmtg.app)
+  # Records are produced by Clerk during custom-domain setup and must
+  # match Clerk's documented values exactly.  Source of truth: Clerk
+  # dashboard -> Domains -> vaultmtg.app.
+  # ---------------------------------------------------------------------
+  ClerkAccountsProd:
+    Type: AWS::Route53::RecordSet
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: "accounts.vaultmtg.app."
+      Type: CNAME
+      TTL: !Ref TTL
+      ResourceRecords:
+        - "accounts.clerk.services"
+      Comment: Clerk accounts portal (production)
+
+  ClerkFrontendProd:
+    Type: AWS::Route53::RecordSet
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: "clerk.vaultmtg.app."
+      Type: CNAME
+      TTL: !Ref TTL
+      ResourceRecords:
+        - "frontend-api.clerk.services"
+      Comment: Clerk frontend API (production)
+
+  ClerkMailProd:
+    Type: AWS::Route53::RecordSet
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: "clkmail.vaultmtg.app."
+      Type: CNAME
+      TTL: !Ref TTL
+      ResourceRecords:
+        - "mail.u08xaz9tcbk3.clerk.services"
+      Comment: Clerk transactional mail (production)
+
+  ClerkDkim1Prod:
+    Type: AWS::Route53::RecordSet
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: "clk._domainkey.vaultmtg.app."
+      Type: CNAME
+      TTL: !Ref TTL
+      ResourceRecords:
+        - "dkim1.u08xaz9tcbk3.clerk.services"
+      Comment: Clerk DKIM key 1 (production)
+
+  ClerkDkim2Prod:
+    Type: AWS::Route53::RecordSet
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: "clk2._domainkey.vaultmtg.app."
+      Type: CNAME
+      TTL: !Ref TTL
+      ResourceRecords:
+        - "dkim2.u08xaz9tcbk3.clerk.services"
+      Comment: Clerk DKIM key 2 (production)
+
+  # ---------------------------------------------------------------------
+  # stg-app.vaultmtg.app subtree (staging SPA + Clerk staging)
+  #
+  # The staging Clerk records live in the production vaultmtg.app hosted
+  # zone because Clerk requires the custom domain to belong to a single
+  # registered zone.  They are codified here (not in dns-staging.yml)
+  # because dns-staging.yml is scoped to staging-api.vaultmtg.app only.
+  # ---------------------------------------------------------------------
+  StagingAppARecord:
+    Type: AWS::Route53::RecordSet
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: "stg-app.vaultmtg.app."
+      Type: A
+      AliasTarget:
+        HostedZoneId: !FindInMap [CloudFront, Aliases, HostedZoneId]
+        DNSName: "d3v5gtc7a0fda8.cloudfront.net"
+        EvaluateTargetHealth: false
+      Comment: VaultMTG staging SPA - CloudFront alias
+
+  AcmValidationStagingApp:
+    Type: AWS::Route53::RecordSet
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: "_7850282617873443c3029d3764818d0b.stg-app.vaultmtg.app."
+      Type: CNAME
+      TTL: !Ref TTL
+      ResourceRecords:
+        - "_020d7a319b9ab758366e26ef67e26683.jkddzztszm.acm-validations.aws."
+      Comment: ACM validation for stg-app.vaultmtg.app
+
+  ClerkAccountsStaging:
+    Type: AWS::Route53::RecordSet
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: "accounts.stg-app.vaultmtg.app."
+      Type: CNAME
+      TTL: !Ref TTL
+      ResourceRecords:
+        - "accounts.clerk.services"
+      Comment: Clerk accounts portal (staging)
+
+  ClerkFrontendStaging:
+    Type: AWS::Route53::RecordSet
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: "clerk.stg-app.vaultmtg.app."
+      Type: CNAME
+      TTL: !Ref TTL
+      ResourceRecords:
+        - "frontend-api.clerk.services"
+      Comment: Clerk frontend API (staging)
+
+  ClerkMailStaging:
+    Type: AWS::Route53::RecordSet
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: "clkmail.stg-app.vaultmtg.app."
+      Type: CNAME
+      TTL: !Ref TTL
+      ResourceRecords:
+        - "mail.qfx1lee0kg90.clerk.services"
+      Comment: Clerk transactional mail (staging)
+
+  ClerkDkim1Staging:
+    Type: AWS::Route53::RecordSet
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: "clk._domainkey.stg-app.vaultmtg.app."
+      Type: CNAME
+      TTL: !Ref TTL
+      ResourceRecords:
+        - "dkim1.qfx1lee0kg90.clerk.services"
+      Comment: Clerk DKIM key 1 (staging)
+
+  ClerkDkim2Staging:
+    Type: AWS::Route53::RecordSet
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: "clk2._domainkey.stg-app.vaultmtg.app."
+      Type: CNAME
+      TTL: !Ref TTL
+      ResourceRecords:
+        - "dkim2.qfx1lee0kg90.clerk.services"
+      Comment: Clerk DKIM key 2 (staging)
+
+  # ---------------------------------------------------------------------
+  # NOT IN THIS STACK (intentional):
+  #   - SOA + NS records for vaultmtg.app: managed by Route 53 itself,
+  #     not safely importable/updatable via CFN.
+  #   - staging-api.vaultmtg.app A record: managed by dns-staging.yml
+  #     (mtga-companion-dns-staging stack).
+  # ---------------------------------------------------------------------
 
 Outputs:
-  RootDomain:
-    Description: Root domain pointing to EC2
-    Value: !Sub "https://${DomainName}"
+  HostedZoneId:
+    Description: Hosted zone ID for vaultmtg.app
+    Value: !Ref HostedZoneId
     Export:
-      Name: !Sub "${AWS::StackName}-RootDomain"
+      Name: !Sub "${AWS::StackName}-HostedZoneId"
 
-  WwwDomain:
-    Description: www subdomain pointing to EC2
-    Value: !Sub "https://www.${DomainName}"
+  ApiEndpoint:
+    Description: Production API endpoint
+    Value: "https://api.vaultmtg.app"
     Export:
-      Name: !Sub "${AWS::StackName}-WwwDomain"
+      Name: !Sub "${AWS::StackName}-ApiEndpoint"
+
+  AppEndpoint:
+    Description: Production SPA endpoint
+    Value: "https://app.vaultmtg.app"
+    Export:
+      Name: !Sub "${AWS::StackName}-AppEndpoint"
+
+  MarketingEndpoint:
+    Description: Production marketing site endpoint
+    Value: "https://vaultmtg.app"
+    Export:
+      Name: !Sub "${AWS::StackName}-MarketingEndpoint"
