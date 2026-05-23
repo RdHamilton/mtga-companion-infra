@@ -87,6 +87,70 @@ jobs:
           role-to-assume: ${{ secrets.AWS_CFN_DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
+      - name: Simulate IAM permissions
+        # Pre-flight check: run aws iam simulate-principal-policy against the
+        # assumed deploy role for every action the templates in this repo
+        # invoke at runtime. Catches missing permissions at CI time rather
+        # than at CloudFormation runtime (cfn-lint and changeset dry-runs
+        # cannot detect runtime IAM authorization failures).
+        #
+        # Skipped on dry_run since real deploys are the only place we need
+        # the gate; dry runs never execute the changeset.
+        #
+        # When new services/actions are added to any template in this repo,
+        # extend the --action-names list below.
+        if: inputs.dry_run != 'true'
+        run: |
+          DEPLOY_ROLE_ARN=$(aws sts get-caller-identity --query Arn --output text | sed 's|:sts:|:iam:|' | sed 's|assumed-role/\([^/]*\)/.*|role/\1|')
+          echo "Simulating permissions for: $DEPLOY_ROLE_ARN"
+
+          DENIED=$(aws iam simulate-principal-policy \
+            --policy-source-arn "$DEPLOY_ROLE_ARN" \
+            --action-names \
+              config:PutConfigurationRecorder config:StartConfigurationRecorder \
+              config:StopConfigurationRecorder config:DeleteConfigurationRecorder \
+              config:DescribeConfigurationRecorders \
+              config:PutDeliveryChannel config:DeleteDeliveryChannel \
+              config:DescribeDeliveryChannels \
+              config:PutConformancePack config:DeleteConformancePack \
+              config:DescribeConformancePacks config:DescribeConformancePackStatus \
+              guardduty:CreateDetector guardduty:DeleteDetector \
+              guardduty:GetDetector guardduty:UpdateDetector guardduty:ListDetectors \
+              guardduty:TagResource guardduty:UntagResource \
+              access-analyzer:CreateAnalyzer access-analyzer:DeleteAnalyzer \
+              access-analyzer:GetAnalyzer access-analyzer:ListAnalyzers \
+              access-analyzer:UpdateAnalyzer access-analyzer:TagResource \
+              access-analyzer:UntagResource access-analyzer:ListTagsForResource \
+              access-analyzer:ListArchiveRules access-analyzer:CreateArchiveRule \
+              access-analyzer:DeleteArchiveRule access-analyzer:UpdateArchiveRule \
+              access-analyzer:GetArchiveRule access-analyzer:ListFindings \
+              access-analyzer:GetFinding access-analyzer:ListAnalyzedResources \
+              cloudformation:CreateChangeSet cloudformation:DeleteChangeSet \
+              cloudformation:DescribeChangeSet cloudformation:ExecuteChangeSet \
+              cloudformation:DescribeStacks cloudformation:DescribeStackEvents \
+              cloudformation:GetTemplate cloudformation:ValidateTemplate \
+              cloudformation:CreateStack cloudformation:UpdateStack \
+              cloudformation:DeleteStack \
+              s3:PutBucketPolicy s3:GetBucketPolicy \
+              s3:GetBucketAcl s3:GetEncryptionConfiguration \
+              iam:CreateRole iam:DeleteRole iam:GetRole iam:PassRole \
+              iam:AttachRolePolicy iam:DetachRolePolicy \
+              iam:PutRolePolicy iam:DeleteRolePolicy \
+              iam:TagRole iam:UntagRole \
+            --resource-arns "*" \
+            --query 'EvaluationResults[?EvalDecision!=`allowed`].EvalActionName' \
+            --output text)
+
+          if [ -n "$DENIED" ]; then
+            echo "::error::IAM simulation FAILED. Deploy role is missing permissions for:"
+            echo "$DENIED" | tr '\t' '\n' | while read action; do
+              echo "  - $action"
+            done
+            echo "Fix the deploy role IAM policy before proceeding."
+            exit 1
+          fi
+          echo "IAM simulation PASSED — deploy role has all required permissions."
+
       - name: Validate template
         run: |
           aws cloudformation validate-template \
