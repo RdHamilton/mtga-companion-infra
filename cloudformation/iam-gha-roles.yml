@@ -162,11 +162,11 @@ Resources:
               - iam:AddRoleToInstanceProfile
               - iam:RemoveRoleFromInstanceProfile
               # AWS::IAM::OIDCProvider lifecycle (single fixed provider ARN)
-              - iam:CreateOIDCProvider
-              - iam:DeleteOIDCProvider
-              - iam:GetOIDCProvider
-              - iam:UpdateOIDCProvider
-              - iam:TagOIDCProvider
+              - iam:CreateOpenIDConnectProvider
+              - iam:DeleteOpenIDConnectProvider
+              - iam:GetOpenIDConnectProvider
+              - iam:UpdateOpenIDConnectProvider
+              - iam:TagOpenIDConnectProvider
               # AWS::IAM::ManagedPolicy lifecycle (Create / Update / Delete / drift-read)
               - iam:CreatePolicy
               - iam:CreatePolicyVersion
@@ -664,11 +664,11 @@ Resources:
                   - iam:AddRoleToInstanceProfile
                   - iam:RemoveRoleFromInstanceProfile
                   # AWS::IAM::OIDCProvider lifecycle (single fixed provider ARN)
-                  - iam:CreateOIDCProvider
-                  - iam:DeleteOIDCProvider
-                  - iam:GetOIDCProvider
-                  - iam:UpdateOIDCProvider
-                  - iam:TagOIDCProvider
+                  - iam:CreateOpenIDConnectProvider
+                  - iam:DeleteOpenIDConnectProvider
+                  - iam:GetOpenIDConnectProvider
+                  - iam:UpdateOpenIDConnectProvider
+                  - iam:TagOpenIDConnectProvider
                   # AWS::IAM::ManagedPolicy lifecycle (Create / Update / Delete / drift-read).
                   # iam:CreatePolicy and iam:SetDefaultPolicyVersion ARE
                   # resource-scopable -- the policy ARN identifies the target.
