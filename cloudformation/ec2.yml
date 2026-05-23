@@ -363,6 +363,32 @@ Resources:
           Fn::Sub: "mtga-companion-${Environment}-EC2SecurityGroupId"
       SubnetId: subnet-021e2cc715f426da1
       KeyName: !If [HasKeyName, !Ref KeyName, !Ref "AWS::NoValue"]
+      # ---------------------------------------------------------
+      # IMDS hardening (S-21 / #2358)
+      #
+      # HttpTokens=required      -> Enforces IMDSv2 (session-token required).
+      #                             Blocks IMDSv1 SSRF/credential-theft patterns.
+      # HttpPutResponseHopLimit=1 -> Restricts the response hop limit to 1 so
+      #                             only processes ON the instance can reach
+      #                             169.254.169.254. A nested/container hop
+      #                             (e.g., compromised container) cannot reach
+      #                             IMDS through this instance.
+      # HttpEndpoint=enabled     -> IMDS endpoint must remain reachable (the
+      #                             SSM agent and CloudWatch agent both rely
+      #                             on it for instance identity).
+      # InstanceMetadataTags=disabled
+      #                          -> No need to expose instance tags via IMDS.
+      #
+      # Applying this property on an existing instance triggers a metadata
+      # options update only (no instance replacement). Verified on
+      # i-0226bf51fcf09b506 (2026-05-23): live state was HttpTokens=required,
+      # HttpPutResponseHopLimit=2 -- this lowers the hop limit to 1.
+      # ---------------------------------------------------------
+      MetadataOptions:
+        HttpTokens: required
+        HttpPutResponseHopLimit: 1
+        HttpEndpoint: enabled
+        InstanceMetadataTags: disabled
       UserData:
         # UserData stub: fetch the bootstrap script from S3 and execute it.
         # The full bootstrap logic lives in scripts/deploy/ec2-bootstrap.sh,
