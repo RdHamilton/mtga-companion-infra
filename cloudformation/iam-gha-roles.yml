@@ -1,26 +1,9 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
   GitHub Actions OIDC IAM roles for mtga-companion-infra CI/CD pipelines.
-  Codifies roles that were provisioned out-of-band so they can be imported
-  into a CloudFormation stack. These roles already exist in the account --
-  this template is reconciled to be byte-faithful to the live roles so a
-  resource-import change set is import-only. See PR #36 and PR #39 for
-  the original provisioning context.
-
-  S-04 (vault-mtg#2325): GhaCfnDeployPermissionsBoundary caps the effective
-  permissions of gha-infra-cfn-deploy -- see the resource-level comment for
-  the full design rationale.
-
-  Deploy order: standalone (no stack dependencies).
-
-  Legacy roles (deleted out-of-band, documented for audit history):
-    - mtga-companion-github-deploy-production: created 2026-05-02 under the
-      old MTGA-Companion naming; never imported into this template; deleted
-      2026-05-22 (S-11 / vault-mtg#2349) after confirming zero consumers in
-      CFN templates, GHA workflows, and scripts. Had 3 inline policies
-      (S3DeployArtifactsWrite, SSMParameterRead, SSMSendCommand) with a
-      trust policy scoped to repo:RdHamilton/vault-mtg:*. Superseded by
-      github-actions-oidc-deploy (active production role).
+  Roles were provisioned out-of-band and imported into CFN management (PR #36,
+  PR #39). GhaCfnDeployPermissionsBoundary caps effective permissions of
+  gha-infra-cfn-deploy (S-04, vault-mtg#2325). Deploy order: standalone.
 
 Parameters:
   GitHubOrg:
