@@ -1,0 +1,99 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  S-14: vaultmtg-break-glass-admin IAM role for emergency access with MFA
+  enforcement. Replaces standing AdministratorAccess on the rhamilton IAM user
+  with short-lived, MFA-conditioned federated sessions (assume-role from
+  rhamilton with MFA present and MFA session age <1h, max 4h session). Role
+  uses DeletionPolicy: Retain so that an accidental stack delete cannot lock
+  the operator out of the account. See RdHamilton/vault-mtg#2351.
+
+Resources:
+
+  # ---------------------------------------------------------------------------
+  # vaultmtg-break-glass-admin
+  #
+  # Purpose: emergency-access admin identity. The rhamilton IAM user assumes
+  #   this role with MFA in order to perform administrative actions; standing
+  #   AdministratorAccess on the user itself is removed (separate human step
+  #   after this role is verified working).
+  #
+  # Trust policy:
+  #   - Principal: rhamilton IAM user (only).
+  #   - Action: sts:AssumeRole.
+  #   - Condition 1: aws:MultiFactorAuthPresent must be true at the time of
+  #     the assume-role call. AWS evaluates this at assume time on the calling
+  #     STS session, so the caller must have authenticated with MFA recently.
+  #   - Condition 2: aws:MultiFactorAuthAge must be < 3600 seconds, meaning
+  #     the MFA challenge happened within the last hour. This prevents
+  #     a stale long-lived session credential from being used to assume this
+  #     role hours later without re-authenticating.
+  #
+  # MaxSessionDuration: 14400 (4 hours) -- the upper bound on a single
+  #   assumed-role session. The session-credentials returned by sts:AssumeRole
+  #   expire after this window and the caller must re-authenticate (with a
+  #   fresh MFA challenge that satisfies MultiFactorAuthAge) to continue.
+  #
+  # Managed policy: AdministratorAccess -- AWS-managed, full admin.
+  #   This role IS the standing-admin replacement; the whole point is that
+  #   the powerful permission set lives behind MFA + assume + session
+  #   expiry, not on a long-lived user identity.
+  #
+  # DeletionPolicy: Retain -- if this stack is accidentally deleted while
+  #   the rhamilton user's standing AdministratorAccess has already been
+  #   removed (i.e. after the post-merge human steps complete), deleting
+  #   the role would leave no admin path into the account. Retain keeps
+  #   the role even on stack deletion; the role can be manually deleted
+  #   later if intentionally decommissioning.
+  # ---------------------------------------------------------------------------
+  BreakGlassAdminRole:
+    Type: AWS::IAM::Role
+    DeletionPolicy: Retain
+    Properties:
+      RoleName: vaultmtg-break-glass-admin
+      Description: >
+        Emergency-access admin role assumed by the rhamilton IAM user with MFA.
+        Replaces standing AdministratorAccess. MFA required; MFA session age
+        must be under 1 hour at assume time; max 4-hour assumed-role session.
+        DeletionPolicy: Retain to prevent lockout. See vault-mtg#2351.
+      MaxSessionDuration: 14400
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: RhamiltonAssumeWithMFA
+            Effect: Allow
+            Principal:
+              AWS: arn:aws:iam::901347789205:user/rhamilton
+            Action: sts:AssumeRole
+            Condition:
+              Bool:
+                aws:MultiFactorAuthPresent: "true"
+              NumericLessThan:
+                aws:MultiFactorAuthAge: "3600"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+      Tags:
+        - Key: Project
+          Value: vaultmtg
+        - Key: ManagedBy
+          Value: cloudformation
+        - Key: Stack
+          Value: vaultmtg-iam-break-glass
+        - Key: Purpose
+          Value: break-glass-admin
+        - Key: Ticket
+          Value: "2351"
+
+Outputs:
+  BreakGlassAdminRoleArn:
+    Description: >
+      ARN of the vaultmtg-break-glass-admin role. Use this ARN as the
+      role_arn target in the personal-admin AWS CLI profile (see PR body).
+    Value: !GetAtt BreakGlassAdminRole.Arn
+    Export:
+      Name: vaultmtg-iam-break-glass-RoleArn
+
+  BreakGlassAdminRoleName:
+    Description: Name of the vaultmtg-break-glass-admin role
+    Value: !Ref BreakGlassAdminRole
+    Export:
+      Name: vaultmtg-iam-break-glass-RoleName
