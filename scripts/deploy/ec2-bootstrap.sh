@@ -1,4 +1,4 @@
-#!/bin/bash -xe
+#!/bin/bash
 # ec2-bootstrap.sh — Bootstrap script for VaultMTG EC2 instance (Amazon Linux 2023).
 # Runs once at instance launch via CloudFormation UserData stub.
 # All output logged to /var/log/mtga-companion-setup.log.
@@ -11,6 +11,14 @@
 #         staging BFF unit install, env provisioning, nginx config.
 # Tickets: #66 (CloudWatch Agent), #77 (certbot timer), #78 (staging BFF unit),
 #          #2459 (externalize to S3 — under 16 KiB UserData limit).
+#
+# Shell options: errexit + pipefail, no xtrace.
+# xtrace (-x) was removed because it echoes every command and its expanded
+# arguments to stderr, which means decrypted SSM secret values (DAEMON_JWT_SECRET,
+# DB_SECRET_ARN, etc.) end up in /var/log/mtga-companion-setup.log. The explicit
+# log() calls below are sufficient for operational tracing.
+set -e
+set -o pipefail
 exec > >(tee /var/log/mtga-companion-setup.log) 2>&1
 
 APP_USER="mtga-companion"
@@ -74,7 +82,10 @@ PORT=$(fetch_ssm "/vaultmtg/app/production/PORT")
 PORT="${PORT:-8080}"
 
 ALLOWED_ORIGINS=$(require_ssm "/vaultmtg/app/production/ALLOWED_ORIGINS")
-DAEMON_JWT_SECRET=$(fetch_ssm "/vaultmtg/app/production/daemon-jwt-secret")
+# DAEMON_JWT_SECRET is required — fail loud if missing or empty rather than
+# silently writing DAEMON_JWT_SECRET= to the env file (which would break
+# daemon auth at BFF startup with a non-obvious failure mode).
+DAEMON_JWT_SECRET=$(require_ssm "/vaultmtg/app/production/daemon-jwt-secret")
 
 # Credential-free DATABASE_URL -- BFF resolves credentials via DB_SECRET_ARN
 # at startup (matches provision-db-url.sh and deploy-env.sh pattern).
@@ -342,9 +353,15 @@ log "Checking for domain in SSM..."
 DOMAIN=$(fetch_ssm "/vaultmtg/app/production/domain-name")
 if [ -n "$DOMAIN" ] && [ "$DOMAIN" != "None" ]; then
     log "Domain: $DOMAIN -- running certbot..."
+    # Certbot ACME registration email — sourced from SSM rather than hardcoded
+    # so the address can be rotated without an infrastructure deploy.
+    # Pre-flight: parameter /vaultmtg/app/production/certbot-email must exist
+    # (created out-of-band; type=String). Read access is granted via the
+    # existing /vaultmtg/app/production/* wildcard on the EC2 instance role.
+    CERTBOT_EMAIL=$(require_ssm "/vaultmtg/app/production/certbot-email")
     if [ ! -d "/etc/letsencrypt/live/$DOMAIN" ]; then
         certbot --nginx --non-interactive --agree-tos \
-            --email "ray.hamilton@stablekernel.com" \
+            --email "$CERTBOT_EMAIL" \
             --domains "$DOMAIN" --redirect \
             2>&1 | tee /var/log/certbot-init.log || log "WARNING: certbot failed"
     else
