@@ -353,6 +353,7 @@ Resources:
   EC2Instance:
     Type: AWS::EC2::Instance
     DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       ImageId: !Ref AMI
       InstanceType: !Ref InstanceType
