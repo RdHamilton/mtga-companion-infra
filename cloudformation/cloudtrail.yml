@@ -189,7 +189,7 @@ Resources:
     DependsOn:
       - CloudTrailLogsBucketPolicy
     Properties:
-      TrailName: !Sub "vault-mtg-trail-${Environment}"
+      TrailName: !Sub "vaultmtg-trail-${Environment}"
       S3BucketName: !Ref CloudTrailLogsBucket
       IncludeGlobalServiceEvents: true
       IsMultiRegionTrail: false
@@ -218,22 +218,22 @@ Outputs:
     Description: ARN of the VaultMTG CloudTrail trail.
     Value: !GetAtt CloudTrailTrail.Arn
     Export:
-      Name: !Sub "vault-mtg-${Environment}-CloudTrailTrailArn"
+      Name: !Sub "vaultmtg-${Environment}-CloudTrailTrailArn"
 
   CloudTrailLogsBucketName:
     Description: Name of the dedicated S3 bucket receiving CloudTrail logs.
     Value: !Ref CloudTrailLogsBucket
     Export:
-      Name: !Sub "vault-mtg-${Environment}-CloudTrailLogsBucketName"
+      Name: !Sub "vaultmtg-${Environment}-CloudTrailLogsBucketName"
 
   CloudTrailKMSKeyArn:
     Description: ARN of the KMS key used to encrypt CloudTrail log files.
     Value: !GetAtt CloudTrailKMSKey.Arn
     Export:
-      Name: !Sub "vault-mtg-${Environment}-CloudTrailKMSKeyArn"
+      Name: !Sub "vaultmtg-${Environment}-CloudTrailKMSKeyArn"
 
   CloudTrailKMSKeyId:
     Description: ID of the KMS key used to encrypt CloudTrail log files.
     Value: !Ref CloudTrailKMSKey
     Export:
-      Name: !Sub "vault-mtg-${Environment}-CloudTrailKMSKeyId"
+      Name: !Sub "vaultmtg-${Environment}-CloudTrailKMSKeyId"
