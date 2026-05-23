@@ -83,7 +83,6 @@ jobs:
       STACKS: >-
         mtga-companion-cloudwatch-alarms
         mtga-companion-deploy-artifacts
-        mtga-companion-dns-staging
         mtga-companion-ec2
         mtga-companion-ec2-sg
         mtga-companion-iam-gha-roles
@@ -94,7 +93,6 @@ jobs:
         vaultmtg-app-cdn
         vaultmtg-cloudtrail
         vaultmtg-cloudwatch-dashboards
-        vaultmtg-dns
         vaultmtg-security-services
 
     steps:
