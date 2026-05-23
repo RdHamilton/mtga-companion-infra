@@ -267,7 +267,16 @@ jobs:
               --query 'Stacks[0].StackStatus' \
               --output text 2>/dev/null || echo "DOES_NOT_EXIST")
 
-            if echo "$STACK_STATUS" | grep -qE 'COMPLETE|ROLLBACK'; then
+            if echo "$STACK_STATUS" | grep -qF 'ROLLBACK_COMPLETE'; then
+              # Stack is in ROLLBACK_COMPLETE — must delete and recreate, not update
+              aws cloudformation delete-stack \
+                --stack-name "${{ env.STACK_NAME }}" \
+                --region us-east-1
+              aws cloudformation wait stack-delete-complete \
+                --stack-name "${{ env.STACK_NAME }}" \
+                --region us-east-1
+              CHANGE_TYPE="CREATE"
+            elif echo "$STACK_STATUS" | grep -qE 'COMPLETE|ROLLBACK'; then
               CHANGE_TYPE="UPDATE"
             else
               CHANGE_TYPE="CREATE"
