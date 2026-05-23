@@ -1,11 +1,8 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
-  GitHub Actions OIDC IAM roles for mtga-companion-infra CI/CD pipelines.
-  Codifies roles that were provisioned out-of-band so they can be imported
-  into a CloudFormation stack. These roles already exist in the account --
-  this template is reconciled to be byte-faithful to the live roles so a
-  resource-import change set is import-only. See PR #36 and PR #39 for
-  the original provisioning context.
+  GitHub Actions OIDC IAM roles for mtga-companion-infra CI/CD. Roles were
+  provisioned out-of-band and reconciled byte-faithful for import-only
+  change sets (see PR #36, #39).
 
   S-04 (vault-mtg#2325): GhaCfnDeployPermissionsBoundary caps the effective
   permissions of gha-infra-cfn-deploy -- see the resource-level comment for
@@ -13,14 +10,11 @@ Description: >
 
   Deploy order: standalone (no stack dependencies).
 
-  Legacy roles (deleted out-of-band, documented for audit history):
-    - mtga-companion-github-deploy-production: created 2026-05-02 under the
-      old MTGA-Companion naming; never imported into this template; deleted
-      2026-05-22 (S-11 / vault-mtg#2349) after confirming zero consumers in
-      CFN templates, GHA workflows, and scripts. Had 3 inline policies
-      (S3DeployArtifactsWrite, SSMParameterRead, SSMSendCommand) with a
-      trust policy scoped to repo:RdHamilton/vault-mtg:*. Superseded by
-      github-actions-oidc-deploy (active production role).
+  Legacy roles (deleted out-of-band, retained for audit history):
+  mtga-companion-github-deploy-production was created 2026-05-02 under the
+  old MTGA-Companion name, deleted 2026-05-22 (S-11 / vault-mtg#2349) after
+  confirming zero CFN/GHA/script consumers. Superseded by
+  github-actions-oidc-deploy.
 
 Parameters:
   GitHubOrg:
@@ -888,9 +882,9 @@ Resources:
               #
               # Metric filter actions (Put / Delete / Describe) added for the
               # AWS::Logs::MetricFilter resource handler used by the S-06
-              # security-alarms stack (vault-mtg#2333). Tag + describe + KMS
-              # association actions support drift detection on AWS::Logs::LogGroup
-              # under the same /vaultmtg/* prefix.
+              # security-alarms stack (vault-mtg#2333). Tag + describe actions
+              # support drift detection on AWS::Logs::LogGroup under the same
+              # /vaultmtg/* prefix.
               - Sid: CloudWatchLogs
                 Effect: Allow
                 Action:
@@ -901,8 +895,6 @@ Resources:
                   - logs:ListTagsForResource
                   - logs:TagResource
                   - logs:UntagResource
-                  - logs:AssociateKmsKey
-                  - logs:DisassociateKmsKey
                   # AWS::Logs::MetricFilter resource handler (vault-mtg#2333)
                   - logs:PutMetricFilter
                   - logs:DeleteMetricFilter
