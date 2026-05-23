@@ -818,6 +818,14 @@ Resources:
                   - ssm:DescribeParameters
                   - ssm:AddTagsToResource
                   - ssm:ListTagsForResource
+                  # AWS::Config::ConformancePack with TemplateSSMDocumentDetails
+                  # requires the caller to have ssm:GetDocument /
+                  # ssm:DescribeDocument on the AWS-owned ConformancePackTemplate
+                  # SSM document. Without these, PutConformancePack returns
+                  # "Insufficient read permissions on SSM Document".
+                  - ssm:GetDocument
+                  - ssm:DescribeDocument
+                  - ssm:ListDocuments
                 Resource: "*"
               # Secrets Manager: lifecycle management only.
               # secretsmanager:GetSecretValue removed -- the deploy role does
