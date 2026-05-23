@@ -102,6 +102,10 @@ jobs:
         if: inputs.dry_run != 'true'
         run: |
           DEPLOY_ROLE_ARN=$(aws sts get-caller-identity --query Arn --output text | sed 's|:sts:|:iam:|' | sed 's|assumed-role/\([^/]*\)/.*|role/\1|')
+          if ! echo "$DEPLOY_ROLE_ARN" | grep -qE '^arn:aws:iam::[0-9]+:role/'; then
+            echo "::error::Failed to derive deploy role ARN from STS identity: $DEPLOY_ROLE_ARN"
+            exit 1
+          fi
           echo "Simulating permissions for: $DEPLOY_ROLE_ARN"
 
           DENIED=$(aws iam simulate-principal-policy \

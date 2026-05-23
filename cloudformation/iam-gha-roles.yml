@@ -190,13 +190,15 @@ Resources:
               - !Sub arn:aws:iam::${AWS::AccountId}:policy/gha-*
               - !Ref OidcProviderArn
           # mirrors inline IAMUnscopable -- the irreducible IAM wildcard
-          # surface (account-level list actions + CreateServiceLinkedRole).
+          # surface (account-level list actions + CreateServiceLinkedRole +
+          # SimulatePrincipalPolicy used by the deploy.yml IAM simulation gate).
           - Sid: IAMUnscopable
             Effect: Allow
             Action:
               - iam:CreateServiceLinkedRole
               - iam:ListPolicies
               - iam:ListOIDCProviders
+              - iam:SimulatePrincipalPolicy
             Resource: "*"
 
           - Sid: EC2
@@ -691,6 +693,9 @@ Resources:
                   - iam:CreateServiceLinkedRole
                   - iam:ListPolicies
                   - iam:ListOIDCProviders
+                  # Used by deploy.yml IAM simulation pre-flight gate to simulate
+                  # the assumed role's own permissions before executing a changeset.
+                  - iam:SimulatePrincipalPolicy
                 Resource: "*"
               - Sid: EC2
                 Effect: Allow
