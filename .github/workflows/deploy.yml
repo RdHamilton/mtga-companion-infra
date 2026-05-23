@@ -162,7 +162,18 @@ jobs:
           echo "IAM simulation PASSED — deploy role has all required permissions."
 
       - name: Validate template
+        # For iam-gha-roles: template exceeds the 51200-byte CFN inline limit and the
+        # S3 write permission for cfn-validate/ cannot exist in the deployed role until
+        # after the stack is updated — same chicken-and-egg as the simulation gate.
+        # CloudFormation validates the template during changeset creation (next step),
+        # so skipping the explicit validate step here does not reduce correctness.
+        # For all other stacks: validate inline or via S3 depending on file size.
         run: |
+          if [ "${{ inputs.stack }}" = "iam-gha-roles" ]; then
+            echo "Skipping explicit validate for iam-gha-roles (CFN changeset validates implicitly)."
+            exit 0
+          fi
+
           TEMPLATE_FILE="cloudformation/${{ env.TEMPLATE_NAME }}.yml"
           TEMPLATE_SIZE=$(wc -c < "$TEMPLATE_FILE")
           CFN_INLINE_LIMIT=51200
@@ -172,6 +183,7 @@ jobs:
               --template-body "file://$TEMPLATE_FILE"
           else
             # Template exceeds the 51200-byte inline limit — upload to S3 and validate via URL.
+            # Requires s3:PutObject on bootstrap/* or cfn-validate/* in the deploy role.
             BUCKET="mtga-companion-deploy-artifacts-production"
             S3_KEY="cfn-validate/${{ env.TEMPLATE_NAME }}-$(date +%Y%m%d%H%M%S).yml"
             aws s3 cp "$TEMPLATE_FILE" "s3://$BUCKET/$S3_KEY"

@@ -809,19 +809,22 @@ Resources:
                 Resource:
                   - arn:aws:s3:::vaultmtg-cloudtrail-logs-*
                   - arn:aws:s3:::vaultmtg-cloudtrail-logs-*/*
-              # Object-level grant for the bootstrap script upload step in deploy.yml.
-              # gha-infra-cfn-deploy uploads scripts/deploy/ec2-bootstrap.sh to the
-              # production artifacts bucket before deploying the ec2 stack (#2459).
-              # Scoped to bootstrap/* to follow least-privilege; the infra role must
-              # not have broad write access to the release artifact path.
+              # Object-level grant for the bootstrap script upload step in deploy.yml
+              # and for the CFN template validation path used when a template exceeds
+              # the 51200-byte inline limit (deploy.yml validate step, S3 path:
+              # cfn-validate/<template>-<timestamp>.yml). Scoped to bootstrap/* and
+              # cfn-validate/* to follow least-privilege; the infra role must not have
+              # broad write access to the release artifact path.
               # Mirrored in GhaCfnDeployPermissionsBoundary per S-04 (#2325) design rule.
               - Sid: S3BootstrapWrite
                 Effect: Allow
                 Action:
                   - s3:PutObject
                   - s3:GetObject
+                  - s3:DeleteObject
                 Resource:
                   - arn:aws:s3:::mtga-companion-deploy-artifacts-production/bootstrap/*
+                  - arn:aws:s3:::mtga-companion-deploy-artifacts-production/cfn-validate/*
               - Sid: CloudFront
                 Effect: Allow
                 Action: cloudfront:*
