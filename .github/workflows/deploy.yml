@@ -222,6 +222,26 @@ jobs:
           CHANGESET_NAME="deploy-$(date +%Y%m%d%H%M%S)"
           echo "changeset_name=$CHANGESET_NAME" >> $GITHUB_OUTPUT
 
+          # Resolve --template-body vs --template-url based on file size.
+          # CFN's CreateChangeSet API has a 51200-byte limit for inline template bodies.
+          # Templates larger than this must be uploaded to S3 and referenced via URL.
+          # Requires s3:PutObject + s3:DeleteObject on cfn-validate/* in the deploy role.
+          TEMPLATE_FILE="cloudformation/${{ env.TEMPLATE_NAME }}.yml"
+          TEMPLATE_SIZE=$(wc -c < "$TEMPLATE_FILE")
+          CFN_INLINE_LIMIT=51200
+          BUCKET="mtga-companion-deploy-artifacts-production"
+          S3_TEMPLATE_URL=""
+
+          if [ "$TEMPLATE_SIZE" -gt "$CFN_INLINE_LIMIT" ]; then
+            S3_KEY="cfn-validate/${{ env.TEMPLATE_NAME }}-$CHANGESET_NAME.yml"
+            aws s3 cp "$TEMPLATE_FILE" "s3://$BUCKET/$S3_KEY"
+            S3_TEMPLATE_URL="https://$BUCKET.s3.us-east-1.amazonaws.com/$S3_KEY"
+            TEMPLATE_ARG="--template-url $S3_TEMPLATE_URL"
+            echo "Template too large for inline ($TEMPLATE_SIZE bytes) — using S3: $S3_TEMPLATE_URL"
+          else
+            TEMPLATE_ARG="--template-body file://$TEMPLATE_FILE"
+          fi
+
           # IMPORT changesets: first-time adoption of pre-existing AWS resources.
           #
           # logs-import:
@@ -261,7 +281,7 @@ jobs:
 
             aws cloudformation create-change-set \
               --stack-name "${{ env.STACK_NAME }}" \
-              --template-body file://cloudformation/${{ env.TEMPLATE_NAME }}.yml \
+              $TEMPLATE_ARG \
               --change-set-name "$CHANGESET_NAME" \
               --change-set-type IMPORT \
               --resources-to-import "file://$IMPORT_FILE" \
@@ -293,7 +313,7 @@ jobs:
 
             aws cloudformation create-change-set \
               --stack-name "${{ env.STACK_NAME }}" \
-              --template-body file://cloudformation/${{ env.TEMPLATE_NAME }}.yml \
+              $TEMPLATE_ARG \
               --change-set-name "$CHANGESET_NAME" \
               --change-set-type "$CHANGE_TYPE" \
               --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
@@ -303,6 +323,11 @@ jobs:
             aws cloudformation wait change-set-create-complete \
               --stack-name "${{ env.STACK_NAME }}" \
               --change-set-name "$CHANGESET_NAME" || true
+          fi
+
+          # Clean up temporary S3 object if one was uploaded.
+          if [ -n "$S3_TEMPLATE_URL" ]; then
+            aws s3 rm "s3://$BUCKET/$S3_KEY" || true
           fi
 
       - name: Show changeset
