@@ -283,6 +283,24 @@ Resources:
             Action: organizations:*
             Resource: "*"
 
+          # vaultmtg-security-services: S-08 / S-09 / S-10.
+          # Compressed to service:* wildcards (boundary is a ceiling; the actual
+          # granted action set is enumerated in the inline policy below).
+          - Sid: Config
+            Effect: Allow
+            Action: config:*
+            Resource: "*"
+
+          - Sid: GD
+            Effect: Allow
+            Action: guardduty:*
+            Resource: "*"
+
+          - Sid: AA
+            Effect: Allow
+            Action: access-analyzer:*
+            Resource: "*"
+
   # ---------------------------------------------------------------------------
   # github-actions-oidc-deploy
   # Assumed by vault-mtg staging-deploy.yml and deploy-spa*.yml workflows for
@@ -800,6 +818,14 @@ Resources:
                   - ssm:DescribeParameters
                   - ssm:AddTagsToResource
                   - ssm:ListTagsForResource
+                  # AWS::Config::ConformancePack with TemplateSSMDocumentDetails
+                  # requires the caller to have ssm:GetDocument /
+                  # ssm:DescribeDocument on the AWS-owned ConformancePackTemplate
+                  # SSM document. Without these, PutConformancePack returns
+                  # "Insufficient read permissions on SSM Document".
+                  - ssm:GetDocument
+                  - ssm:DescribeDocument
+                  - ssm:ListDocuments
                 Resource: "*"
               # Secrets Manager: lifecycle management only.
               # secretsmanager:GetSecretValue removed -- the deploy role does
@@ -915,6 +941,74 @@ Resources:
                 Action:
                   - organizations:DescribeOrganization
                   - organizations:ListAWSServiceAccessForOrganization
+                Resource: "*"
+              # Config: complete CRUD+rollback permission set for the
+              # AWS::Config::ConfigurationRecorder, AWS::Config::DeliveryChannel,
+              # and AWS::Config::ConformancePack resource handlers.
+              # Resource "*" is required: these services do not resource-scope
+              # the create handler (the recorder/channel/pack name is global per
+              # account+region). Mirrored in GhaCfnDeployPermissionsBoundary
+              # Config Sid per S-04 (#2325).
+              - Sid: Config
+                Effect: Allow
+                Action:
+                  # ConfigurationRecorder lifecycle
+                  - config:PutConfigurationRecorder
+                  - config:DescribeConfigurationRecorders
+                  - config:DescribeConfigurationRecorderStatus
+                  - config:DeleteConfigurationRecorder
+                  - config:StartConfigurationRecorder
+                  - config:StopConfigurationRecorder
+                  # DeliveryChannel lifecycle
+                  - config:PutDeliveryChannel
+                  - config:DescribeDeliveryChannels
+                  - config:DescribeDeliveryChannelStatus
+                  - config:DeleteDeliveryChannel
+                  # ConformancePack lifecycle
+                  - config:PutConformancePack
+                  - config:DescribeConformancePacks
+                  - config:DescribeConformancePackStatus
+                  - config:DescribeConformancePackCompliance
+                  - config:DeleteConformancePack
+                  - config:GetConformancePackComplianceDetails
+                  - config:GetConformancePackComplianceSummary
+                  # Tagging
+                  - config:TagResource
+                  - config:UntagResource
+                  - config:ListTagsForResource
+                Resource: "*"
+              # GuardDuty: complete CRUD+rollback permission set for the
+              # AWS::GuardDuty::Detector resource handler. Account-wide; no
+              # resource-scoping at create time. Mirrored in
+              # GhaCfnDeployPermissionsBoundary GD Sid per S-04 (#2325).
+              - Sid: GuardDuty
+                Effect: Allow
+                Action:
+                  - guardduty:CreateDetector
+                  - guardduty:DeleteDetector
+                  - guardduty:GetDetector
+                  - guardduty:UpdateDetector
+                  - guardduty:ListDetectors
+                  - guardduty:TagResource
+                  - guardduty:UntagResource
+                  - guardduty:ListTagsForResource
+                Resource: "*"
+              # IAM Access Analyzer: complete CRUD+rollback permission set for
+              # the AWS::AccessAnalyzer::Analyzer resource handler. Account-wide;
+              # no resource-scoping at create time. Mirrored in
+              # GhaCfnDeployPermissionsBoundary AA Sid per S-04 (#2325).
+              - Sid: AccessAnalyzer
+                Effect: Allow
+                Action:
+                  - access-analyzer:CreateAnalyzer
+                  - access-analyzer:DeleteAnalyzer
+                  - access-analyzer:GetAnalyzer
+                  - access-analyzer:ListAnalyzers
+                  - access-analyzer:UpdateAnalyzer
+                  - access-analyzer:TagResource
+                  - access-analyzer:UntagResource
+                  - access-analyzer:ListTagsForResource
+                  - access-analyzer:ValidatePolicy
                 Resource: "*"
 
 # Outputs are intentionally omitted. CloudFormation rejects a resource-import

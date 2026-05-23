@@ -1,0 +1,305 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  VaultMTG security services baseline (S-08 Config + AWS-managed conformance
+  pack, S-09 GuardDuty detector, S-10 IAM Access Analyzer external + unused).
+  Standalone stack; no cross-stack imports. R-11 imports ConfigRecorderName
+  via cross-stack reference -- R-11 must NOT create its own recorder.
+  See full rationale (FSBP vs. WAF Security Pillar substitution, R-11 sharing)
+  in the PR description and inline resource comments.
+
+# ---------------------------------------------------------------------------
+# Parameters
+# ---------------------------------------------------------------------------
+Parameters:
+
+  Environment:
+    Type: String
+    Default: production
+    AllowedValues: [production, staging]
+    Description: Deployment environment (production or staging).
+
+# ---------------------------------------------------------------------------
+# Resources
+# ---------------------------------------------------------------------------
+Resources:
+
+  # =========================================================================
+  # S-08: AWS Config
+  # =========================================================================
+
+  # -----------------------------------------------------------------------
+  # S3 bucket -- Config snapshot delivery
+  #
+  # AWS Config writes configuration snapshots and history files here.
+  # The bucket policy below grants config.amazonaws.com exactly the two
+  # actions Config requires; nothing wider.
+  # Retained on stack delete so audit history is preserved.
+  # -----------------------------------------------------------------------
+  ConfigSnapshotBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub "vaultmtg-config-snapshots-${Environment}-${AWS::AccountId}"
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+            BucketKeyEnabled: true
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Project
+          Value: vaultmtg
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Stack
+          Value: vaultmtg-security-services
+        - Key: ManagedBy
+          Value: cloudformation
+
+  # Config service principal must be able to verify ACL and write snapshots.
+  # Conditions scope SourceAccount to this account so a different account
+  # cannot accidentally deliver here. HTTPS-only is enforced via DenyInsecureTransport.
+  ConfigSnapshotBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ConfigSnapshotBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+
+          # AWSConfigBucketPermissionsCheck: GetBucketAcl on the bucket
+          - Sid: AWSConfigBucketPermissionsCheck
+            Effect: Allow
+            Principal:
+              Service: config.amazonaws.com
+            Action: s3:GetBucketAcl
+            Resource: !GetAtt ConfigSnapshotBucket.Arn
+            Condition:
+              StringEquals:
+                AWS:SourceAccount: !Ref AWS::AccountId
+
+          # AWSConfigBucketExistenceCheck: ListBucket scoped to this bucket
+          - Sid: AWSConfigBucketExistenceCheck
+            Effect: Allow
+            Principal:
+              Service: config.amazonaws.com
+            Action: s3:ListBucket
+            Resource: !GetAtt ConfigSnapshotBucket.Arn
+            Condition:
+              StringEquals:
+                AWS:SourceAccount: !Ref AWS::AccountId
+
+          # AWSConfigBucketDelivery: PutObject under AWSLogs/<account>/Config/*
+          - Sid: AWSConfigBucketDelivery
+            Effect: Allow
+            Principal:
+              Service: config.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub "${ConfigSnapshotBucket.Arn}/AWSLogs/${AWS::AccountId}/Config/*"
+            Condition:
+              StringEquals:
+                s3:x-amz-acl: bucket-owner-full-control
+                AWS:SourceAccount: !Ref AWS::AccountId
+
+          # Require HTTPS for all access
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: s3:*
+            Resource:
+              - !GetAtt ConfigSnapshotBucket.Arn
+              - !Sub "${ConfigSnapshotBucket.Arn}/*"
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
+
+  # -----------------------------------------------------------------------
+  # IAM role -- Config recorder
+  #
+  # AWS::IAM::Role with the AWS-managed AWS_ConfigRole attached.
+  # Trust policy: config.amazonaws.com only.
+  # -----------------------------------------------------------------------
+  ConfigRecorderRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "vaultmtg-${Environment}-config-recorder"
+      Description: Service role for AWS Config configuration recorder
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: config.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWS_ConfigRole
+      Tags:
+        - Key: Project
+          Value: vaultmtg
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Stack
+          Value: vaultmtg-security-services
+        - Key: ManagedBy
+          Value: cloudformation
+
+  # -----------------------------------------------------------------------
+  # Config configuration recorder + delivery channel
+  #
+  # AllSupported: true + IncludeGlobalResourceTypes: true gives full
+  # account-wide coverage. R-11 (drift detection) imports this recorder
+  # name via cross-stack export -- it MUST NOT create its own recorder
+  # (only one configuration recorder is allowed per account per region).
+  #
+  # Known circular dependency: AWS::Config::ConfigurationRecorder fails to
+  # stabilize with NoAvailableDeliveryChannelException unless a delivery
+  # channel exists, and AWS::Config::DeliveryChannel.PutDeliveryChannel
+  # fails with NoAvailableConfigurationRecorderException unless a recorder
+  # exists. The standard workaround is to give BOTH resources a DependsOn
+  # pointing at the bucket policy only, so CFN creates them in parallel;
+  # AWS internally pairs them once both PutXxx API calls have returned.
+  # -----------------------------------------------------------------------
+  ConfigRecorder:
+    Type: AWS::Config::ConfigurationRecorder
+    DependsOn:
+      - ConfigSnapshotBucketPolicy
+    Properties:
+      Name: !Sub "vaultmtg-${Environment}-recorder"
+      RoleARN: !GetAtt ConfigRecorderRole.Arn
+      RecordingGroup:
+        AllSupported: true
+        IncludeGlobalResourceTypes: true
+
+  ConfigDeliveryChannel:
+    Type: AWS::Config::DeliveryChannel
+    DependsOn:
+      - ConfigSnapshotBucketPolicy
+    Properties:
+      Name: !Sub "vaultmtg-${Environment}-delivery-channel"
+      S3BucketName: !Ref ConfigSnapshotBucket
+      ConfigSnapshotDeliveryProperties:
+        DeliveryFrequency: TwentyFour_Hours
+
+  # -----------------------------------------------------------------------
+  # Config conformance pack -- AWS-managed Security Pillar baseline
+  #
+  # Source: TemplateSSMDocumentDetails ->
+  #   AWSConformancePacks-OperationalBestPracticesforAWSWellArchitectedFrameworkSecurityPillar
+  #
+  # See template header for the rationale on why this pack (not "fsbp" by name).
+  # The DeliveryS3Bucket reuses the snapshot bucket -- conformance pack templates
+  # require a bucket whose name starts with "awsconfigconforms" OR has a
+  # bucket policy granting config-conforms.amazonaws.com PutObject. We pass an
+  # empty DeliveryS3Bucket to let AWS use the service-managed bucket so we
+  # don't need to widen the snapshot-bucket policy.
+  # -----------------------------------------------------------------------
+  SecurityBaselineConformancePack:
+    Type: AWS::Config::ConformancePack
+    DependsOn:
+      - ConfigRecorder
+      - ConfigDeliveryChannel
+    Properties:
+      ConformancePackName: vaultmtg-security-baseline
+      TemplateSSMDocumentDetails:
+        DocumentName: AWSConformancePacks-OperationalBestPracticesforAWSWellArchitectedFrameworkSecurityPillar
+
+  # =========================================================================
+  # S-09: GuardDuty
+  # =========================================================================
+
+  GuardDutyDetector:
+    Type: AWS::GuardDuty::Detector
+    Properties:
+      Enable: true
+      FindingPublishingFrequency: SIX_HOURS
+      Tags:
+        - Key: Project
+          Value: vaultmtg
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Stack
+          Value: vaultmtg-security-services
+        - Key: ManagedBy
+          Value: cloudformation
+
+  # =========================================================================
+  # S-10: IAM Access Analyzer
+  # =========================================================================
+
+  # External-access analyzer: surfaces resource policies that grant access
+  # to principals outside the account (cross-account / public).
+  ExternalAccessAnalyzer:
+    Type: AWS::AccessAnalyzer::Analyzer
+    Properties:
+      AnalyzerName: !Sub "vaultmtg-${Environment}-external-access"
+      Type: ACCOUNT
+      Tags:
+        - Key: Project
+          Value: vaultmtg
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Stack
+          Value: vaultmtg-security-services
+        - Key: ManagedBy
+          Value: cloudformation
+
+  # Unused-access analyzer: surfaces IAM roles and access keys unused for >= 90 days.
+  UnusedAccessAnalyzer:
+    Type: AWS::AccessAnalyzer::Analyzer
+    Properties:
+      AnalyzerName: !Sub "vaultmtg-${Environment}-unused-access"
+      Type: ACCOUNT_UNUSED_ACCESS
+      AnalyzerConfiguration:
+        UnusedAccessConfiguration:
+          UnusedAccessAge: 90
+      Tags:
+        - Key: Project
+          Value: vaultmtg
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Stack
+          Value: vaultmtg-security-services
+        - Key: ManagedBy
+          Value: cloudformation
+
+# ---------------------------------------------------------------------------
+# Outputs
+# ---------------------------------------------------------------------------
+Outputs:
+
+  ConfigRecorderName:
+    Description: Name of the Config configuration recorder. R-11 imports this via cross-stack reference.
+    Value: !Ref ConfigRecorder
+    Export:
+      Name: !Sub "vaultmtg-${Environment}-ConfigRecorderName"
+
+  ConfigSnapshotBucketName:
+    Description: Name of the S3 bucket receiving Config configuration snapshots.
+    Value: !Ref ConfigSnapshotBucket
+    Export:
+      Name: !Sub "vaultmtg-${Environment}-ConfigSnapshotBucketName"
+
+  GuardDutyDetectorId:
+    Description: ID of the account-wide GuardDuty detector.
+    Value: !Ref GuardDutyDetector
+    Export:
+      Name: !Sub "vaultmtg-${Environment}-GuardDutyDetectorId"
+
+  ExternalAccessAnalyzerArn:
+    Description: ARN of the IAM Access Analyzer (external access).
+    Value: !GetAtt ExternalAccessAnalyzer.Arn
+    Export:
+      Name: !Sub "vaultmtg-${Environment}-ExternalAccessAnalyzerArn"
+
+  UnusedAccessAnalyzerArn:
+    Description: ARN of the IAM Access Analyzer (unused access, 90-day threshold).
+    Value: !GetAtt UnusedAccessAnalyzer.Arn
+    Export:
+      Name: !Sub "vaultmtg-${Environment}-UnusedAccessAnalyzerArn"

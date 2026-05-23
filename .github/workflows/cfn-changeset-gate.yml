@@ -184,13 +184,14 @@ jobs:
             BASENAME=$(basename "$TEMPLATE_FILE" .yml)
 
             case "$BASENAME" in
-              cdn)                       echo "vaultmtg-app-cdn" ;;
-              iam-gha-roles)             echo "mtga-companion-iam-gha-roles" ;;
-              cloudtrail)                echo "vaultmtg-cloudtrail" ;;
+              cdn)                          echo "vaultmtg-app-cdn" ;;
+              iam-gha-roles)                echo "mtga-companion-iam-gha-roles" ;;
+              cloudtrail)                   echo "vaultmtg-cloudtrail" ;;
+              vaultmtg-security-services)   echo "vaultmtg-security-services" ;;
               # cloudwatch-alarms.yml backs both cloudwatch-alarms and
               # cloudwatch-alarms-staging stacks.  We gate both.
-              cloudwatch-alarms)         echo "cloudwatch-alarms" ;;  # handled specially below
-              *)                         echo "mtga-companion-${BASENAME}" ;;
+              cloudwatch-alarms)            echo "cloudwatch-alarms" ;;  # handled specially below
+              *)                            echo "mtga-companion-${BASENAME}" ;;
             esac
           }
 
@@ -397,3 +398,217 @@ jobs:
           fi
           echo "=========================================="
 
+  # ---------------------------------------------------------------------------
+  # S-10: Validate IAM policies in changed CloudFormation templates
+  #
+  # Extracts every PolicyDocument from added/modified cloudformation/*.yml
+  # templates and runs `aws accessanalyzer validate-policy` on each. This
+  # surfaces over-broad grants, redundant statements, and other AWS best-
+  # practice violations BEFORE the policy reaches the live account.
+  #
+  # RULE-INFRA-01: this job is introduced with continue-on-error: true so
+  # the gate does not hard-block PRs against any pre-existing violations.
+  # All violations must be cleaned up before the next PR flips this to a
+  # hard-fail. The job still prints findings prominently in the log.
+  # ---------------------------------------------------------------------------
+  validate-iam-policies:
+    name: Validate IAM policies (S-10)
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # required for OIDC role assumption
+      contents: read
+    continue-on-error: true   # RULE-INFRA-01: soft launch; flip to false after cleanup PR
+
+    env:
+      AWS_REGION: us-east-1
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Detect CloudFormation changes
+        id: cfn_check
+        run: |
+          CHANGED=$(git diff --name-only --diff-filter=AM \
+            "origin/${{ github.base_ref }}...HEAD" \
+            -- 'cloudformation/*.yml' | grep -v 'cloudformation/parameters/' || true)
+          if [ -z "$CHANGED" ]; then
+            echo "has_cfn_changes=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_cfn_changes=true" >> "$GITHUB_OUTPUT"
+            echo "changed_templates<<EOF" >> "$GITHUB_OUTPUT"
+            echo "$CHANGED" >> "$GITHUB_OUTPUT"
+            echo "EOF" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Pass (no CloudFormation changes)
+        if: steps.cfn_check.outputs.has_cfn_changes == 'false'
+        run: echo "No CloudFormation templates changed -- IAM policy validation skipped."
+
+      - name: Install yq (YAML extraction)
+        if: steps.cfn_check.outputs.has_cfn_changes == 'true'
+        run: |
+          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+          yq --version
+
+      - name: Configure AWS credentials
+        if: steps.cfn_check.outputs.has_cfn_changes == 'true'
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ secrets.AWS_CFN_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Run accessanalyzer validate-policy on every PolicyDocument
+        if: steps.cfn_check.outputs.has_cfn_changes == 'true'
+        run: |
+          set -euo pipefail
+
+          # Iterate over every changed template
+          CHANGED_TEMPLATES=$(echo "${{ steps.cfn_check.outputs.changed_templates }}" | tr '\n' ' ')
+          TOTAL_FINDINGS=0
+          OVERALL_OK=true
+
+          for TEMPLATE_FILE in $CHANGED_TEMPLATES; do
+            [ -z "$TEMPLATE_FILE" ] && continue
+            echo ""
+            echo "=========================================="
+            echo "  Template: $TEMPLATE_FILE"
+            echo "=========================================="
+
+            # Extract every Resources.*.Properties.PolicyDocument plus every
+            # AssumeRolePolicyDocument, BucketPolicy PolicyDocument, KeyPolicy,
+            # and inline IAM::Policy / IAM::ManagedPolicy PolicyDocument.
+            # yq emits each match as a separate JSON document.
+            POLICIES_JSON=$(yq -o=json eval-all '
+              .Resources | to_entries[] |
+                select(.value.Properties.PolicyDocument or
+                       .value.Properties.AssumeRolePolicyDocument or
+                       .value.Properties.KeyPolicy) |
+                {
+                  "logicalId": .key,
+                  "type": .value.Type,
+                  "policies": [
+                    .value.Properties.PolicyDocument,
+                    .value.Properties.AssumeRolePolicyDocument,
+                    .value.Properties.KeyPolicy
+                  ] | map(select(. != null))
+                }
+            ' "$TEMPLATE_FILE" 2>/dev/null || echo '')
+
+            if [ -z "$POLICIES_JSON" ] || [ "$POLICIES_JSON" = "null" ]; then
+              echo "  No IAM/resource policies in this template."
+              continue
+            fi
+
+            # Walk each (logicalId, policy) pair and run validate-policy.
+            # POLICIES_JSON is a stream of JSON objects (one per resource).
+            echo "$POLICIES_JSON" | python3 <<'PY'
+          import json, sys, subprocess, os
+
+          stream = sys.stdin.read().strip()
+          if not stream:
+              sys.exit(0)
+
+          # yq -o=json eval-all emits multiple top-level JSON objects separated by
+          # newlines. Parse them one at a time using JSONDecoder.raw_decode.
+          decoder = json.JSONDecoder()
+          idx = 0
+          resources = []
+          while idx < len(stream):
+              # Skip whitespace
+              while idx < len(stream) and stream[idx] in ' \t\n\r':
+                  idx += 1
+              if idx >= len(stream):
+                  break
+              try:
+                  obj, end = decoder.raw_decode(stream, idx)
+                  resources.append(obj)
+                  idx = end
+              except json.JSONDecodeError:
+                  break
+
+          findings_total = 0
+          for r in resources:
+              logical_id = r.get('logicalId', '?')
+              rtype = r.get('type', '?')
+              for policy in r.get('policies', []):
+                  if policy is None:
+                      continue
+                  # PolicyType: IDENTITY_POLICY for assume-role and managed/inline
+                  # IAM policies; RESOURCE_POLICY for bucket policies, KMS key policies, etc.
+                  if 'AssumeRolePolicyDocument' in policy or rtype in ('AWS::IAM::Role', 'AWS::IAM::Policy', 'AWS::IAM::ManagedPolicy'):
+                      ptype = 'IDENTITY_POLICY'
+                  else:
+                      ptype = 'RESOURCE_POLICY'
+
+                  # CloudFormation policies are dicts that may contain !Ref/!Sub
+                  # intrinsics yq emits as scalar strings prefixed with '!'.
+                  # validate-policy needs a syntactically-valid JSON IAM policy;
+                  # we substitute placeholders for any non-resolvable values.
+                  def normalize(node):
+                      if isinstance(node, dict):
+                          # CloudFormation function objects: replace with placeholder
+                          if len(node) == 1 and list(node.keys())[0].startswith('Fn::'):
+                              return 'arn:aws:iam::000000000000:role/placeholder'
+                          if len(node) == 1 and list(node.keys())[0] == 'Ref':
+                              return 'arn:aws:iam::000000000000:role/placeholder'
+                          return {k: normalize(v) for k, v in node.items()}
+                      if isinstance(node, list):
+                          return [normalize(v) for v in node]
+                      if isinstance(node, str) and node.startswith('!'):
+                          return 'arn:aws:iam::000000000000:role/placeholder'
+                      return node
+
+                  normalized = normalize(policy)
+                  policy_str = json.dumps(normalized)
+
+                  print(f'\n  Validating {logical_id} ({rtype}) as {ptype}...')
+                  try:
+                      out = subprocess.run(
+                          ['aws', 'accessanalyzer', 'validate-policy',
+                           '--policy-type', ptype,
+                           '--policy-document', policy_str,
+                           '--region', os.environ.get('AWS_REGION', 'us-east-1'),
+                           '--output', 'json'],
+                          capture_output=True, text=True, timeout=60
+                      )
+                      if out.returncode != 0:
+                          print(f'    validate-policy errored (skipping): {out.stderr[:200]}')
+                          continue
+                      result = json.loads(out.stdout)
+                      findings = result.get('findings', [])
+                      if not findings:
+                          print(f'    OK: no findings.')
+                          continue
+                      print(f'    {len(findings)} finding(s):')
+                      for f in findings:
+                          ftype = f.get('findingType', '?')
+                          issue = f.get('issueCode', '?')
+                          detail = f.get('findingDetails', '')[:200]
+                          print(f'      [{ftype}] {issue}: {detail}')
+                      findings_total += len(findings)
+                  except Exception as e:
+                      print(f'    validate-policy exception (skipping): {e}')
+
+          # Print summary; we return 0 (soft-fail) but emit a counter the runner can read.
+          print(f'\n  TEMPLATE TOTAL: {findings_total} finding(s).')
+          with open(os.environ.get('GITHUB_ENV', '/dev/null'), 'a') as fh:
+              try:
+                  prior = int(os.environ.get('VALIDATE_FINDINGS_TOTAL', '0'))
+              except ValueError:
+                  prior = 0
+              fh.write(f'VALIDATE_FINDINGS_TOTAL={prior + findings_total}\n')
+          PY
+          done
+
+          echo ""
+          echo "=========================================="
+          echo "Validate-policy total findings: ${VALIDATE_FINDINGS_TOTAL:-0}"
+          echo "=========================================="
+          echo ""
+          echo "NOTE: this gate is currently in soft-launch mode per RULE-INFRA-01."
+          echo "Findings are reported but do not block merge. After all reported"
+          echo "violations are cleaned up, flip continue-on-error to false on this job."

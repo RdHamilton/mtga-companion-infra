@@ -25,6 +25,7 @@ on:
           - iam-gha-roles
           - cloudtrail
           - staging-deploy-role
+          - vaultmtg-security-services
       dry_run:
         description: Dry run — validate and show changeset only, do not deploy
         required: false
@@ -60,6 +61,7 @@ jobs:
             iam-gha-roles)              STACK_NAME="mtga-companion-iam-gha-roles" ;       TEMPLATE_NAME="${{ inputs.stack }}" ;;
             cloudwatch-alarms-staging)  STACK_NAME="mtga-companion-cloudwatch-alarms-staging" ; TEMPLATE_NAME="cloudwatch-alarms" ;;
             cloudtrail)                 STACK_NAME="vaultmtg-cloudtrail" ;                TEMPLATE_NAME="${{ inputs.stack }}" ;;
+            vaultmtg-security-services) STACK_NAME="vaultmtg-security-services" ;        TEMPLATE_NAME="${{ inputs.stack }}" ;;
             cloudwatch-dashboards)      STACK_NAME="vaultmtg-cloudwatch-dashboards" ;     TEMPLATE_NAME="${{ inputs.stack }}" ;;
             staging-deploy-role)        STACK_NAME="mtga-companion-staging-deploy-role" ; TEMPLATE_NAME="${{ inputs.stack }}" ;;
             logs-import)                STACK_NAME="mtga-companion-logs" ;                TEMPLATE_NAME="logs" ;;
