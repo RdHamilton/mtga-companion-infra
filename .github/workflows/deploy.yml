@@ -429,8 +429,13 @@ jobs:
               --query 'Stacks[0].StackStatus' \
               --output text 2>/dev/null || echo "DOES_NOT_EXIST")
 
-            if echo "$STACK_STATUS" | grep -qF 'ROLLBACK_COMPLETE'; then
-              # Stack is in ROLLBACK_COMPLETE — must delete and recreate, not update
+            # IMPORTANT: exact-string equality, not grep -qF. The previous `grep -qF 'ROLLBACK_COMPLETE'`
+            # also matched UPDATE_ROLLBACK_COMPLETE (substring match), which would trigger a delete-and-recreate
+            # on a healthy stack that had a failed UPDATE — destroying live resources. See vault-mtg#TBD for
+            # the 2026-05-23 incident that prompted this fix.
+            if [ "$STACK_STATUS" = "ROLLBACK_COMPLETE" ]; then
+              # Stack is in ROLLBACK_COMPLETE — only triggered when an initial CREATE failed,
+              # so the stack has no live resources to preserve. Safe to delete and recreate.
               aws cloudformation delete-stack \
                 --stack-name "${{ env.STACK_NAME }}" \
                 --region us-east-1
@@ -438,10 +443,13 @@ jobs:
                 --stack-name "${{ env.STACK_NAME }}" \
                 --region us-east-1
               CHANGE_TYPE="CREATE"
-            elif echo "$STACK_STATUS" | grep -qE 'COMPLETE|ROLLBACK'; then
-              CHANGE_TYPE="UPDATE"
             else
-              CHANGE_TYPE="CREATE"
+              case "$STACK_STATUS" in
+                CREATE_COMPLETE|UPDATE_COMPLETE|IMPORT_COMPLETE|UPDATE_ROLLBACK_COMPLETE|IMPORT_ROLLBACK_COMPLETE)
+                  CHANGE_TYPE="UPDATE" ;;
+                *)
+                  CHANGE_TYPE="CREATE" ;;
+              esac
             fi
             echo "change_type=$CHANGE_TYPE" >> $GITHUB_OUTPUT
             echo "Changeset type: $CHANGE_TYPE (stack status: $STACK_STATUS)"

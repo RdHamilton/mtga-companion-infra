@@ -230,14 +230,19 @@ jobs:
               --query 'Stacks[0].StackStatus' \
               --output text 2>/dev/null || echo "DOES_NOT_EXIST")
 
-            if echo "$STACK_STATUS" | grep -qE 'COMPLETE|ROLLBACK'; then
-              CHANGE_TYPE="UPDATE"
-            else
-              CHANGE_TYPE="CREATE"
-              echo "  Stack does not exist yet (status: $STACK_STATUS) -- CREATE changeset."
-              echo "  CREATE changesets have no Replacement field; gate passes automatically."
-              return 0
-            fi
+            # Tightened from grep -qE substring match to an explicit allowlist (vault-mtg#TBD).
+            # The old pattern matched any status containing "COMPLETE" or "ROLLBACK", which is fragile.
+            case "$STACK_STATUS" in
+              CREATE_COMPLETE|UPDATE_COMPLETE|IMPORT_COMPLETE|UPDATE_ROLLBACK_COMPLETE|IMPORT_ROLLBACK_COMPLETE)
+                CHANGE_TYPE="UPDATE"
+                ;;
+              *)
+                CHANGE_TYPE="CREATE"
+                echo "  Stack does not exist yet or is in an unstable state (status: $STACK_STATUS) -- CREATE changeset."
+                echo "  CREATE changesets have no Replacement field; gate passes automatically."
+                return 0
+                ;;
+            esac
 
             echo "  Stack status: $STACK_STATUS -- running $CHANGE_TYPE changeset."
 

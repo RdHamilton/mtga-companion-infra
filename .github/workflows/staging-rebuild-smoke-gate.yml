@@ -199,11 +199,13 @@ jobs:
             --query 'Stacks[0].StackStatus' \
             --output text 2>/dev/null || echo "DOES_NOT_EXIST")
 
-          if echo "$STACK_STATUS" | grep -qE 'COMPLETE|ROLLBACK'; then
-            CHANGE_TYPE="UPDATE"
-          else
-            CHANGE_TYPE="CREATE"
-          fi
+          # Tightened from grep -qE substring match to an explicit allowlist (vault-mtg#TBD).
+          case "$STACK_STATUS" in
+            CREATE_COMPLETE|UPDATE_COMPLETE|IMPORT_COMPLETE|UPDATE_ROLLBACK_COMPLETE|IMPORT_ROLLBACK_COMPLETE)
+              CHANGE_TYPE="UPDATE" ;;
+            *)
+              CHANGE_TYPE="CREATE" ;;
+          esac
           echo "change_type=$CHANGE_TYPE" >> "$GITHUB_OUTPUT"
           echo "Changeset type: $CHANGE_TYPE (stack: $STACK_STATUS)"
 

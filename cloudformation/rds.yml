@@ -112,6 +112,7 @@ Resources:
   DBInstance:
     Type: AWS::RDS::DBInstance
     DeletionPolicy: Snapshot   # take a final snapshot on stack deletion
+    UpdateReplacePolicy: Snapshot   # also snapshot if a property change forces replacement
     Properties:
       DBInstanceIdentifier: mtga-companion-postgres
       DBName: !Ref DBName
