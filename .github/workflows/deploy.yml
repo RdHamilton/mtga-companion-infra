@@ -13,7 +13,6 @@ on:
           - rds
           - ec2
           - vpc
-          - dns-staging
           - rhamiltoneng-dns
           - sync-lambda
           - cloudwatch-alarms
@@ -66,7 +65,6 @@ jobs:
           case "${{ inputs.stack }}" in
             cdn)                        STACK_NAME="vaultmtg-app-cdn" ;                   TEMPLATE_NAME="${{ inputs.stack }}" ;;
             rhamiltoneng-dns)           STACK_NAME="rhamiltoneng-dns" ;                   TEMPLATE_NAME="${{ inputs.stack }}" ;;
-            dns-staging)                STACK_NAME="mtga-companion-dns-staging" ;         TEMPLATE_NAME="${{ inputs.stack }}" ;;
             iam-gha-roles)              STACK_NAME="mtga-companion-iam-gha-roles" ;       TEMPLATE_NAME="${{ inputs.stack }}" ;;
             iam-break-glass)            STACK_NAME="vaultmtg-iam-break-glass" ;           TEMPLATE_NAME="${{ inputs.stack }}" ;;
             cloudwatch-alarms-staging)  STACK_NAME="mtga-companion-cloudwatch-alarms-staging" ; TEMPLATE_NAME="cloudwatch-alarms" ;;

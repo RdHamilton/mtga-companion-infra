@@ -83,7 +83,6 @@ jobs:
       STACKS: >-
         mtga-companion-cloudwatch-alarms
         mtga-companion-deploy-artifacts
-        mtga-companion-dns-staging
         mtga-companion-ec2
         mtga-companion-ec2-sg
         mtga-companion-iam-gha-roles
