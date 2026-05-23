@@ -1,12 +1,14 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
   rhamiltoneng.com production DNS (Route 53).
-  Codifies every production record so live state matches IaC.  Mirrors
-  dns.yml in a separate stack to decouple the two brands (same split as
-  vaultmtg-app-cdn vs rhamiltoneng-cdn).  Cutover (one-shot) requires
-  console deletion of each existing record then CREATE of this stack --
-  see PR #2335 body for the runbook.  AWS::Route53::RecordSet is NOT
-  importable.  Every record has DeletionPolicy: Retain.
+  Codifies every production record so live state matches IaC.  Kept in a
+  separate stack from any vaultmtg DNS to decouple the two brands (same
+  split as vaultmtg-app-cdn vs rhamiltoneng-cdn).  The vaultmtg.app
+  hosted zone is managed directly in the AWS console, not via
+  CloudFormation.  Cutover (one-shot) requires console deletion of each
+  existing record then CREATE of this stack -- see PR #2335 body for the
+  runbook.  AWS::Route53::RecordSet is NOT importable.  Every record has
+  DeletionPolicy: Retain.
 
 Parameters:
   Environment:

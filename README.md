@@ -5,7 +5,7 @@ Infrastructure as Code for MTGA Companion — CloudFormation templates, EC2/RDS 
 ## Structure
 
 ```
-cloudformation/   — AWS CloudFormation templates (VPC, RDS, EC2, DNS)
+cloudformation/   — AWS CloudFormation templates (VPC, RDS, EC2)
 scripts/          — Bootstrap and deploy scripts
 nginx/            — nginx site configuration
 systemd/          — systemd service definitions
@@ -53,7 +53,8 @@ Run stacks in this order — each depends on the previous:
 1. `ec2-sg.yml` — EC2 security group
 2. `rds.yml` — RDS PostgreSQL db.t3.micro (imports EC2 SG; exports DBSecretArn)
 3. `ec2.yml` — EC2 t3.small + IAM instance profile (imports DBSecretArn)
-4. `dns.yml` — Route 53 records *(after domain purchase)*
+
+Route 53 records for `vaultmtg.app` are managed directly in the AWS console — not via CloudFormation. The `rhamiltoneng-dns.yml` stack is the only DNS template in this repo and covers only the `rhamiltoneng.com` zone.
 
 **Hold all deployments until AWS Activate credits are confirmed.**
 

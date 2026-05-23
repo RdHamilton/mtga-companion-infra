@@ -94,7 +94,6 @@ jobs:
         vaultmtg-app-cdn
         vaultmtg-cloudtrail
         vaultmtg-cloudwatch-dashboards
-        vaultmtg-dns
         vaultmtg-security-services
 
     steps:
