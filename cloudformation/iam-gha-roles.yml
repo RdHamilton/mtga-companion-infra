@@ -594,10 +594,9 @@ Resources:
                   - !Sub repo:${GitHubOrg}/${InfraRepo}:pull_request
                   - !Sub repo:${GitHubOrg}/${InfraRepo}:environment:production
       Policies:
-        - PolicyName: cfn-stack-deploy
+        - PolicyName: cfn-stack-deploy-orchestration
           PolicyDocument:
             Version: "2012-10-17"
-            Id: vaultmtg-reconcile-20260523-cfn-deploy
             Statement:
               - Sid: CloudFormationStackOperations
                 Effect: Allow
@@ -722,6 +721,10 @@ Resources:
                   # the assumed role's own permissions before executing a changeset.
                   - iam:SimulatePrincipalPolicy
                 Resource: "*"
+        - PolicyName: cfn-stack-deploy-application
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
               - Sid: EC2
                 Effect: Allow
                 Action: ec2:*
@@ -885,52 +888,10 @@ Resources:
                   - route53:ListTagsForResource
                   - route53:UpdateHealthCheck
                 Resource: "*"
-              - Sid: CloudWatch
-                Effect: Allow
-                Action:
-                  - cloudwatch:PutMetricAlarm
-                  - cloudwatch:DeleteAlarms
-                  - cloudwatch:DescribeAlarms
-                  - cloudwatch:ListTagsForResource
-                  - cloudwatch:TagResource
-                  - cloudwatch:PutDashboard
-                  - cloudwatch:DeleteDashboards
-                  - cloudwatch:GetDashboard
-                Resource: "*"
-              # CloudWatch Logs: log-group lifecycle for the AWS::Logs::LogGroup
-              # resource handler. Scoped to the /vaultmtg/* log-group namespace
-              # to follow least-privilege (#2471).
-              # Mirrored in GhaCfnDeployPermissionsBoundary per S-04 (#2325) design rule.
-              - Sid: CloudWatchLogs
-                Effect: Allow
-                Action:
-                  - logs:CreateLogGroup
-                  - logs:DeleteLogGroup
-                  - logs:PutRetentionPolicy
-                  - logs:TagResource
-                  - logs:UntagResource
-                Resource:
-                  - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/vaultmtg/*
-                  - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/vaultmtg/*:*
-              # CloudWatch Logs: non-resource-scopable list/describe actions and
-              # metric filter lifecycle. IAM does not support resource-level
-              # permissions for these actions — the simulator and real API both
-              # require Resource:"*". DescribeLogGroups is account-wide;
-              # PutMetricFilter/DeleteMetricFilter/DescribeMetricFilters operate
-              # on the metric-filter ARN (not the log-group ARN), which is not
-              # predictable at policy-write time. ListTagsForResource on log
-              # resources also requires Resource:"*" in practice.
-              # Mirrored in GhaCfnDeployPermissionsBoundary per S-04 (#2325) design rule.
-              # Added for AWS::Logs::MetricFilter handler (vault-mtg#2333).
-              - Sid: CloudWatchLogsGlobal
-                Effect: Allow
-                Action:
-                  - logs:DescribeLogGroups
-                  - logs:ListTagsForResource
-                  - logs:PutMetricFilter
-                  - logs:DeleteMetricFilter
-                  - logs:DescribeMetricFilters
-                Resource: "*"
+        - PolicyName: cfn-stack-deploy-integration
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
               - Sid: SNS
                 Effect: Allow
                 Action:
@@ -946,6 +907,35 @@ Resources:
                   - sns:Subscribe
                   - sns:TagResource
                   - sns:Unsubscribe
+                Resource: "*"
+              - Sid: SQS
+                Effect: Allow
+                Action:
+                  - sqs:CreateQueue
+                  - sqs:DeleteQueue
+                  - sqs:GetQueueAttributes
+                  - sqs:SetQueueAttributes
+                  - sqs:ListQueueTags
+                  - sqs:TagQueue
+                  - sqs:GetQueueUrl
+                Resource: "*"
+              # CloudTrail: complete CRUD+rollback permission set for the
+              # AWS::CloudTrail::Trail resource handler. cloudtrail: actions are
+              # not resource-scopable for the create handler (the trail ARN does
+              # not exist yet), so Resource "*" is required.
+              - Sid: EventBridge
+                Effect: Allow
+                Action:
+                  - scheduler:CreateSchedule
+                  - scheduler:UpdateSchedule
+                  - scheduler:DeleteSchedule
+                  - scheduler:GetSchedule
+                  - scheduler:ListSchedules
+                  - events:PutRule
+                  - events:DeleteRule
+                  - events:DescribeRule
+                  - events:PutTargets
+                  - events:RemoveTargets
                 Resource: "*"
               - Sid: SSM
                 Effect: Allow
@@ -1017,35 +1007,56 @@ Resources:
                   # Retained: grant management used by other infra stacks
                   - kms:CreateGrant
                 Resource: "*"
-              - Sid: EventBridge
+        - PolicyName: cfn-stack-deploy-observability-security
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: CloudWatch
                 Effect: Allow
                 Action:
-                  - scheduler:CreateSchedule
-                  - scheduler:UpdateSchedule
-                  - scheduler:DeleteSchedule
-                  - scheduler:GetSchedule
-                  - scheduler:ListSchedules
-                  - events:PutRule
-                  - events:DeleteRule
-                  - events:DescribeRule
-                  - events:PutTargets
-                  - events:RemoveTargets
+                  - cloudwatch:PutMetricAlarm
+                  - cloudwatch:DeleteAlarms
+                  - cloudwatch:DescribeAlarms
+                  - cloudwatch:ListTagsForResource
+                  - cloudwatch:TagResource
+                  - cloudwatch:PutDashboard
+                  - cloudwatch:DeleteDashboards
+                  - cloudwatch:GetDashboard
                 Resource: "*"
-              - Sid: SQS
+              # CloudWatch Logs: log-group lifecycle for the AWS::Logs::LogGroup
+              # resource handler. Scoped to the /vaultmtg/* log-group namespace
+              # to follow least-privilege (#2471).
+              # Mirrored in GhaCfnDeployPermissionsBoundary per S-04 (#2325) design rule.
+              - Sid: CloudWatchLogs
                 Effect: Allow
                 Action:
-                  - sqs:CreateQueue
-                  - sqs:DeleteQueue
-                  - sqs:GetQueueAttributes
-                  - sqs:SetQueueAttributes
-                  - sqs:ListQueueTags
-                  - sqs:TagQueue
-                  - sqs:GetQueueUrl
+                  - logs:CreateLogGroup
+                  - logs:DeleteLogGroup
+                  - logs:PutRetentionPolicy
+                  - logs:TagResource
+                  - logs:UntagResource
+                Resource:
+                  - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/vaultmtg/*
+                  - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/vaultmtg/*:*
+              # CloudWatch Logs: non-resource-scopable list/describe actions and
+              # metric filter lifecycle. IAM does not support resource-level
+              # permissions for these actions — the simulator and real API both
+              # require Resource:"*". DescribeLogGroups is account-wide;
+              # PutMetricFilter/DeleteMetricFilter/DescribeMetricFilters operate
+              # on the metric-filter ARN (not the log-group ARN), which is not
+              # predictable at policy-write time. ListTagsForResource on log
+              # resources also requires Resource:"*" in practice.
+              # Mirrored in GhaCfnDeployPermissionsBoundary per S-04 (#2325) design rule.
+              # Added for AWS::Logs::MetricFilter handler (vault-mtg#2333).
+              - Sid: CloudWatchLogsGlobal
+                Effect: Allow
+                Action:
+                  - logs:DescribeLogGroups
+                  - logs:ListTagsForResource
+                  - logs:PutMetricFilter
+                  - logs:DeleteMetricFilter
+                  - logs:DescribeMetricFilters
                 Resource: "*"
-              # CloudTrail: complete CRUD+rollback permission set for the
-              # AWS::CloudTrail::Trail resource handler. cloudtrail: actions are
-              # not resource-scopable for the create handler (the trail ARN does
-              # not exist yet), so Resource "*" is required.
               - Sid: CloudTrail
                 Effect: Allow
                 Action:
