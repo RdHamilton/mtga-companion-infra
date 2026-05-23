@@ -1,0 +1,175 @@
+name: Auto-Deploy CFN Stacks on Merge to Main
+
+# Triggered automatically when CloudFormation templates change on main.
+#
+# Purpose (issue #2460, standing order PC-12): IaC is not Done until deployed.
+# Merged-but-undeployed templates accumulate silent drift between main and live
+# AWS. This bit the v0.3.1.1 wave twice (R-13 surfaced merged-but-undeployed
+# stacks; ec2.yml accumulated UserData changes across 3 PRs and crossed the
+# 16,384-byte limit).
+#
+# Approach: detect which templates changed in the push, map each file to its
+# CloudFormation stack input(s), then re-use the existing deploy.yml workflow
+# (workflow_dispatch) one stack at a time. We do NOT duplicate deploy logic —
+# this workflow only triggers the existing deployer. That keeps a single source
+# of truth for stack name resolution, IAM simulation, changeset replacement
+# guards, and the production-environment approval gate.
+#
+# Idempotence: deploy.yml's changeset path tolerates "no changes" (the
+# create-change-set wait is followed by `|| true`, and execute proceeds with
+# nothing to apply). No-op merges therefore complete without failing.
+#
+# Production gate preserved: deploy.yml declares `environment: production`,
+# which gates each dispatched run on the existing human-approver list. This
+# workflow does NOT bypass that gate — it just initiates the run.
+#
+# Skipped templates:
+#   - vaultmtg-security-services-import.yml: one-time IMPORT (adopt existing
+#     resources). Re-deploying via this path would attempt CREATE/UPDATE and
+#     fail.
+#   - logs-import (no separate template; uses logs.yml with IMPORT changeset
+#     type): same reason. The base `logs` stack is auto-deployed when logs.yml
+#     changes.
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'cloudformation/**.yml'
+
+concurrency:
+  # Serialize against direct manual deploys (deploy.yml uses the same group).
+  # We never want two CFN operations against the same account in parallel.
+  group: cloudformation-deploy
+  cancel-in-progress: false
+
+permissions:
+  actions: write    # required to dispatch deploy.yml via gh workflow run
+  contents: read
+
+jobs:
+  detect-and-dispatch:
+    name: Detect changed templates and dispatch deploy.yml per stack
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6 — SHA pinned (ticket #2385 AC3)
+        with:
+          # Need HEAD~1 to diff against the previous commit.
+          fetch-depth: 2
+
+      - name: Detect changed CloudFormation templates
+        id: detect
+        run: |
+          # List basenames of changed cloudformation/*.yml files since the
+          # previous commit. Restricted to templates at the top level —
+          # cloudformation/parameters/ changes do not (yet) trigger deploys.
+          # If parameters drift becomes a problem, add a separate mapping.
+          CHANGED=$(git diff --name-only HEAD~1 HEAD -- 'cloudformation/*.yml' | xargs -r -n1 basename)
+          echo "Changed templates:"
+          echo "$CHANGED"
+          # Save for the next step as a newline-delimited list.
+          {
+            echo 'changed<<EOF'
+            echo "$CHANGED"
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Map templates to stack inputs and dispatch
+        if: steps.detect.outputs.changed != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # Map each template filename to one or more deploy.yml `stack` inputs.
+          # Multi-value entries (space-separated) handle the cloudwatch-alarms
+          # case where one template backs both the prod and staging stacks.
+          #
+          # Templates NOT mapped here are intentionally excluded:
+          #   - vaultmtg-security-services-import.yml (one-time IMPORT)
+          # Anything else missing from this map fails the workflow loudly so
+          # we add a new template and forget to wire it up.
+          declare -A STACK_MAP=(
+            [cdn.yml]="cdn"
+            [cloudtrail.yml]="cloudtrail"
+            [cloudwatch-alarms.yml]="cloudwatch-alarms cloudwatch-alarms-staging"
+            [cloudwatch-dashboards.yml]="cloudwatch-dashboards"
+            [deploy-artifacts.yml]="deploy-artifacts"
+            [dns-staging.yml]="dns-staging"
+            [dns.yml]="dns"
+            [ec2-sg.yml]="ec2-sg"
+            [ec2.yml]="ec2"
+            [iam-break-glass.yml]="iam-break-glass"
+            [iam-gha-roles.yml]="iam-gha-roles"
+            [logs.yml]="logs"
+            [rds.yml]="rds"
+            [rhamiltoneng-dns.yml]="rhamiltoneng-dns"
+            [security-alarms.yml]="security-alarms"
+            [staging-deploy-role.yml]="staging-deploy-role"
+            [sync-lambda.yml]="sync-lambda"
+            [vaultmtg-security-services.yml]="vaultmtg-security-services"
+            [vpc.yml]="vpc"
+          )
+
+          # Templates we deliberately ignore on path triggers — log them but
+          # do not dispatch. If you genuinely need a re-import, run deploy.yml
+          # manually with the *-import stack input.
+          IGNORE_TEMPLATES=(vaultmtg-security-services-import.yml)
+
+          # Collect unique stacks to dispatch (a single push can change multiple
+          # templates; dedupe so we never fire two parallel deploys for one stack).
+          declare -A DISPATCH_SET=()
+
+          while IFS= read -r file; do
+            [ -z "$file" ] && continue
+            # Skip ignored templates
+            skip=0
+            for ig in "${IGNORE_TEMPLATES[@]}"; do
+              if [ "$file" = "$ig" ]; then
+                echo "Skipping import-only template: $file"
+                skip=1
+                break
+              fi
+            done
+            [ "$skip" -eq 1 ] && continue
+
+            if [ -z "${STACK_MAP[$file]:-}" ]; then
+              echo "::error::No stack mapping defined for cloudformation/$file. Add it to STACK_MAP in deploy-on-merge.yml."
+              exit 1
+            fi
+            for stack in ${STACK_MAP[$file]}; do
+              DISPATCH_SET[$stack]=1
+            done
+          done <<< '${{ steps.detect.outputs.changed }}'
+
+          if [ ${#DISPATCH_SET[@]} -eq 0 ]; then
+            echo "No deployable templates changed (all ignored). Nothing to do."
+            exit 0
+          fi
+
+          echo "Stacks to deploy:"
+          for stack in "${!DISPATCH_SET[@]}"; do
+            echo "  - $stack"
+          done
+
+          # Dispatch deploy.yml once per stack. The deploy.yml workflow handles:
+          #   - production environment approval gate
+          #   - IAM simulation
+          #   - changeset creation + replacement guard
+          #   - bootstrap script upload for the ec2 stack
+          #   - empty-changeset tolerance (existing wait + `|| true` semantics)
+          # We pass dry_run=false and confirm_replacements=false: any deploy
+          # that would replace a stateful resource will fail loudly and force
+          # a human to re-run deploy.yml manually with confirm_replacements=true.
+          for stack in "${!DISPATCH_SET[@]}"; do
+            echo "Dispatching deploy.yml for stack=$stack..."
+            gh workflow run deploy.yml \
+              --ref main \
+              -f stack="$stack" \
+              -f dry_run=false \
+              -f confirm_replacements=false
+          done
+
+          echo "All deploys dispatched. See the 'Deploy CloudFormation Stack' workflow for run status."
