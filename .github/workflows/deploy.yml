@@ -32,6 +32,11 @@ on:
         required: false
         type: boolean
         default: false
+      confirm_replacements:
+        description: Set to true to allow resource replacements (USE WITH CAUTION)
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
   group: cloudformation-deploy
@@ -207,6 +212,37 @@ jobs:
             --change-set-name "${{ steps.changeset.outputs.changeset_name }}" \
             --query 'Changes[].{Action:ResourceChange.Action,Resource:ResourceChange.LogicalResourceId,Type:ResourceChange.ResourceType,Replace:ResourceChange.Replacement}' \
             --output table
+
+      - name: Check changeset for replacements
+        # R-19 guard (issue #2345): block execution when the changeset would replace
+        # any resource. Replacement of a stateful resource (RDS DBInstance, EC2 Instance,
+        # EBS Volume, etc.) causes data loss and/or downtime; to proceed intentionally,
+        # re-run the workflow with confirm_replacements=true.
+        #
+        # Skipped on dry_run because dry_run never executes the changeset anyway.
+        id: replacement_check
+        if: ${{ !inputs.dry_run }}
+        run: |
+          CHANGES=$(aws cloudformation describe-change-set \
+            --stack-name "${{ env.STACK_NAME }}" \
+            --change-set-name "${{ steps.changeset.outputs.changeset_name }}" \
+            --query 'Changes[?ResourceChange.Replacement==`True`].{Type:ResourceChange.ResourceType,Id:ResourceChange.LogicalResourceId}' \
+            --output json)
+
+          if [ "$(echo "$CHANGES" | jq 'length')" -gt 0 ]; then
+            echo "REPLACEMENT_DETECTED=true" >> "$GITHUB_OUTPUT"
+            echo "::warning::Changeset contains resource replacements:"
+            echo "$CHANGES" | jq -r '.[] | "  - \(.Type): \(.Id)"'
+            if [ "${{ inputs.confirm_replacements }}" != "true" ]; then
+              echo "::error::Resource replacements detected. Re-run with confirm_replacements=true to proceed."
+              exit 1
+            else
+              echo "::warning::confirm_replacements=true — proceeding with replacement."
+            fi
+          else
+            echo "REPLACEMENT_DETECTED=false" >> "$GITHUB_OUTPUT"
+            echo "No resource replacements detected in changeset."
+          fi
 
       - name: Execute changeset
         if: ${{ !inputs.dry_run }}
