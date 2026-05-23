@@ -27,6 +27,7 @@ on:
           - staging-deploy-role
           - vaultmtg-security-services
           - vaultmtg-security-services-import
+          - rhamiltoneng-cdn
       dry_run:
         description: Dry run — validate and show changeset only, do not deploy
         required: false
@@ -72,6 +73,7 @@ jobs:
             cloudwatch-dashboards)      STACK_NAME="vaultmtg-cloudwatch-dashboards" ;     TEMPLATE_NAME="${{ inputs.stack }}" ;;
             staging-deploy-role)        STACK_NAME="mtga-companion-staging-deploy-role" ; TEMPLATE_NAME="${{ inputs.stack }}" ;;
             logs-import)                STACK_NAME="mtga-companion-logs" ;                TEMPLATE_NAME="logs" ;;
+            rhamiltoneng-cdn)           STACK_NAME="rhamiltoneng-cdn" ;                   TEMPLATE_NAME="${{ inputs.stack }}" ;;
             *)                          STACK_NAME="mtga-companion-${{ inputs.stack }}" ; TEMPLATE_NAME="${{ inputs.stack }}" ;;
           esac
           echo "STACK_NAME=$STACK_NAME" >> $GITHUB_ENV
