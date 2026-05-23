@@ -43,30 +43,6 @@ require_ssm() {
     printf '%s' "$_val"
 }
 
-# Helper: fetch from primary path; fall back to legacy path if empty.
-fetch_ssm_with_fallback() {
-    local _primary="$1"
-    local _legacy="$2"
-    local _val
-    _val=$(fetch_ssm "$_primary")
-    if [ -z "$_val" ] || [ "$_val" = "None" ]; then
-        log "Primary SSM path '$_primary' empty - trying legacy '$_legacy'"
-        _val=$(fetch_ssm "$_legacy")
-    fi
-    printf '%s' "$_val"
-}
-
-require_ssm_with_fallback() {
-    local _primary="$1"
-    local _legacy="$2"
-    local _val
-    _val=$(fetch_ssm_with_fallback "$_primary" "$_legacy")
-    if [ -z "$_val" ] || [ "$_val" = "None" ]; then
-        log "FATAL: required SSM parameter '$_primary' (and legacy '$_legacy') missing. Aborting bootstrap."
-        exit 1
-    fi
-    printf '%s' "$_val"
-}
 
 # ---------------------------------------------------------
 # 1. System packages
@@ -88,28 +64,23 @@ chmod 750 "$ENV_DIR"
 # ---------------------------------------------------------
 # 3. Environment file from SSM
 #
-# R-13 cutover: reads from /vaultmtg/app/production/* (new canonical
-# namespace) with fallback to /mtga-companion/production/* (old namespace)
-# during the cutover window. After Phase 5c is verified and Phase 5d
-# removes the legacy IAM grants, the fallback paths are deleted from this
-# script.
-#
+# Reads from /vaultmtg/app/production/* (canonical namespace, post R-13).
 # Bug fix (R-05): uses printf statements and the credential-free
 # DATABASE_URL pattern — credentials resolved at BFF startup via DB_SECRET_ARN.
 # ---------------------------------------------------------
-log "Fetching config from SSM (primary: /vaultmtg/app/production/*)..."
+log "Fetching config from SSM (/vaultmtg/app/production/*)..."
 
-PORT=$(fetch_ssm_with_fallback "/vaultmtg/app/production/PORT" "/mtga-companion/production/PORT")
+PORT=$(fetch_ssm "/vaultmtg/app/production/PORT")
 PORT="${PORT:-8080}"
 
-ALLOWED_ORIGINS=$(require_ssm_with_fallback "/vaultmtg/app/production/ALLOWED_ORIGINS" "/mtga-companion/production/ALLOWED_ORIGINS")
-DAEMON_JWT_SECRET=$(fetch_ssm_with_fallback "/vaultmtg/app/production/daemon-jwt-secret" "/mtga-companion/prod/daemon-jwt-secret")
+ALLOWED_ORIGINS=$(require_ssm "/vaultmtg/app/production/ALLOWED_ORIGINS")
+DAEMON_JWT_SECRET=$(fetch_ssm "/vaultmtg/app/production/daemon-jwt-secret")
 
 # Credential-free DATABASE_URL -- BFF resolves credentials via DB_SECRET_ARN
 # at startup (matches provision-db-url.sh and deploy-env.sh pattern).
-DB_SECRET_ARN=$(require_ssm_with_fallback "/vaultmtg/app/production/db-secret-arn" "/mtga-companion/production/db-secret-arn")
-DB_ENDPOINT=$(require_ssm_with_fallback "/vaultmtg/app/production/db-endpoint" "/mtga-companion/production/db-endpoint")
-DB_NAME=$(require_ssm_with_fallback "/vaultmtg/app/production/db-name" "/mtga-companion/production/db-name")
+DB_SECRET_ARN=$(require_ssm "/vaultmtg/app/production/db-secret-arn")
+DB_ENDPOINT=$(require_ssm "/vaultmtg/app/production/db-endpoint")
+DB_NAME=$(require_ssm "/vaultmtg/app/production/db-name")
 DATABASE_URL="postgresql://${DB_ENDPOINT}:5432/${DB_NAME}?sslmode=require"
 
 log "Writing env file to $ENV_DIR/env..."
@@ -134,12 +105,12 @@ log "Env file written successfully."
 # is fully self-installing without any manual deploy step.
 #
 # The deploy pipeline writes the deployed SHA to SSM after each release:
-#   /mtga-companion/production/latest-bff-sha
+#   /vaultmtg/app/production/latest-bff-sha
 # If the param is absent (pre-first-deploy), skip start but leave the
 # service enabled so the next CI deploy triggers a start automatically.
 # ---------------------------------------------------------
 log "Fetching BFF binary from S3..."
-DEPLOY_SHA=$(fetch_ssm "/mtga-companion/production/latest-bff-sha")
+DEPLOY_SHA=$(fetch_ssm "/vaultmtg/app/production/latest-bff-sha")
 DEPLOY_BUCKET="mtga-companion-deploy-artifacts-production"
 
 if [ -n "$DEPLOY_SHA" ] && [ "$DEPLOY_SHA" != "None" ]; then
@@ -152,7 +123,7 @@ if [ -n "$DEPLOY_SHA" ] && [ "$DEPLOY_SHA" != "None" ]; then
     mv "$BINARY_PATH.next" "$BINARY_PATH"
     log "BFF binary installed at $BINARY_PATH"
 else
-    log "WARNING: SSM /mtga-companion/production/latest-bff-sha not set."
+    log "WARNING: SSM /vaultmtg/app/production/latest-bff-sha not set."
     log "Binary not installed. The next CI deploy will install and start the service."
     log "Action required: ensure deploy-bff.yml writes latest-bff-sha to SSM (issue #2323)."
 fi
@@ -363,12 +334,12 @@ LOGROTATE
 # ---------------------------------------------------------
 # 8. Certbot / Let's Encrypt
 # Reads domain from SSM. Idempotent: skips if domain not set or cert exists.
-# Issue #2316: /mtga-companion/production/domain-name must be pre-created
+# Issue #2316: /vaultmtg/app/production/domain-name must be pre-created
 # in SSM before deploying -- a missing param now fails loudly (non-zero exit)
 # via require_ssm rather than silently skipping certbot.
 # ---------------------------------------------------------
 log "Checking for domain in SSM..."
-DOMAIN=$(fetch_ssm_with_fallback "/vaultmtg/app/production/domain-name" "/mtga-companion/production/domain-name")
+DOMAIN=$(fetch_ssm "/vaultmtg/app/production/domain-name")
 if [ -n "$DOMAIN" ] && [ "$DOMAIN" != "None" ]; then
     log "Domain: $DOMAIN -- running certbot..."
     if [ ! -d "/etc/letsencrypt/live/$DOMAIN" ]; then
@@ -405,7 +376,7 @@ CERTTIMER
     systemctl enable --now certbot.timer
     log "Certbot renewal timer enabled (next: $(systemctl show certbot.timer -p NextElapseUSecRealtime --value 2>/dev/null || echo unknown))."
 else
-    log "No domain in SSM (/vaultmtg/app/production/domain-name or /mtga-companion/production/domain-name) -- skipping certbot."
+    log "No domain in SSM (/vaultmtg/app/production/domain-name) -- skipping certbot."
     log "WARNING: set /vaultmtg/app/production/domain-name in SSM before deploying (issue #2316)."
 fi
 
