@@ -174,7 +174,7 @@ Resources:
         #
         # The BFF reads Secrets Manager at runtime ONLY if the opt-in
         # toggle BFF_DB_RESOLVE_FROM_SM=true is set in the env file (per
-        # vault-mtg PR #2539 staging + PR #2540 production). The toggle
+        # vault-mtg#2539 (staging) + vault-mtg#2540 (production). The toggle
         # defaults OFF -- post-#2539/#2540 the deploy-time scripts
         # scripts/deploy/provision-staging-env.sh (staging) and
         # scripts/deploy/provision-db-url.sh (production) splice inline
