@@ -50,7 +50,7 @@ Resources:
   RDSSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: Allow PostgreSQL access from EC2 and sync Lambda (ingress rules owned by consumer stacks)
+      GroupDescription: Allow PostgreSQL access from EC2 only
       VpcId: !Ref VpcId
       Tags:
         - Key: Name
