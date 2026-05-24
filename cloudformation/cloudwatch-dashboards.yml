@@ -33,9 +33,12 @@ Resources:
   #   Row 2:        EC2 NetworkIn/Out  | RDS DatabaseConnections
   #   Row 3:        RDS FreeStorageSpace | Deploy annotations
   #
-  # BFF metrics (MTGA/BFF namespace) are emitted by the timer installed
-  # via scripts/install-bff-5xx-metric.sh and scripts/install-bff-4xx-metric.sh.
-  # The dashboard will show "No data" for these until the scripts are running.
+  # BFF metrics (MTGA/BFF namespace) are emitted by the CloudWatch Logs
+  # MetricFilter resources defined in cloudformation/cloudwatch-alarms.yml
+  # (Bff5xxMetricFilter) -- the previous systemd-timer publisher
+  # scripts/install-bff-5xx-metric.sh was removed in PR #148.
+  # The Http4xxCount widget will show "No data" until a matching 4xx
+  # MetricFilter is added; the 5xx widget is live in production.
   #
   # Deploy annotations: the deploy workflow calls
   #   aws cloudwatch put-metric-data ... --namespace VaultMTG/Deploys

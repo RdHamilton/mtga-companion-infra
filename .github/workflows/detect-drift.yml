@@ -67,7 +67,12 @@ jobs:
   detect-drift:
     name: Detect drift across production stacks
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # 45-minute budget: 13 stacks * ~3 min worst-case poll budget per stack
+    # (per-stack cap below) = ~39 min worst case, plus checkout + role assume.
+    # Previously 30 min, which was insufficient when describe-stack-drift-detection-status
+    # silently errored (see polling loop below) and burned the full per-stack
+    # 5-min budget x ~6 stacks before the job hit the timeout.
+    timeout-minutes: 45
 
     env:
       AWS_REGION: us-east-1
@@ -168,24 +173,49 @@ jobs:
             fi
             echo "  Detection ID: $DETECTION_ID"
 
-            # Poll until DETECTION_COMPLETE / DETECTION_FAILED.  Cap at 5
-            # minutes (60 * 5s) per stack; large stacks may take longer but
-            # 5 min has been sufficient in practice for everything in STACKS.
+            # Poll until DETECTION_COMPLETE / DETECTION_FAILED.  Cap at 3
+            # minutes (36 * 5s) per stack; observed real-world detection time
+            # is well under 30s. The previous 5-min cap was excessive and
+            # combined with the silent-error case below (see ERROR handling)
+            # caused the whole job to time out.
+            #
+            # ERROR handling: if describe-stack-drift-detection-status fails
+            # (e.g. AccessDenied on a missing IAM action -- see GHA run
+            # 26342710590 where every poll returned ERROR for 6 minutes per
+            # stack), abort after 3 consecutive errors rather than burning
+            # the full poll budget. Capture stderr to a file so the actual
+            # error message appears in the job log instead of being silently
+            # swallowed by 2>/dev/null.
             DETECTION_STATUS="DETECTION_IN_PROGRESS"
             DRIFT_STATUS="UNKNOWN"
-            for i in $(seq 1 60); do
+            CONSECUTIVE_ERRORS=0
+            ERR_FILE="$(mktemp)"
+            for i in $(seq 1 36); do
               RESULT=$(aws cloudformation describe-stack-drift-detection-status \
                 --stack-drift-detection-id "$DETECTION_ID" \
                 --query '[DetectionStatus,StackDriftStatus]' \
-                --output text 2>/dev/null || echo "ERROR ERROR")
+                --output text 2>"$ERR_FILE" || echo "ERROR ERROR")
               DETECTION_STATUS=$(echo "$RESULT" | awk '{print $1}')
               DRIFT_STATUS=$(echo "$RESULT" | awk '{print $2}')
+
               if [ "$DETECTION_STATUS" = "DETECTION_COMPLETE" ] || \
                  [ "$DETECTION_STATUS" = "DETECTION_FAILED" ]; then
                 break
               fi
+
+              if [ "$DETECTION_STATUS" = "ERROR" ]; then
+                CONSECUTIVE_ERRORS=$((CONSECUTIVE_ERRORS + 1))
+                if [ "$CONSECUTIVE_ERRORS" -ge 3 ]; then
+                  echo "  Aborting after 3 consecutive describe-stack-drift-detection-status errors:"
+                  sed 's/^/    /' "$ERR_FILE"
+                  break
+                fi
+              else
+                CONSECUTIVE_ERRORS=0
+              fi
               sleep 5
             done
+            rm -f "$ERR_FILE"
 
             echo "  Detection status: $DETECTION_STATUS"
             echo "  Drift status: $DRIFT_STATUS"
