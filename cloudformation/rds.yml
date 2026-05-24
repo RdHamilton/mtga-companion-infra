@@ -41,17 +41,17 @@ Parameters:
 Resources:
 
   # --- Security Group ---------------------------------------------------------
+  # Ingress rules are owned by consumer stacks (ec2-sg.yml's RDSIngressFromEC2,
+  # sync-lambda.yml's RDSIngressFromLambda) to break the cross-stack dependency
+  # cycle that would form if this stack imported the source SG IDs. The drift
+  # detector cannot see standalone SecurityGroupIngress resources in cross-stack
+  # analysis, so this design intentionally leaves the RDSSecurityGroup empty of
+  # inline rules — see #2534 for the symmetric-refactor history.
   RDSSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: Allow PostgreSQL access from EC2 only
+      GroupDescription: Allow PostgreSQL access from EC2 and sync Lambda (ingress rules owned by consumer stacks)
       VpcId: !Ref VpcId
-      SecurityGroupIngress:
-        - IpProtocol: tcp
-          FromPort: 5432
-          ToPort: 5432
-          SourceSecurityGroupId: !ImportValue
-            "Fn::Sub": "mtga-companion-${Environment}-EC2SecurityGroupId"
       Tags:
         - Key: Name
           Value: mtga-companion-rds-sg

@@ -18,6 +18,16 @@ Parameters:
     AllowedValues: [production, staging]
 
 # ---------------------------------------------------------------------------
+# Conditions
+# ---------------------------------------------------------------------------
+Conditions:
+  # The EC2->RDS ingress is only created on the production stack — RDS is a
+  # single shared instance and only the production EC2 instance currently
+  # talks to it. The staging ec2-sg stack instance reuses this template but
+  # skips RDSIngressFromEC2.
+  IsProduction: !Equals [!Ref Environment, production]
+
+# ---------------------------------------------------------------------------
 # Resources
 # ---------------------------------------------------------------------------
 Resources:
@@ -47,6 +57,23 @@ Resources:
           Value: !Sub "mtga-companion-ec2-sg-${Environment}"
         - Key: Environment
           Value: !Ref Environment
+
+  # Standalone ingress rule on the RDS SG granting access from this stack's
+  # EC2 SG. Owned here (consumer-side) to break the rds<->ec2-sg cross-stack
+  # dependency cycle that would otherwise exist if rds.yml imported the EC2
+  # SG ID. Mirrors the RDSIngressFromLambda pattern in sync-lambda.yml.
+  # Resolves the #2534 false-positive drift on the rds stack.
+  RDSIngressFromEC2:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: IsProduction
+    Properties:
+      GroupId:
+        Fn::ImportValue: mtga-companion-rds-RDSSecurityGroupId
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      SourceSecurityGroupId: !Ref EC2SecurityGroup
+      Description: "Allow PostgreSQL from production EC2 instance security group"
 
 # ---------------------------------------------------------------------------
 # Outputs
