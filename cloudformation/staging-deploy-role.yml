@@ -144,7 +144,7 @@ Resources:
         # SSM reads: exactly the staging parameter paths provision-staging-env.sh
         # enumerates. Both the current flat paths and the post-cutover app sub-path
         # are granted so the role works before, during, and after the R-13 namespace
-        # migration. The /mtga-companion/staging/* legacy grant was dropped in
+        # migration. The legacy staging-namespace grant was dropped in
         # step 5d (#1996 Band A, 2026-05-24) after consumer cutover verified.
         - PolicyName: StagingProvisioningSSMRead
           PolicyDocument:

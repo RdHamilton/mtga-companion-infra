@@ -476,12 +476,12 @@ Resources:
                   - ssm:GetParameter
                   - ssm:GetParameters
                 Resource:
-                  # ADR-022 Phase 5d (#1996 Band A, 2026-05-24): legacy
-                  # /mtga-companion/* SSM grant dropped after consumer cutover
+                  # ADR-022 Phase 5d (#1996 Band A, 2026-05-24): the legacy
+                  # app SSM namespace grant was dropped after consumer cutover
                   # verified (zero AccessDeniedException in CloudWatch Logs).
-                  # /mtga-companion-web/* remains -- it is a separate SSM tree
-                  # owned by the vault-mtg-web (formerly mtga-companion-web)
-                  # marketing-site repo, not the legacy app namespace.
+                  # The marketing-site SSM tree (separate parameter prefix)
+                  # remains; it is owned by the VaultMTG marketing-site repo,
+                  # not the legacy app namespace.
                   - arn:aws:ssm:us-east-1:901347789205:parameter/vault-mtg/*
                   - arn:aws:ssm:us-east-1:901347789205:parameter/mtga-companion-web/*
                   - arn:aws:ssm:us-east-1:901347789205:parameter/vaultmtg/*
