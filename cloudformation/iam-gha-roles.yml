@@ -639,6 +639,12 @@ Resources:
               # IAM management — wildcarded inline (iam:*), capped to specific actions by
               # GhaCfnDeployPermissionsBoundary's IAMScoped Sid. The boundary is the real
               # cap; this just removes the redundant enumeration here.
+              # policy/gha-* required so this role can manage its OWN
+              # permissions-boundary (policy/gha-cfn-deploy-permissions-boundary)
+              # and any future gha-* managed policy. Without it, CFN updates to
+              # GhaCfnDeployPermissionsBoundary fail at iam:ListPolicyVersions /
+              # CreatePolicyVersion with AccessDenied. Mirrored in the boundary's
+              # IAMScoped Sid Resource list above (boundary-mirrors-inline invariant).
               - Sid: IAMPassAndManageScoped
                 Effect: Allow
                 Action: iam:*
@@ -651,6 +657,7 @@ Resources:
                   - arn:aws:iam::901347789205:instance-profile/vaultmtg-*
                   - arn:aws:iam::901347789205:instance-profile/mtga-companion-*
                   - arn:aws:iam::901347789205:policy/vaultmtg-*
+                  - arn:aws:iam::901347789205:policy/gha-*
                   - arn:aws:iam::901347789205:oidc-provider/token.actions.githubusercontent.com
               - Sid: IAMUnscopable
                 Effect: Allow
