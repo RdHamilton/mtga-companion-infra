@@ -19,12 +19,21 @@ name: Scheduled Synthetic Staging Deploy
 #   1. Assumes the gha-infra-cfn-deploy OIDC role (exercises trust policy).
 #   2. Reads a known staging SSM parameter (exercises ssm:GetParameter grant
 #      and the production-environment OIDC sub claim).
-#   3. Runs a CloudFormation dry-run changeset against the staging EC2 stack
-#      (mtga-companion-ec2-staging) using cloudformation/ec2.yml. The changeset
-#      is COMPUTED but NEVER executed. Because main always reflects the live
-#      state of staging stacks (auto-deploy-on-merge), the changeset is
-#      expected to be empty ("didn't contain changes") -- this is a SUCCESS
-#      signal. Any other failure mode is a real regression.
+#   3. Runs a CloudFormation dry-run changeset against the staging CloudWatch
+#      alarms stack (mtga-companion-cloudwatch-alarms-staging) using
+#      cloudformation/cloudwatch-alarms.yml. The changeset is COMPUTED but
+#      NEVER executed. Because main always reflects the live state of staging
+#      stacks (auto-deploy-on-merge), the changeset is expected to be empty
+#      ("didn't contain changes") -- this is a SUCCESS signal. Any other
+#      failure mode is a real regression.
+#
+#      NOTE ON TARGET CHOICE: there is no separate staging EC2 stack -- the
+#      staging BFF runs as a secondary systemd unit on the production EC2
+#      instance (see ADR-022). The cloudwatch-alarms-staging stack is the
+#      closest fit to the original intent: it is the dedicated staging-tier
+#      stack that auto-deploys on merge to main and so exercises the same
+#      OIDC -> SSM -> CFN -> S3 path. ec2.yml was the original (incorrect)
+#      target chosen before this constraint was surfaced.
 #   4. Cleans up the changeset (delete-change-set).
 #   5. Probes the staging /healthz endpoint and asserts HTTP 200.
 #   6. On ANY step failure, publishes a notification to the staging alerts
@@ -96,9 +105,12 @@ permissions:
 
 env:
   AWS_REGION: us-east-1
-  STAGING_STACK_NAME: mtga-companion-ec2-staging
-  STAGING_TEMPLATE_PATH: cloudformation/ec2.yml
-  STAGING_PARAMS_PATH: cloudformation/parameters/ec2-staging.json
+  # Target the staging CloudWatch alarms stack -- there is no separate staging
+  # EC2 stack (staging BFF runs as a secondary systemd unit on the production
+  # EC2 instance). See header NOTE ON TARGET CHOICE.
+  STAGING_STACK_NAME: mtga-companion-cloudwatch-alarms-staging
+  STAGING_TEMPLATE_PATH: cloudformation/cloudwatch-alarms.yml
+  STAGING_PARAMS_PATH: cloudformation/parameters/cloudwatch-alarms-staging.json
   STAGING_BFF_HEALTHZ: https://staging-api.vaultmtg.app/healthz
   # SSM probe: a String parameter (not SecureString) that is guaranteed
   # present in staging and that gha-infra-cfn-deploy can read via ssm:* on "*".
@@ -186,13 +198,14 @@ jobs:
       # STEP 3: CFN dry-run changeset -- exercises cloudformation:CreateChangeSet
       # + S3 template upload + validate-template path. Changeset is computed but
       # never executed.
-      - name: STEP 3 -- Validate ec2.yml template
+      - name: STEP 3 -- Validate staging template
         id: validate
         run: |
           set -euo pipefail
           TEMPLATE_FILE="${{ env.STAGING_TEMPLATE_PATH }}"
-          # ec2.yml has historically been near the 51200-byte inline limit, so
-          # upload to S3 and validate via URL (same pattern as deploy.yml).
+          # Upload to S3 and validate via URL (same pattern as deploy.yml). S3
+          # upload works for any template size and is the canonical deploy.yml
+          # path, so we use it unconditionally rather than branching on size.
           BUCKET="mtga-companion-deploy-artifacts-production"
           S3_KEY="cfn-validate/synthetic-staging-deploy/${TEMPLATE_FILE##*/}-$(date +%s).yml"
           if ! aws s3 cp "$TEMPLATE_FILE" "s3://$BUCKET/$S3_KEY" 2>/tmp/validate.err; then
