@@ -42,6 +42,7 @@ REGION=$(curl -s http://169.254.169.254/latest/meta-data/placement/region)
 METRIC_SCRIPT=/usr/local/bin/put-bff-latency.sh
 TIMED_LOG=/var/log/nginx/access_timed.log
 LOGFORMAT_CONF=/etc/nginx/conf.d/00-vaultmtg-metrics-logformat.conf
+METRIC_USER=mtga-metrics
 
 log() { echo "[bff-latency-metric] $(date '+%Y-%m-%dT%H:%M:%S') $*"; }
 
@@ -51,6 +52,18 @@ if [[ "$ENVIRONMENT" != "production" && "$ENVIRONMENT" != "staging" ]]; then
     echo "Usage: $0 [production|staging]"
     exit 1
 fi
+
+# ----------------------------------------------------------
+# 0. Create the unprivileged metrics user (idempotent)
+# ----------------------------------------------------------
+# Runs as a dedicated system user (not root). Needs the adm group to read
+# /var/log/nginx/access_timed.log (nginx default ownership root:adm 640).
+# AWS perms come from the EC2 instance role (cloudwatch:PutMetricData via IMDS).
+if ! id "$METRIC_USER" &>/dev/null; then
+    log "Creating system user $METRIC_USER..."
+    useradd --system --no-create-home --shell /sbin/nologin "$METRIC_USER"
+fi
+usermod -a -G adm "$METRIC_USER"
 
 # ----------------------------------------------------------
 # 1. Install the nginx timed-log drop-in (log_format only)
@@ -167,7 +180,8 @@ After=network-online.target
 [Service]
 Type=oneshot
 ExecStart=/usr/local/bin/put-bff-latency.sh
-User=root
+User=mtga-metrics
+Group=mtga-metrics
 StandardOutput=journal
 StandardError=journal
 UNIT
@@ -200,10 +214,10 @@ log "Timer installed."
 systemctl list-timers put-bff-latency.timer --no-pager
 
 # ----------------------------------------------------------
-# 6. Smoke-test: run once immediately
+# 6. Smoke-test: run once immediately as the metrics user
 # ----------------------------------------------------------
-log "Running smoke test..."
-bash "$METRIC_SCRIPT" || log "No requests yet -- metric will publish once traffic arrives."
+log "Running smoke test as $METRIC_USER..."
+sudo -u "$METRIC_USER" bash "$METRIC_SCRIPT" || log "No requests yet -- metric will publish once traffic arrives."
 log "Done. Verify the metric in CloudWatch:"
 log "  aws cloudwatch get-metric-statistics --profile personal \\"
 log "    --namespace MTGA/BFF --metric-name BffP99LatencyMs \\"
