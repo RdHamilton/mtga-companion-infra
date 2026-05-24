@@ -23,8 +23,14 @@
 
 set -euo pipefail
 
-REGION=$(curl -s http://169.254.169.254/latest/meta-data/placement/region)
-INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id)
+# Fetch instance metadata via IMDSv2 (token-authenticated). IMDSv1 is disabled
+# on this fleet (ec2.yml MetadataOptions.HttpTokens=required, S-21 / #2358).
+IMDS_TOKEN=$(curl -sX PUT "http://169.254.169.254/latest/api/token" \
+    -H "X-aws-ec2-metadata-token-ttl-seconds: 60")
+REGION=$(curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" \
+    http://169.254.169.254/latest/meta-data/placement/region)
+INSTANCE_ID=$(curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" \
+    http://169.254.169.254/latest/meta-data/instance-id)
 
 log() { echo "[cwagent-install] $(date '+%Y-%m-%dT%H:%M:%S') $*"; }
 
