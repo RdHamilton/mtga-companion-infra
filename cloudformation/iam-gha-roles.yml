@@ -820,6 +820,19 @@ Resources:
                   - sns:TagResource
                   - sns:UntagResource
                 Resource: "*"
+              # sns:Publish scoped to the staging alerts topic only.
+              # P-12 (vault-mtg#2370): the scheduled-synthetic-staging-deploy.yml
+              # workflow exercises the OIDC -> SSM -> CFN dry-run -> healthz path
+              # on a daily cadence and publishes a failure notification to this
+              # topic when any step fails. Scope is intentionally narrow: only the
+              # staging alerts topic, never the production alerts topic. The boundary's
+              # SNS Sid grants sns:* on "*"; the intersection with this Sid yields
+              # sns:Publish on the staging alerts topic ARN only.
+              - Sid: SNSPublishStagingAlerts
+                Effect: Allow
+                Action: sns:Publish
+                Resource:
+                  - !Sub "arn:aws:sns:${AWS::Region}:${AWS::AccountId}:vaultmtg-staging-alerts"
               - Sid: SSM
                 Effect: Allow
                 Action:
