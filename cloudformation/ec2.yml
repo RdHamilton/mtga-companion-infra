@@ -342,9 +342,13 @@ Resources:
             Version: "2012-10-17"
             Statement:
               # Allows the CloudWatch agent to create and write to the BFF and nginx
-              # log groups. Scoped to /vaultmtg/${Environment}/* log groups so both
-              # the production instance (/vaultmtg/production/*) and the staging
-              # instance (/vaultmtg/staging/*) get the correct grant.
+              # log groups. The production instance ships to /vaultmtg/${Environment}/*
+              # (resolves to /vaultmtg/production/*). PR #199 added staging log
+              # shipping (ec2-bootstrap.sh §10) which routes to /vaultmtg/staging/*
+              # regardless of the ${Environment} parameter — so staging ARNs are
+              # added explicitly. Both sets are required before R-13 Wave-1b instance
+              # replacement; omitting the staging ARNs causes AccessDenied on
+              # logs:PutLogEvents for /vaultmtg/staging/bff and /vaultmtg/staging/nginx.
               - Effect: Allow
                 Action:
                   - logs:CreateLogGroup
@@ -354,6 +358,8 @@ Resources:
                 Resource:
                   - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/vaultmtg/${Environment}/bff:*"
                   - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/vaultmtg/${Environment}/nginx:*"
+                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/vaultmtg/staging/bff:*"
+                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/vaultmtg/staging/nginx:*"
               # DescribeLogGroups is not resource-scopeable; limit to the minimum needed.
               - Effect: Allow
                 Action:
