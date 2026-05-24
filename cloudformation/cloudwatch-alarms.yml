@@ -468,11 +468,14 @@ Resources:
       LogGroupName: !Sub "/vaultmtg/${Environment}/nginx"
       FilterName: !Sub "vault-mtg-${Environment}-bff-5xx"
       FilterPattern: '[ip, ident, user, ts, request, status_code=5*, size, ...]'
+      # NOTE: AWS::Logs::MetricFilter rejects DefaultValue when Dimensions is
+      # set (mutually exclusive per AWS docs). The Bff5xxAlarm below uses
+      # TreatMissingData: notBreaching which handles the "no 5xx events"
+      # case safely without needing a zero-fill default value.
       MetricTransformations:
         - MetricNamespace: MTGA/BFF
           MetricName: Http5xxCount
           MetricValue: "1"
-          DefaultValue: 0
           Unit: Count
           Dimensions:
             - Key: Environment
@@ -493,8 +496,9 @@ Resources:
   # Dimension : Environment=<environment>
   #
   # TreatMissingData=notBreaching: at very low traffic the metric
-  # filter emits zero per matched event; sum over a period with no
-  # 5xx events is the DefaultValue (0). No 5xx data == no errors.
+  # filter emits one datapoint per matched 5xx event; periods with
+  # no 5xx events have no metric data and are treated as not breaching
+  # by the alarm (safe default — no false-positive on zero traffic).
   # ---------------------------------------------------------
   Bff5xxAlarm:
     Type: AWS::CloudWatch::Alarm
