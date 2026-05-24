@@ -233,7 +233,10 @@ fi
 # ---------------------------------------------------------
 log "Configuring nginx..."
 cat > /etc/nginx/conf.d/staging-api.vaultmtg.app.conf <<'NGINX'
-limit_req_zone $binary_remote_addr zone=api_limit:10m rate=30r/m;
+# Rate limit zone — 30 req/min per client IP, burst 10 nodelay.
+# Mirrors the production rate (mtga-companion-ssl.conf). Applied to /api/v1/.
+# /healthz and the SSE stream /api/v1/events are exempt.
+limit_req_zone $binary_remote_addr zone=stg_api_limit:10m rate=30r/m;
 
 server {
     listen 80 default_server;
@@ -244,7 +247,7 @@ server {
     }
 
     location /api/v1/ {
-        limit_req zone=api_limit burst=10 nodelay;
+        limit_req zone=stg_api_limit burst=10 nodelay;
         proxy_pass         http://127.0.0.1:8080;
         proxy_http_version 1.1;
         proxy_set_header   Host              $host;
