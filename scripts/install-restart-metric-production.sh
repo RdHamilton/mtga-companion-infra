@@ -34,10 +34,25 @@ IMDS_TOKEN=$(curl -sX PUT "http://169.254.169.254/latest/api/token" \
 REGION=$(curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" \
     http://169.254.169.254/latest/meta-data/placement/region)
 METRIC_SCRIPT=/usr/local/bin/put-bff-restarts.sh
+METRIC_USER=mtga-metrics
 
 log() { echo "[bff-restart-metric] $(date '+%Y-%m-%dT%H:%M:%S') $*"; }
 
 log "Region: $REGION  Unit: $BFF_UNIT"
+
+# ----------------------------------------------------------
+# 0. Create the unprivileged metrics user (idempotent)
+# ----------------------------------------------------------
+# The metric publisher runs as a dedicated system user instead of root.
+# It needs the systemd-journal group so journalctl -u <service> can read
+# the BFF unit's journal without root. AWS perms come from the EC2 instance
+# role (cloudwatch:PutMetricData), which IMDS exposes to any local user
+# regardless of UID.
+if ! id "$METRIC_USER" &>/dev/null; then
+    log "Creating system user $METRIC_USER..."
+    useradd --system --no-create-home --shell /sbin/nologin "$METRIC_USER"
+fi
+usermod -a -G systemd-journal "$METRIC_USER"
 
 # ----------------------------------------------------------
 # 1. Write the metric publisher script
@@ -88,7 +103,8 @@ After=network-online.target
 [Service]
 Type=oneshot
 ExecStart=/usr/local/bin/put-bff-restarts.sh
-User=root
+User=mtga-metrics
+Group=mtga-metrics
 StandardOutput=journal
 StandardError=journal
 UNIT
@@ -121,10 +137,10 @@ log "Timer installed."
 systemctl list-timers put-bff-restarts.timer --no-pager
 
 # ----------------------------------------------------------
-# 5. Smoke-test: run once immediately and verify it publishes
+# 5. Smoke-test: run once immediately as the metrics user and verify it publishes
 # ----------------------------------------------------------
-log "Running smoke test..."
-bash "$METRIC_SCRIPT"
+log "Running smoke test as $METRIC_USER..."
+sudo -u "$METRIC_USER" bash "$METRIC_SCRIPT"
 log "Done. Verify the metric in CloudWatch:"
 log "  aws cloudwatch get-metric-statistics --profile personal \\"
 log "    --namespace MTGA/BFF --metric-name BffRestartCount \\"

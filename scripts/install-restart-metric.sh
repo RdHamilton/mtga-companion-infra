@@ -21,10 +21,23 @@ IMDS_TOKEN=$(curl -sX PUT "http://169.254.169.254/latest/api/token" \
 REGION=$(curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" \
     http://169.254.169.254/latest/meta-data/placement/region)
 METRIC_SCRIPT=/usr/local/bin/put-bff-staging-restarts.sh
+METRIC_USER=mtga-metrics
 
 log() { echo "[restart-metric] $(date '+%Y-%m-%dT%H:%M:%S') $*"; }
 
 log "Region: $REGION"
+
+# ----------------------------------------------------------
+# 0. Create the unprivileged metrics user (idempotent)
+# ----------------------------------------------------------
+# Runs as a dedicated system user (not root). Needs systemd-journal group
+# membership to run journalctl -u <service>. AWS perms come from the EC2
+# instance role (cloudwatch:PutMetricData via IMDS).
+if ! id "$METRIC_USER" &>/dev/null; then
+    log "Creating system user $METRIC_USER..."
+    useradd --system --no-create-home --shell /sbin/nologin "$METRIC_USER"
+fi
+usermod -a -G systemd-journal "$METRIC_USER"
 
 # ----------------------------------------------------------
 # 1. Write the metric publisher script
@@ -70,7 +83,8 @@ After=network-online.target
 [Service]
 Type=oneshot
 ExecStart=/usr/local/bin/put-bff-staging-restarts.sh
-User=root
+User=mtga-metrics
+Group=mtga-metrics
 StandardOutput=journal
 StandardError=journal
 UNIT
