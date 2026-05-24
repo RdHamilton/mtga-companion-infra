@@ -3,11 +3,12 @@ Description: >
   S-03: vaultmtg-staging-deploy-provisioner scoped IAM role (ADR-022 addendum
   sect4A). Dedicated deploy-provisioning identity for provision-staging-env.sh
   AND run-staging-migrations.sh (Path 2 mirror, Path X 2026-05-24).
-  Scoped to /vaultmtg/staging/*, /vaultmtg/app/staging/*, /mtga-companion/staging/*,
-  kms:Decrypt via alias/aws/ssm AND alias/aws/secretsmanager (RDS-managed secret),
-  and secretsmanager:GetSecretValue on mtga-companion/staging/* + the staging
-  RDS-managed secret (rds!db-12c647a0-...) only.
-  No production SSM access. No writes. No S3. No EC2 control-plane.
+  Scoped to the staging SSM namespaces and KMS aliases listed in the role
+  block below, plus the staging RDS-managed secret. This PR (Path X PR 1c,
+  2026-05-24) additionally grants read-only S3 access on the
+  vaultmtg-deploy-artifacts-staging bucket scoped to the migrations/* and
+  infra-db/* prefixes only.
+  No production SSM access. No writes. No EC2 control-plane.
   Trust: GitHub OIDC (Path B, end state) + EC2 instance AssumeRole bridge
   (Path A, interim - restored Path X 2026-05-24, ADR-022 sect4A.7 addendum).
   Gates S-02 and EC-6.
@@ -71,12 +72,24 @@ Resources:
   #   /mtga-companion/staging/*    -- legacy path; dropped in step 5d
   #   kms:Decrypt via SSM KMS key  -- SecureString params (CLERK_SECRET_KEY etc.)
   #   secretsmanager:GetSecretValue on mtga-companion/staging/* -- staging RDS credential only
+  #   s3:ListBucket / s3:GetObject on vaultmtg-deploy-artifacts-staging
+  #     scoped to migrations/* and infra-db/* -- run-staging-migrations.sh
+  #     downloads SQL migrations (aws s3 sync .../migrations/postgres/) and
+  #     grant-staging-tables.sql (aws s3 cp .../infra-db/grant-staging-tables.sql)
+  #     from these prefixes AFTER assume-role. The scripts/ and infra-scripts/
+  #     prefixes are read by the EC2 instance role at the SSM RunCommand step
+  #     BEFORE this role is assumed and are therefore deliberately NOT granted
+  #     here (the EC2 instance role's S3DeployArtifactsRead policy in ec2.yml
+  #     already covers those reads).
   #
   # What is NOT granted (explicit scope boundary):
   #   - /vaultmtg/prod/* or /vaultmtg/production/*
   #   - /mtga-companion/production/*
   #   - ssm:PutParameter, ssm:DeleteParameter (no write)
-  #   - S3 (no artifact access)
+  #   - S3 outside vaultmtg-deploy-artifacts-staging (no other buckets)
+  #   - S3 writes (no PutObject, no DeleteObject)
+  #   - S3 keys outside migrations/* and infra-db/* on the staging bucket
+  #     (no scripts/*, no infra-scripts/*, no staging/* state files)
   #   - EC2 control-plane actions
   #   - secretsmanager:GetSecretValue on production secrets
   # ---------------------------------------------------------------------------
@@ -86,9 +99,11 @@ Resources:
       RoleName: vaultmtg-staging-deploy-provisioner
       Description: >
         Dedicated scoped IAM role for the staging BFF env-file provisioning step.
-        Grants SSM reads on /vaultmtg/staging/*, /vaultmtg/app/staging/*,
-        /mtga-companion/staging/* and secretsmanager:GetSecretValue on
-        mtga-companion/staging/* only. No production SSM access. No parameter writes. No S3.
+        Grants the staging SSM namespaces and the staging RDS-managed secret
+        per the inline policies below. Path X PR 1c additionally grants
+        s3:ListBucket / s3:GetObject on vaultmtg-deploy-artifacts-staging
+        scoped to the migrations/* and infra-db/* prefixes.
+        No production SSM access. No parameter writes. No S3 writes.
         See ADR-022 addendum sect4A and RdHamilton/vault-mtg#2364.
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
@@ -210,6 +225,58 @@ Resources:
                   # Explicit secret-id prefix -- NOT the broad rds!db-* wildcard --
                   # so a future prod RDS does not silently inherit this grant.
                   - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:rds!db-12c647a0-0880-45e5-bf35-d9c1ccb05433-*"
+        # S3 read-only on the staging deploy artifacts bucket.
+        # Path X PR 1c (2026-05-24): run-staging-migrations.sh, after assume-role,
+        # downloads two artifact sets from S3 (script lives in the app repo at
+        # RdHamilton/vault-mtg infra/scripts/run-staging-migrations.sh):
+        #
+        #   1. Migrations (L179):
+        #        aws s3 sync s3://vaultmtg-deploy-artifacts-staging/migrations/postgres/
+        #      -> requires s3:ListBucket on the bucket (sync enumerates keys
+        #         under the prefix) and s3:GetObject on migrations/* (sync
+        #         fetches each enumerated key).
+        #
+        #   2. Table grants SQL (L323):
+        #        aws s3 cp s3://vaultmtg-deploy-artifacts-staging/infra-db/grant-staging-tables.sql
+        #      -> requires s3:GetObject on infra-db/*.
+        #
+        # Bucket server-side encryption is AES256 (S3-managed) per
+        # `aws s3api get-bucket-encryption --bucket vaultmtg-deploy-artifacts-staging`
+        # (verified 2026-05-24) -- no kms:Decrypt grant required for GetObject.
+        #
+        # NOT granted (scope boundary):
+        #   - s3:PutObject / s3:DeleteObject (read-only deploy consumer).
+        #   - scripts/* and infra-scripts/* prefixes: those are read by the
+        #     EC2 instance role at the SSM RunCommand step (workflow lives at
+        #     RdHamilton/vault-mtg .github/workflows/deploy-bff.yml L290) to
+        #     bootstrap the migration script onto the instance BEFORE this
+        #     role is assumed.
+        #     The instance role's S3DeployArtifactsRead policy (ec2.yml)
+        #     already covers those reads.
+        #   - staging/* state-file prefix and all other prefixes / buckets.
+        #
+        # ListBucket is constrained by an s3:prefix condition so this role can
+        # only enumerate the migrations/ and infra-db/ prefixes -- it cannot
+        # walk the bucket root to discover other artifacts.
+        - PolicyName: StagingProvisioningS3Read
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: StagingDeployArtifactsListBucket
+                Effect: Allow
+                Action: s3:ListBucket
+                Resource: arn:aws:s3:::vaultmtg-deploy-artifacts-staging
+                Condition:
+                  StringLike:
+                    s3:prefix:
+                      - migrations/*
+                      - infra-db/*
+              - Sid: StagingDeployArtifactsGetObject
+                Effect: Allow
+                Action: s3:GetObject
+                Resource:
+                  - arn:aws:s3:::vaultmtg-deploy-artifacts-staging/migrations/*
+                  - arn:aws:s3:::vaultmtg-deploy-artifacts-staging/infra-db/*
       Tags:
         - Key: Project
           Value: mtga-companion
