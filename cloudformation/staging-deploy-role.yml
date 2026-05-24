@@ -191,8 +191,8 @@ Resources:
                 Condition:
                   StringEquals:
                     kms:ViaService: !Sub "secretsmanager.${AWS::Region}.amazonaws.com"
-        # Secrets Manager: staging DB credentials only.
-        # Two distinct secret sources, both required by the staging deploy flow:
+        # Secrets Manager: staging DB credentials + production app-db credential.
+        # Three distinct secret sources, all required by the staging deploy flow:
         #
         #   1. mtga-companion/staging/*  -- user-created staging secrets namespace
         #      (legacy DB credential path, integration secrets).
@@ -204,6 +204,14 @@ Resources:
         #      run-staging-migrations.sh reads this secret to obtain the
         #      postgres password before running migrations (Path 2 mirror of
         #      vault-mtg#2537 / provision-staging-env.sh refactor).
+        #
+        #   3. vaultmtg-production-app-db-*  -- the least-privilege application
+        #      DB credential created by Bob in vault-mtg#2576 per ADR-024.
+        #      provision-db-url.sh fetches this secret at deploy time to render
+        #      DATABASE_URL for the BFF using the vaultmtg_app role (not the
+        #      RDS master credential). The "-*" suffix covers the 6-char random
+        #      suffix AWS appends to the ARN. Required for vault-mtg#2579 to
+        #      unblock the Phase 4 BFF cutover (#2223 follow-up).
         #
         # Scope: there is currently no production RDS instance in this account
         # (staging is the only RDS), but the explicit secret-id prefix is used
@@ -223,6 +231,10 @@ Resources:
                   # Explicit secret-id prefix -- NOT the broad rds!db-* wildcard --
                   # so a future prod RDS does not silently inherit this grant.
                   - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:rds!db-12c647a0-0880-45e5-bf35-d9c1ccb05433-*"
+                  # vaultmtg-production-app-db -- least-privilege app DB credential
+                  # (ADR-024). Created by Bob in vault-mtg#2576. The "-*" suffix
+                  # covers the 6-char random suffix AWS appends to the secret ARN.
+                  - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:vaultmtg-production-app-db-*"
         # S3 read-only on the staging deploy artifacts bucket.
         # Path X PR 1c (2026-05-24): run-staging-migrations.sh, after assume-role,
         # downloads two artifact sets from S3 (script lives in the app repo at
