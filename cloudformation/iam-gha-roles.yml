@@ -721,6 +721,11 @@ Resources:
                   - cloudwatch:UntagResource
                 Resource: "*"
               # CloudWatch Logs — NOT in boundary, so keep specific actions.
+              # Metric-filter actions added for security-alarms.yml (vault-mtg#2333):
+              # AWS::Logs::MetricFilter Create/Update/Delete + drift-read against the
+              # CloudTrail log group (/vaultmtg/cloudtrail/production). All three
+              # support resource-level perms on `log-group` per the IAM Service
+              # Authorization Reference, so they fit this Sid's existing scope.
               - Sid: CloudWatchLogs
                 Effect: Allow
                 Action:
@@ -729,6 +734,9 @@ Resources:
                   - logs:PutRetentionPolicy
                   - logs:TagResource
                   - logs:UntagResource
+                  - logs:DescribeMetricFilters
+                  - logs:PutMetricFilter
+                  - logs:DeleteMetricFilter
                 Resource:
                   - arn:aws:logs:us-east-1:901347789205:log-group:/vaultmtg/*
                   - arn:aws:logs:us-east-1:901347789205:log-group:/aws/lambda/vaultmtg-*
