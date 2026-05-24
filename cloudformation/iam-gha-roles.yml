@@ -421,7 +421,7 @@ Resources:
                   - !Sub repo:${GitHubOrg}/${AppRepo}:ref:refs/tags/app/v*
                   - !Sub repo:${GitHubOrg}/${AppRepo}:ref:refs/tags/daemon/v*
                   - !Sub repo:${GitHubOrg}/${AppRepo}:ref:refs/tags/v*
-                  # vault-mtg: staging deploy jobs run in `environment: staging`;
+                  # RdHamilton/vault-mtg: staging deploy jobs run in `environment: staging`;
                   # production deploy jobs (workflow_dispatch release.yml) run in
                   # `environment: production`. Both environment subs must be allowed
                   # explicitly -- a named GH environment sub replaces the ref-based
