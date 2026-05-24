@@ -1,0 +1,459 @@
+name: Scheduled Synthetic Staging Deploy
+
+# P-12 (vault-mtg#2370): Nightly synthetic deploy that exercises the full
+# OIDC -> SSM -> CFN -> healthz path against staging on a daily cadence.
+# Ensures the deploy pipeline remains continuously exercised so silent
+# regressions surface before they bite a real release.
+#
+# WHY THIS EXISTS
+#   The vault-mtg repo's staging-deploy.yml runs nightly for the BFF binary,
+#   but the infra-side deploy pipeline (OIDC role assumption, SSM parameter
+#   reads, CFN changeset compute, S3 template upload) is only exercised when
+#   a CloudFormation template actually changes. A dormant pipeline accumulates
+#   silent drift: IAM trust policy changes, SSM parameter renames, S3 bucket
+#   policy revocations, AMI / OS deprecations, and AWS service-API breaking
+#   changes all surface only when a real deploy is attempted -- which, by
+#   construction, is the worst possible time to find out.
+#
+# WHAT IT DOES (idempotent by design)
+#   1. Assumes the gha-infra-cfn-deploy OIDC role (exercises trust policy).
+#   2. Reads a known staging SSM parameter (exercises ssm:GetParameter grant
+#      and the production-environment OIDC sub claim).
+#   3. Runs a CloudFormation dry-run changeset against the staging EC2 stack
+#      (mtga-companion-ec2-staging) using cloudformation/ec2.yml. The changeset
+#      is COMPUTED but NEVER executed. Because main always reflects the live
+#      state of staging stacks (auto-deploy-on-merge), the changeset is
+#      expected to be empty ("didn't contain changes") -- this is a SUCCESS
+#      signal. Any other failure mode is a real regression.
+#   4. Cleans up the changeset (delete-change-set).
+#   5. Probes the staging /healthz endpoint and asserts HTTP 200.
+#   6. On ANY step failure, publishes a notification to the staging alerts
+#      SNS topic (vaultmtg-staging-alerts) and fails the workflow.
+#
+# WHY IT DOES NOT TRIP P-10
+#   The P-10 changeset gate (cfn-changeset-gate.yml) fires on pull_request
+#   events only. This workflow runs on schedule + workflow_dispatch and never
+#   opens a PR, so the gate is never invoked. Even if a future change wired
+#   P-10 to other events, the changeset here is empty by design (main matches
+#   live), so no stateful replacements would be detected.
+#
+# WHY IT DOES NOT TRIP AUTO-DEPLOY-ON-MERGE
+#   deploy-on-merge.yml fires on `push: branches: [main]` with a paths filter
+#   on cloudformation/**.yml. This workflow is a new file under .github/workflows
+#   and does not modify any CFN template, so the auto-deploy is not triggered
+#   by its addition. The synthetic deploy itself never executes a changeset,
+#   so no real deploy happens regardless.
+#
+# CADENCE: 09:00 UTC daily
+#   - Runs after the vault-mtg nightly staging BFF deploy (06:00 UTC), so a
+#     staging instance freshly deployed by that workflow is the system we
+#     verify. A 3-hour gap leaves room for the BFF deploy to finish and the
+#     instance to stabilise before we probe healthz.
+#   - 09:00 UTC == 04:00 EST / 05:00 EDT == off-hours for the operator, so a
+#     failure email arrives at the start of the working day rather than at
+#     night when no one can act on it.
+#   - Daily cadence is the minimum that catches a "merged 24h ago, never
+#     deployed" drift before it persists into the next release window. Hourly
+#     would burn CI minutes without catching anything daily would miss; weekly
+#     would routinely let drift simmer for 6 days before surfacing.
+#
+# DEPENDENCIES
+#   - S-03 (mtga-companion-staging-deploy-role): not directly required here --
+#     this workflow uses gha-infra-cfn-deploy (the infra deploy role), not the
+#     S-03 provisioner role (which scopes the staging BFF env-file provisioning
+#     step in vault-mtg, not infra-side CFN ops). S-03 is satisfied (PR #191).
+#   - IAM grant: sns:Publish on vaultmtg-staging-alerts -- added to
+#     gha-infra-cfn-deploy in the same PR (iam-gha-roles.yml SNSPublishStagingAlerts Sid).
+#   - SNS topic: vaultmtg-staging-alerts -- created by the
+#     mtga-companion-cloudwatch-alarms-staging stack (already deployed). Email
+#     subscription confirmed (AlarmEmail param).
+
+on:
+  schedule:
+    # Daily at 09:00 UTC (04:00 EST / 05:00 EDT). Off-hours; email lands at
+    # start of operator's working day. See CADENCE block above.
+    - cron: "0 9 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: >
+          Run all probes but skip the SNS failure publication step at the end.
+          Use when manually testing this workflow without paging the alerts
+          channel. Default false (publish on failure).
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  # One synthetic deploy at a time. A second triggered while the first is
+  # running would race on the CFN changeset name and double-publish on failure.
+  group: scheduled-synthetic-staging-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write  # OIDC role assumption
+
+env:
+  AWS_REGION: us-east-1
+  STAGING_STACK_NAME: mtga-companion-ec2-staging
+  STAGING_TEMPLATE_PATH: cloudformation/ec2.yml
+  STAGING_PARAMS_PATH: cloudformation/parameters/ec2-staging.json
+  STAGING_BFF_HEALTHZ: https://staging-api.vaultmtg.app/healthz
+  # SSM probe: a String parameter (not SecureString) that is guaranteed
+  # present in staging and that gha-infra-cfn-deploy can read via ssm:* on "*".
+  # database-url is the simplest stable choice -- present since the staging
+  # RDS was provisioned and used by every staging deploy.
+  STAGING_SSM_PROBE_PARAM: /mtga-companion/staging/database-url
+  # SNS topic for failure notifications. ARN is constructed (not exported here)
+  # so the workflow does not need cloudformation:ListExports to discover it.
+  STAGING_ALERTS_TOPIC_ARN: arn:aws:sns:us-east-1:901347789205:vaultmtg-staging-alerts
+
+jobs:
+  synthetic-deploy:
+    name: Synthetic deploy probe (OIDC -> SSM -> CFN dry-run -> healthz)
+    runs-on: ubuntu-latest
+    # production environment required -- gha-infra-cfn-deploy's trust policy
+    # only accepts ref:refs/heads/main, pull_request, and environment:production
+    # subs. A scheduled job on the default branch resolves to ref:refs/heads/main,
+    # but pinning to environment:production gives us the same approval gate that
+    # protects real production deploys (the environment subscription is bound to
+    # the named environment in repo settings).
+    environment: production
+    timeout-minutes: 15
+
+    outputs:
+      step_failed: ${{ steps.summary.outputs.step_failed }}
+      failure_reason: ${{ steps.summary.outputs.failure_reason }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6 SHA-pinned (ticket #2385 AC3)
+
+      # STEP 1: OIDC role assumption -- exercises trust policy + ref/environment sub.
+      - name: STEP 1 -- Assume gha-infra-cfn-deploy via OIDC
+        id: oidc
+        uses: aws-actions/configure-aws-credentials@796449b3e38e3c256861227399e58b780e0e5538  # v6 SHA-pinned (ticket #2385 AC3)
+        with:
+          role-to-assume: ${{ secrets.AWS_CFN_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: STEP 1 -- Verify identity (sts:GetCallerIdentity)
+        id: identity
+        run: |
+          set -euo pipefail
+          IDENTITY=$(aws sts get-caller-identity --output json)
+          ARN=$(echo "$IDENTITY" | jq -r '.Arn')
+          echo "Assumed identity: $ARN"
+          if ! echo "$ARN" | grep -qE 'gha-infra-cfn-deploy'; then
+            echo "::error::Unexpected assumed identity: $ARN (expected gha-infra-cfn-deploy)"
+            echo "step_failed=oidc-identity" >> "$GITHUB_OUTPUT"
+            echo "failure_reason=OIDC role assumption succeeded but resolved identity is not gha-infra-cfn-deploy (got: $ARN)" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          echo "OIDC role assumption PASSED."
+
+      # STEP 2: SSM read -- exercises ssm:GetParameter grant.
+      - name: STEP 2 -- Read staging SSM parameter
+        id: ssm
+        run: |
+          set -euo pipefail
+          # ssm:GetParameter without --with-decryption: works on String params
+          # and on SecureString metadata; we only need to confirm the read path,
+          # not the plaintext value. Output is redacted so the param value is
+          # never logged even when it's a non-secret String.
+          if ! aws ssm get-parameter \
+              --name "${{ env.STAGING_SSM_PROBE_PARAM }}" \
+              --query 'Parameter.Name' \
+              --output text > /tmp/ssm-probe.txt 2>/tmp/ssm-probe.err; then
+            echo "::error::SSM read failed for ${{ env.STAGING_SSM_PROBE_PARAM }}"
+            cat /tmp/ssm-probe.err
+            echo "step_failed=ssm-read" >> "$GITHUB_OUTPUT"
+            echo "failure_reason=ssm:GetParameter failed on ${{ env.STAGING_SSM_PROBE_PARAM }} -- $(cat /tmp/ssm-probe.err | head -3)" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          NAME=$(cat /tmp/ssm-probe.txt)
+          if [ "$NAME" != "${{ env.STAGING_SSM_PROBE_PARAM }}" ]; then
+            echo "::error::SSM returned unexpected parameter name: $NAME"
+            echo "step_failed=ssm-name-mismatch" >> "$GITHUB_OUTPUT"
+            echo "failure_reason=SSM returned unexpected parameter name (got: $NAME, expected: ${{ env.STAGING_SSM_PROBE_PARAM }})" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          echo "SSM read PASSED (parameter present: $NAME)."
+
+      # STEP 3: CFN dry-run changeset -- exercises cloudformation:CreateChangeSet
+      # + S3 template upload + validate-template path. Changeset is computed but
+      # never executed.
+      - name: STEP 3 -- Validate ec2.yml template
+        id: validate
+        run: |
+          set -euo pipefail
+          TEMPLATE_FILE="${{ env.STAGING_TEMPLATE_PATH }}"
+          # ec2.yml has historically been near the 51200-byte inline limit, so
+          # upload to S3 and validate via URL (same pattern as deploy.yml).
+          BUCKET="mtga-companion-deploy-artifacts-production"
+          S3_KEY="cfn-validate/synthetic-staging-deploy/${TEMPLATE_FILE##*/}-$(date +%s).yml"
+          if ! aws s3 cp "$TEMPLATE_FILE" "s3://$BUCKET/$S3_KEY" 2>/tmp/validate.err; then
+            echo "::error::S3 upload failed for $TEMPLATE_FILE"
+            cat /tmp/validate.err
+            echo "step_failed=template-upload" >> "$GITHUB_OUTPUT"
+            echo "failure_reason=S3 upload of $TEMPLATE_FILE to s3://$BUCKET/$S3_KEY failed -- $(cat /tmp/validate.err | head -3)" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          TEMPLATE_URL="https://$BUCKET.s3.us-east-1.amazonaws.com/$S3_KEY"
+          if ! aws cloudformation validate-template --template-url "$TEMPLATE_URL" > /tmp/validate.out 2>/tmp/validate.err; then
+            echo "::error::cloudformation:ValidateTemplate failed for $TEMPLATE_URL"
+            cat /tmp/validate.err
+            echo "step_failed=template-validate" >> "$GITHUB_OUTPUT"
+            echo "failure_reason=cloudformation:ValidateTemplate failed for $TEMPLATE_FILE -- $(cat /tmp/validate.err | head -3)" >> "$GITHUB_OUTPUT"
+            # Best-effort cleanup
+            aws s3 rm "s3://$BUCKET/$S3_KEY" || true
+            exit 1
+          fi
+          # Best-effort cleanup -- harmless to leave behind, but tidy.
+          aws s3 rm "s3://$BUCKET/$S3_KEY" || true
+          echo "Template validation PASSED."
+          echo "template_url=$TEMPLATE_URL" >> "$GITHUB_OUTPUT"
+
+      - name: STEP 3 -- Create and clean up dry-run changeset
+        id: changeset
+        run: |
+          set -euo pipefail
+          STACK="${{ env.STAGING_STACK_NAME }}"
+          TEMPLATE_FILE="${{ env.STAGING_TEMPLATE_PATH }}"
+          PARAMS_FILE="${{ env.STAGING_PARAMS_PATH }}"
+          CHANGESET_NAME="synthetic-$(date +%Y%m%d%H%M%S)"
+
+          # Re-upload template to S3 (the validate step deletes its own copy).
+          # Use a stable per-run key under bootstrap/ so the existing
+          # S3BootstrapWrite Sid (s3:PutObject on bootstrap/*) covers it.
+          BUCKET="mtga-companion-deploy-artifacts-production"
+          S3_KEY="bootstrap/cfn-templates/synthetic-staging-deploy/${GITHUB_RUN_ID}/${TEMPLATE_FILE##*/}"
+          aws s3 cp "$TEMPLATE_FILE" "s3://$BUCKET/$S3_KEY" > /dev/null
+          TEMPLATE_URL="https://$BUCKET.s3.us-east-1.amazonaws.com/$S3_KEY"
+
+          # Confirm the staging stack exists and is in a stable status (we only
+          # create UPDATE changesets here -- a synthetic deploy should never
+          # CREATE a stack from scratch).
+          STACK_STATUS=$(aws cloudformation describe-stacks \
+            --stack-name "$STACK" \
+            --query 'Stacks[0].StackStatus' \
+            --output text 2>/dev/null || echo "DOES_NOT_EXIST")
+
+          case "$STACK_STATUS" in
+            CREATE_COMPLETE|UPDATE_COMPLETE|IMPORT_COMPLETE|UPDATE_ROLLBACK_COMPLETE|IMPORT_ROLLBACK_COMPLETE)
+              # OK -- stable status, UPDATE changeset is valid.
+              ;;
+            *)
+              echo "::error::Staging stack $STACK is in unexpected status: $STACK_STATUS"
+              echo "step_failed=stack-status" >> "$GITHUB_OUTPUT"
+              echo "failure_reason=Staging stack $STACK is in status $STACK_STATUS (expected a stable *_COMPLETE state). Synthetic deploy aborted to avoid CREATE on a non-existent stack." >> "$GITHUB_OUTPUT"
+              aws s3 rm "s3://$BUCKET/$S3_KEY" || true
+              exit 1
+              ;;
+          esac
+
+          # Build the create-change-set arg list as a bash array so the
+          # optional --parameters flag is passed only when a params file exists
+          # AND each array element is quoted (shellcheck SC2086 safe).
+          CS_ARGS=(
+            --stack-name "$STACK"
+            --template-url "$TEMPLATE_URL"
+            --change-set-name "$CHANGESET_NAME"
+            --change-set-type UPDATE
+            --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM
+            --description "P-12 synthetic staging deploy probe (run $GITHUB_RUN_ID)"
+          )
+          if [ -f "$PARAMS_FILE" ]; then
+            CS_ARGS+=(--parameters "file://$PARAMS_FILE")
+          fi
+
+          # Create the changeset (UPDATE).
+          if ! aws cloudformation create-change-set "${CS_ARGS[@]}" > /tmp/create-cs.out 2>/tmp/create-cs.err; then
+            echo "::error::cloudformation:CreateChangeSet failed"
+            cat /tmp/create-cs.err
+            echo "step_failed=changeset-create" >> "$GITHUB_OUTPUT"
+            echo "failure_reason=cloudformation:CreateChangeSet failed for $STACK -- $(cat /tmp/create-cs.err | head -3)" >> "$GITHUB_OUTPUT"
+            aws s3 rm "s3://$BUCKET/$S3_KEY" || true
+            exit 1
+          fi
+          echo "Changeset created: $CHANGESET_NAME"
+          echo "changeset_name=$CHANGESET_NAME" >> "$GITHUB_OUTPUT"
+
+          # Wait for compute -- FAILED is the EXPECTED outcome when main matches
+          # live (no resource changes). The `|| true` mirrors deploy.yml.
+          aws cloudformation wait change-set-create-complete \
+            --stack-name "$STACK" \
+            --change-set-name "$CHANGESET_NAME" 2>/dev/null || true
+
+          STATUS=$(aws cloudformation describe-change-set \
+            --stack-name "$STACK" \
+            --change-set-name "$CHANGESET_NAME" \
+            --query 'Status' --output text)
+          REASON=$(aws cloudformation describe-change-set \
+            --stack-name "$STACK" \
+            --change-set-name "$CHANGESET_NAME" \
+            --query 'StatusReason' --output text 2>/dev/null || echo "")
+
+          echo "Changeset status: $STATUS"
+          echo "Changeset reason: $REASON"
+
+          # SUCCESS path:
+          #   - Status=CREATE_COMPLETE: real changes detected. Surprising for a
+          #     synthetic probe (main should match live) but not a probe failure
+          #     -- this means real drift exists that auto-deploy-on-merge should
+          #     have applied. We log it and clean up the changeset, but do not
+          #     fail the probe -- the daily probe is not the place to fix drift.
+          #   - Status=FAILED + REASON contains "didn't contain changes" or
+          #     "no updates are to be performed": the canonical empty-changeset
+          #     no-op. This is the EXPECTED healthy outcome.
+          # FAILURE path:
+          #   - Status=FAILED + any other reason.
+          if [ "$STATUS" = "CREATE_COMPLETE" ]; then
+            echo "::warning::Changeset shows real drift between main and live staging. auto-deploy-on-merge should have applied this; investigate."
+            echo "CFN dry-run PASSED (with drift warning -- probe path is healthy)."
+          elif [ "$STATUS" = "FAILED" ] && echo "$REASON" | grep -qiE "didn.t contain changes|no updates are to be performed"; then
+            echo "CFN dry-run PASSED (empty changeset -- main matches live)."
+          else
+            echo "::error::Changeset compute failed unexpectedly: status=$STATUS reason=$REASON"
+            echo "step_failed=changeset-compute" >> "$GITHUB_OUTPUT"
+            echo "failure_reason=Changeset compute returned status=$STATUS reason=$REASON (expected CREATE_COMPLETE or FAILED/empty)" >> "$GITHUB_OUTPUT"
+            aws cloudformation delete-change-set \
+              --stack-name "$STACK" \
+              --change-set-name "$CHANGESET_NAME" 2>/dev/null || true
+            aws s3 rm "s3://$BUCKET/$S3_KEY" || true
+            exit 1
+          fi
+
+          # Cleanup: delete the changeset and the uploaded template. Both are
+          # best-effort; orphans are harmless but tidy.
+          aws cloudformation delete-change-set \
+            --stack-name "$STACK" \
+            --change-set-name "$CHANGESET_NAME" 2>/dev/null || true
+          aws s3 rm "s3://$BUCKET/$S3_KEY" || true
+
+      # STEP 4: Healthz probe -- the final liveness check.
+      - name: STEP 4 -- Probe staging /healthz (HTTP 200)
+        id: healthz
+        run: |
+          set -euo pipefail
+          # Single attempt -- we are probing a continuously running staging
+          # service, not waiting for an instance to come up. A multi-retry
+          # loop would mask real outages by giving an unhealthy service time
+          # to recover; the daily probe should reflect an exact moment-in-time
+          # health snapshot.
+          HTTP_CODE=$(curl -s -o /tmp/healthz.body -w '%{http_code}' \
+            --max-time 15 \
+            --connect-timeout 5 \
+            "${{ env.STAGING_BFF_HEALTHZ }}" || echo "000")
+          echo "Staging /healthz: HTTP $HTTP_CODE"
+          if [ "$HTTP_CODE" != "200" ]; then
+            BODY=$(head -c 500 /tmp/healthz.body 2>/dev/null || true)
+            echo "::error::Healthz probe failed: expected 200, got $HTTP_CODE"
+            echo "Body (truncated): $BODY"
+            echo "step_failed=healthz" >> "$GITHUB_OUTPUT"
+            echo "failure_reason=GET ${{ env.STAGING_BFF_HEALTHZ }} returned HTTP $HTTP_CODE (expected 200). Body: ${BODY:-<empty>}" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          echo "Healthz probe PASSED."
+
+      # Summary step -- always runs, captures pass/fail for the notify job.
+      - name: Summarise probe outcome
+        id: summary
+        if: ${{ always() }}
+        run: |
+          # If any prior step set step_failed via $GITHUB_OUTPUT, it has already
+          # propagated as that step's output -- but step outputs in a single
+          # job are not magically aggregated. Re-derive failure state from the
+          # job's status (a prior step's exit 1 will have set job.status to
+          # 'failure').
+          if [ "${{ job.status }}" = "success" ]; then
+            echo "step_failed=" >> "$GITHUB_OUTPUT"
+            echo "failure_reason=" >> "$GITHUB_OUTPUT"
+            echo "Synthetic staging deploy: ALL PROBES PASSED."
+          else
+            # Derive a best-effort failure reason from whichever step's output
+            # last wrote one. Step outputs are referenced individually below.
+            STEP_FAILED="${{ steps.identity.outputs.step_failed }}${{ steps.ssm.outputs.step_failed }}${{ steps.validate.outputs.step_failed }}${{ steps.changeset.outputs.step_failed }}${{ steps.healthz.outputs.step_failed }}"
+            REASON="${{ steps.identity.outputs.failure_reason }}${{ steps.ssm.outputs.failure_reason }}${{ steps.validate.outputs.failure_reason }}${{ steps.changeset.outputs.failure_reason }}${{ steps.healthz.outputs.failure_reason }}"
+            if [ -z "$STEP_FAILED" ]; then
+              STEP_FAILED="unknown"
+              REASON="Workflow failed but no step set a failure_reason. Inspect the job log."
+            fi
+            echo "step_failed=$STEP_FAILED" >> "$GITHUB_OUTPUT"
+            echo "failure_reason=$REASON" >> "$GITHUB_OUTPUT"
+            echo "Synthetic staging deploy: FAILED at step=$STEP_FAILED reason=$REASON"
+          fi
+
+  # Separate job so we can run notify even when synthetic-deploy fails.
+  # `needs: synthetic-deploy` + `if: always() && ...failure'` is the standard pattern.
+  notify-on-failure:
+    name: Publish failure notification to SNS
+    needs: [synthetic-deploy]
+    # Only run when the probe job failed AND dry_run was not requested.
+    # `always()` is required so this job evaluates even when the dependency
+    # failed; otherwise the default skip-on-needs-failure behaviour kicks in.
+    # inputs.dry_run is only set for workflow_dispatch; for schedule events it
+    # is absent (treated as false). Compare to literal false rather than true
+    # so the cron path always reaches notify-on-failure.
+    if: ${{ always() && needs.synthetic-deploy.result == 'failure' && inputs.dry_run != true }}  # yamllint disable-line
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      id-token: write
+      contents: read
+    environment: production
+    env:
+      AWS_REGION: us-east-1
+      STAGING_ALERTS_TOPIC_ARN: arn:aws:sns:us-east-1:901347789205:vaultmtg-staging-alerts
+
+    steps:
+      - name: Assume gha-infra-cfn-deploy via OIDC
+        uses: aws-actions/configure-aws-credentials@796449b3e38e3c256861227399e58b780e0e5538  # v6 SHA-pinned (ticket #2385 AC3)
+        with:
+          role-to-assume: ${{ secrets.AWS_CFN_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Publish to vaultmtg-staging-alerts SNS topic
+        env:
+          STEP_FAILED: ${{ needs.synthetic-deploy.outputs.step_failed }}
+          FAILURE_REASON: ${{ needs.synthetic-deploy.outputs.failure_reason }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          GH_REPO: ${{ github.repository }}
+          GH_WORKFLOW: ${{ github.workflow }}
+          GH_RUN_ID: ${{ github.run_id }}
+          GH_EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          SUBJECT="[P-12] Synthetic staging deploy FAILED at step=${STEP_FAILED:-unknown}"
+          # SNS Subject is capped at 100 chars (ASCII). Truncate defensively.
+          SUBJECT=$(printf '%s' "$SUBJECT" | cut -c1-100)
+          # Build the message body via printf -- avoids a YAML-embedded heredoc
+          # that interacts badly with GitHub Actions expression interpolation and
+          # the YAML block-scalar parser.
+          {
+            printf 'Scheduled synthetic staging deploy probe failed.\n\n'
+            printf 'Repository: %s\n' "$GH_REPO"
+            printf 'Workflow:   %s\n' "$GH_WORKFLOW"
+            printf 'Run ID:     %s\n' "$GH_RUN_ID"
+            printf 'Run URL:    %s\n' "$RUN_URL"
+            printf 'Triggered:  %s\n' "$GH_EVENT_NAME"
+            printf 'Failed at:  %s\n\n' "${STEP_FAILED:-unknown}"
+            printf 'Failure reason:\n%s\n\n' "${FAILURE_REASON:-<no reason captured>}"
+            printf 'This is the P-12 nightly probe that exercises the OIDC -> SSM -> CFN dry-run -> healthz\n'
+            printf 'path against staging. A failure here indicates the infra deploy pipeline has\n'
+            printf 'silently regressed (IAM trust drift, SSM rename, S3 policy revocation, AMI\n'
+            printf 'deprecation, or the staging BFF is down). Investigate the run URL above.\n\n'
+            printf 'See vault-mtg#2370 (P-12) for context.\n'
+          } > /tmp/sns-message.txt
+          # Publish. The deploy role has sns:Publish scoped to the staging
+          # alerts topic ARN only (iam-gha-roles.yml SNSPublishStagingAlerts).
+          aws sns publish \
+            --topic-arn "$STAGING_ALERTS_TOPIC_ARN" \
+            --subject "$SUBJECT" \
+            --message "file:///tmp/sns-message.txt" \
+            --region "$AWS_REGION"
+          # Note: aws CLI treats file://<absolute-path> as a file reference
+          # (https://docs.aws.amazon.com/cli/latest/userguide/cli-usage-parameters-file.html).
+          # The three slashes are correct -- file:// + the absolute path /tmp/sns-message.txt.
+          echo "Failure notification published to $STAGING_ALERTS_TOPIC_ARN"
