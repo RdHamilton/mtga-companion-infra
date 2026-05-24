@@ -1,0 +1,4 @@
+[
+  { "ParameterKey": "Environment",  "ParameterValue": "staging" },
+  { "ParameterKey": "RetentionDays", "ParameterValue": "30" }
+]
