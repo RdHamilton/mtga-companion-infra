@@ -732,6 +732,25 @@ Resources:
                 Resource:
                   - arn:aws:logs:us-east-1:901347789205:log-group:/vaultmtg/*
                   - arn:aws:logs:us-east-1:901347789205:log-group:/aws/lambda/vaultmtg-*
+              # CloudWatch Logs actions that do NOT support resource-level permissions
+              # per the AWS IAM Service Authorization Reference
+              # (https://docs.aws.amazon.com/service-authorization/latest/reference/list_amazoncloudwatchlogs.html).
+              # logs:DescribeLogGroups has an EMPTY Resource types column — it cannot
+              # be scoped to a log-group ARN, only to "*". Required at minimum for
+              # CloudFormation to resolve `!GetAtt <LogGroup>.Arn` on AWS::Logs::LogGroup
+              # resources (e.g. cloudtrail.yml CloudTrailLogsRole). The original
+              # CloudWatchLogsGlobal Sid was dropped during the 10,240-byte size
+              # optimization in PR #166; reintroducing here surfaced by cloudtrail
+              # deploy run 26347192196: CloudTrailLogsRole CREATE_FAILED — "Unable to
+              # retrieve Arn attribute for AWS::Logs::LogGroup, with error message
+              # Access denied for operation 'logs:DescribeLogGroups'."
+              # Boundary impact: the boundary's CW Sid grants `logs:*` on "*", so the
+              # intersection equals this inline grant — no boundary edit needed.
+              - Sid: CloudWatchLogsGlobal
+                Effect: Allow
+                Action:
+                  - logs:DescribeLogGroups
+                Resource: "*"
               - Sid: SNS
                 Effect: Allow
                 Action:
