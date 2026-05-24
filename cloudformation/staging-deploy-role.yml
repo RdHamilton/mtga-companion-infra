@@ -1,9 +1,12 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
   S-03: vaultmtg-staging-deploy-provisioner scoped IAM role (ADR-022 addendum
-  sect4A). Dedicated deploy-provisioning identity for provision-staging-env.sh.
+  sect4A). Dedicated deploy-provisioning identity for provision-staging-env.sh
+  AND run-staging-migrations.sh (Path 2 mirror, Path X 2026-05-24).
   Scoped to /vaultmtg/staging/*, /vaultmtg/app/staging/*, /mtga-companion/staging/*,
-  kms:Decrypt via alias/aws/ssm, and secretsmanager:GetSecretValue on mtga-companion/staging/* only.
+  kms:Decrypt via alias/aws/ssm AND alias/aws/secretsmanager (RDS-managed secret),
+  and secretsmanager:GetSecretValue on mtga-companion/staging/* + the staging
+  RDS-managed secret (rds!db-12c647a0-...) only.
   No production SSM access. No writes. No S3. No EC2 control-plane.
   Trust: GitHub OIDC (Path B, end state) + EC2 instance AssumeRole bridge
   (Path A, interim - restored Path X 2026-05-24, ADR-022 sect4A.7 addendum).
@@ -145,12 +148,18 @@ Resources:
                   - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/vaultmtg/app/staging/*"
                   # Legacy path (dropped in step 5d after SSM cutover verified)
                   - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/mtga-companion/staging/*"
-        # KMS Decrypt: required for SecureString parameters
-        # (CLERK_SECRET_KEY, CLERK_PUBLISHABLE_KEY, etc. encrypted with
-        # the default SSM KMS key alias/aws/ssm). Constrained via
-        # kms:ViaService so the Decrypt can only be called through the
-        # SSM service endpoint, not directly against the key.
-        # Resource narrowed to alias/aws/ssm (the managed SSM key) -- no other KMS keys in scope.
+        # KMS Decrypt: required for two distinct envelope-encrypted reads:
+        #   1. SecureString SSM parameters (CLERK_SECRET_KEY, CLERK_PUBLISHABLE_KEY,
+        #      etc.) encrypted with the AWS-managed SSM KMS key (alias/aws/ssm).
+        #   2. The RDS-managed staging DB secret (rds!db-12c647a0-...) encrypted
+        #      with the AWS-managed Secrets Manager KMS key (alias/aws/secretsmanager).
+        #      RDS auto-rotation publishes the credential under the default
+        #      Secrets Manager key, not the SSM key -- a separate Decrypt grant
+        #      is required, scoped via kms:ViaService to the Secrets Manager
+        #      service endpoint only.
+        # Each statement is constrained via kms:ViaService so the Decrypt can
+        # only be called through the originating service endpoint, not directly
+        # against the key. No customer-managed KMS keys in scope.
         - PolicyName: StagingProvisioningKMSDecrypt
           PolicyDocument:
             Version: "2012-10-17"
@@ -162,12 +171,31 @@ Resources:
                 Condition:
                   StringEquals:
                     kms:ViaService: !Sub "ssm.${AWS::Region}.amazonaws.com"
-        # Secrets Manager: staging RDS credential only.
-        # provision-staging-env.sh reads db-secret-arn from SSM and then calls
-        # secretsmanager:GetSecretValue to retrieve the postgres password.
-        # Scoped to mtga-companion/staging/* only. rds!* removed: that pattern
-        # matched the production RDS managed secret (rds!db-12c647a0-...) which
-        # must not be accessible from this staging-scoped role.
+              - Sid: KMSDecryptViaSecretsManager
+                Effect: Allow
+                Action: kms:Decrypt
+                Resource: !Sub "arn:aws:kms:${AWS::Region}:${AWS::AccountId}:alias/aws/secretsmanager"
+                Condition:
+                  StringEquals:
+                    kms:ViaService: !Sub "secretsmanager.${AWS::Region}.amazonaws.com"
+        # Secrets Manager: staging DB credentials only.
+        # Two distinct secret sources, both required by the staging deploy flow:
+        #
+        #   1. mtga-companion/staging/*  -- user-created staging secrets namespace
+        #      (legacy DB credential path, integration secrets).
+        #
+        #   2. rds!db-12c647a0-0880-45e5-bf35-d9c1ccb05433-*  -- the RDS-managed
+        #      auto-rotated credential for the staging RDS instance. The trailing
+        #      "-*" suffix is the 6-char random suffix AWS appends to the ARN
+        #      (e.g. -qzBP5e); the unique secret-id prefix is pinned to staging.
+        #      run-staging-migrations.sh reads this secret to obtain the
+        #      postgres password before running migrations (Path 2 mirror of
+        #      vault-mtg#2537 / provision-staging-env.sh refactor).
+        #
+        # Scope: there is currently no production RDS instance in this account
+        # (staging is the only RDS), but the explicit secret-id prefix is used
+        # rather than the broad rds!db-* wildcard so that a future production
+        # RDS creation does not silently widen this role's blast radius.
         - PolicyName: StagingProvisioningDBSecretRead
           PolicyDocument:
             Version: "2012-10-17"
@@ -176,8 +204,12 @@ Resources:
                 Effect: Allow
                 Action: secretsmanager:GetSecretValue
                 Resource:
-                  # Staging RDS credential (user-created secret, staging namespace only)
+                  # Staging user-created secrets namespace (legacy + integration)
                   - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:mtga-companion/staging/*"
+                  # Staging RDS-managed credential (auto-rotated by RDS).
+                  # Explicit secret-id prefix -- NOT the broad rds!db-* wildcard --
+                  # so a future prod RDS does not silently inherit this grant.
+                  - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:rds!db-12c647a0-0880-45e5-bf35-d9c1ccb05433-*"
       Tags:
         - Key: Project
           Value: mtga-companion
