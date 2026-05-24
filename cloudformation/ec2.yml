@@ -172,11 +172,20 @@ Resources:
         # RDS secret (!ImportValue mtga-companion-rds-DBSecretArn) and
         # (b) a wildcard over all mtga-companion/* secrets.
         #
-        # The BFF does NOT read Secrets Manager at runtime (zero grep hits
-        # for secretsmanager / DB_SECRET_ARN in services/bff/). The ONLY
-        # live consumer of an instance-role Secrets Manager grant is the
-        # deploy-time script scripts/deploy/provision-staging-env.sh, which
-        # runs ON this instance via AWS-RunShellScript (app-repo
+        # The BFF reads Secrets Manager at runtime ONLY if the opt-in
+        # toggle BFF_DB_RESOLVE_FROM_SM=true is set in the env file (per
+        # vault-mtg#2539 (staging) + vault-mtg#2540 (production). The toggle
+        # defaults OFF -- post-#2539/#2540 the deploy-time scripts
+        # scripts/deploy/provision-staging-env.sh (staging) and
+        # scripts/deploy/provision-db-url.sh (production) splice inline
+        # credentials into DATABASE_URL under the dedicated
+        # vaultmtg-staging-deploy-provisioner role, so the BFF never needs
+        # to call SM in steady state. The toggle is retained as an escape
+        # hatch for future rotation patterns.
+        #
+        # The live consumer of an instance-role Secrets Manager grant is
+        # still the deploy-time script scripts/deploy/provision-staging-env.sh,
+        # which runs ON this instance via AWS-RunShellScript (app-repo
         # deploy-bff.yml) and calls secretsmanager:GetSecretValue on the
         # staging RDS secret to assemble the staging DATABASE_URL.
         #
