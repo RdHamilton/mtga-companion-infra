@@ -28,9 +28,36 @@ REGION="${AWS_DEFAULT_REGION:-us-east-1}"
 
 log() { echo "[setup] $(date '+%Y-%m-%dT%H:%M:%S') $*"; }
 
-# Fetch an SSM parameter value by name (with decryption).
-# Returns empty string on failure -- callers must check and fail-loud if required.
-fetch_ssm() {
+# SSM fetch helpers split by parameter type (least-capability — issue #2518).
+#
+# fetch_ssm_plain   -- for String / StringList params. Does NOT request decryption.
+# fetch_ssm_secret  -- for SecureString params. Passes --with-decryption.
+# require_ssm_plain / require_ssm_secret -- same split, but fail loudly if the
+#   parameter is missing or empty.
+#
+# Callers must pick the variant that matches the parameter's actual SSM Type.
+# Mixing them up either (a) needlessly requests KMS decrypt on non-secret data
+# or (b) silently fails to decrypt a SecureString (AWS returns the ciphertext).
+#
+# Production parameter inventory (verified against SSM 2026-05-23):
+#   SecureString : /vaultmtg/app/production/daemon-jwt-secret
+#   String       : /vaultmtg/app/production/ALLOWED_ORIGINS
+#                  /vaultmtg/app/production/db-secret-arn
+#                  /vaultmtg/app/production/db-endpoint
+#                  /vaultmtg/app/production/db-name
+#                  /vaultmtg/app/production/latest-bff-sha
+#                  /vaultmtg/app/production/domain-name
+#                  /vaultmtg/app/production/certbot-email
+
+fetch_ssm_plain() {
+    aws ssm get-parameter \
+        --region "$REGION" \
+        --name "$1" \
+        --query 'Parameter.Value' \
+        --output text 2>/dev/null || true
+}
+
+fetch_ssm_secret() {
     aws ssm get-parameter \
         --region "$REGION" \
         --name "$1" \
@@ -39,11 +66,21 @@ fetch_ssm() {
         --output text 2>/dev/null || true
 }
 
-# Fail loudly if a required SSM parameter is missing or empty.
-require_ssm() {
+require_ssm_plain() {
     local _name="$1"
     local _val
-    _val=$(fetch_ssm "$_name")
+    _val=$(fetch_ssm_plain "$_name")
+    if [ -z "$_val" ] || [ "$_val" = "None" ]; then
+        log "FATAL: required SSM parameter '$_name' is missing or empty. Aborting bootstrap."
+        exit 1
+    fi
+    printf '%s' "$_val"
+}
+
+require_ssm_secret() {
+    local _name="$1"
+    local _val
+    _val=$(fetch_ssm_secret "$_name")
     if [ -z "$_val" ] || [ "$_val" = "None" ]; then
         log "FATAL: required SSM parameter '$_name' is missing or empty. Aborting bootstrap."
         exit 1
@@ -78,25 +115,27 @@ chmod 750 "$ENV_DIR"
 # ---------------------------------------------------------
 log "Fetching config from SSM (/vaultmtg/app/production/*)..."
 
-PORT=$(fetch_ssm "/vaultmtg/app/production/PORT")
-PORT="${PORT:-8080}"
+# Port is controlled exclusively by the BFF binary default (8080 — see
+# services/bff/cmd/main.go). The BFF reads BFF_PORT only; any PORT= entry
+# in the env file would be silently ignored, so we do not fetch or write
+# one here. (Mirrors the staging cleanup landed in PR #176.)
 
-ALLOWED_ORIGINS=$(require_ssm "/vaultmtg/app/production/ALLOWED_ORIGINS")
+ALLOWED_ORIGINS=$(require_ssm_plain "/vaultmtg/app/production/ALLOWED_ORIGINS")
 # DAEMON_JWT_SECRET is required — fail loud if missing or empty rather than
 # silently writing DAEMON_JWT_SECRET= to the env file (which would break
 # daemon auth at BFF startup with a non-obvious failure mode).
-DAEMON_JWT_SECRET=$(require_ssm "/vaultmtg/app/production/daemon-jwt-secret")
+# This is the only SecureString parameter in this bootstrap.
+DAEMON_JWT_SECRET=$(require_ssm_secret "/vaultmtg/app/production/daemon-jwt-secret")
 
 # Credential-free DATABASE_URL -- BFF resolves credentials via DB_SECRET_ARN
 # at startup (matches provision-db-url.sh and deploy-env.sh pattern).
-DB_SECRET_ARN=$(require_ssm "/vaultmtg/app/production/db-secret-arn")
-DB_ENDPOINT=$(require_ssm "/vaultmtg/app/production/db-endpoint")
-DB_NAME=$(require_ssm "/vaultmtg/app/production/db-name")
+DB_SECRET_ARN=$(require_ssm_plain "/vaultmtg/app/production/db-secret-arn")
+DB_ENDPOINT=$(require_ssm_plain "/vaultmtg/app/production/db-endpoint")
+DB_NAME=$(require_ssm_plain "/vaultmtg/app/production/db-name")
 DATABASE_URL="postgresql://${DB_ENDPOINT}:5432/${DB_NAME}?sslmode=require"
 
 log "Writing env file to $ENV_DIR/env..."
 {
-    printf 'PORT=%s\n'              "$PORT"
     printf 'DATABASE_URL=%s\n'     "$DATABASE_URL"
     printf 'DB_SECRET_ARN=%s\n'    "$DB_SECRET_ARN"
     printf 'MTGA_ENV=production\n'
@@ -121,7 +160,7 @@ log "Env file written successfully."
 # service enabled so the next CI deploy triggers a start automatically.
 # ---------------------------------------------------------
 log "Fetching BFF binary from S3..."
-DEPLOY_SHA=$(fetch_ssm "/vaultmtg/app/production/latest-bff-sha")
+DEPLOY_SHA=$(fetch_ssm_plain "/vaultmtg/app/production/latest-bff-sha")
 DEPLOY_BUCKET="mtga-companion-deploy-artifacts-production"
 
 if [ -n "$DEPLOY_SHA" ] && [ "$DEPLOY_SHA" != "None" ]; then
@@ -347,10 +386,10 @@ LOGROTATE
 # Reads domain from SSM. Idempotent: skips if domain not set or cert exists.
 # Issue #2316: /vaultmtg/app/production/domain-name must be pre-created
 # in SSM before deploying -- a missing param now fails loudly (non-zero exit)
-# via require_ssm rather than silently skipping certbot.
+# via require_ssm_plain rather than silently skipping certbot.
 # ---------------------------------------------------------
 log "Checking for domain in SSM..."
-DOMAIN=$(fetch_ssm "/vaultmtg/app/production/domain-name")
+DOMAIN=$(fetch_ssm_plain "/vaultmtg/app/production/domain-name")
 if [ -n "$DOMAIN" ] && [ "$DOMAIN" != "None" ]; then
     log "Domain: $DOMAIN -- running certbot..."
     # Certbot ACME registration email — sourced from SSM rather than hardcoded
@@ -358,7 +397,7 @@ if [ -n "$DOMAIN" ] && [ "$DOMAIN" != "None" ]; then
     # Pre-flight: parameter /vaultmtg/app/production/certbot-email must exist
     # (created out-of-band; type=String). Read access is granted via the
     # existing /vaultmtg/app/production/* wildcard on the EC2 instance role.
-    CERTBOT_EMAIL=$(require_ssm "/vaultmtg/app/production/certbot-email")
+    CERTBOT_EMAIL=$(require_ssm_plain "/vaultmtg/app/production/certbot-email")
     if [ ! -d "/etc/letsencrypt/live/$DOMAIN" ]; then
         certbot --nginx --non-interactive --agree-tos \
             --email "$CERTBOT_EMAIL" \
