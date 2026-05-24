@@ -468,18 +468,17 @@ Resources:
       LogGroupName: !Sub "/vaultmtg/${Environment}/nginx"
       FilterName: !Sub "vault-mtg-${Environment}-bff-5xx"
       FilterPattern: '[ip, ident, user, ts, request, status_code=5*, size, ...]'
-      # NOTE: AWS::Logs::MetricFilter rejects DefaultValue when Dimensions is
-      # set (mutually exclusive per AWS docs). The Bff5xxAlarm below uses
-      # TreatMissingData: notBreaching which handles the "no 5xx events"
-      # case safely without needing a zero-fill default value.
+      # NOTE: AWS::Logs::MetricFilter Dimensions.Value must be a parsed-field
+      # selector ($-prefixed) from the log line, NOT a literal template value.
+      # !Ref Environment resolves to a literal string at deploy time and AWS
+      # rejects it ("dimension value must be valid selector"). We embed
+      # Environment in the MetricName instead, giving prod and staging
+      # distinct metric series: Http5xxCount-production / Http5xxCount-staging.
       MetricTransformations:
         - MetricNamespace: MTGA/BFF
-          MetricName: Http5xxCount
+          MetricName: !Sub "Http5xxCount-${Environment}"
           MetricValue: "1"
           Unit: Count
-          Dimensions:
-            - Key: Environment
-              Value: !Ref Environment
 
   # ---------------------------------------------------------
   # BFF HTTP 5xx rate alarm (AC1)
@@ -492,8 +491,12 @@ Resources:
   # from the nginx access log group /vaultmtg/${Environment}/nginx.
   #
   # Namespace : MTGA/BFF
-  # MetricName: Http5xxCount
-  # Dimension : Environment=<environment>
+  # MetricName: Http5xxCount-<environment>
+  #
+  # Environment is embedded in the metric NAME (not a CW dimension)
+  # because AWS::Logs::MetricFilter Dimensions.Value must be a parsed-
+  # field selector from the log line, not a template literal. See the
+  # NOTE on Bff5xxMetricFilter above.
   #
   # TreatMissingData=notBreaching: at very low traffic the metric
   # filter emits one datapoint per matched 5xx event; periods with
@@ -512,10 +515,7 @@ Resources:
         3. Verify database connectivity: check RDS latency alarm state.
         Runbook: vault_mtg_docs/engineering/runbooks/cloudwatch-alarms-runbook.md
       Namespace: MTGA/BFF
-      MetricName: Http5xxCount
-      Dimensions:
-        - Name: Environment
-          Value: !Ref Environment
+      MetricName: !Sub "Http5xxCount-${Environment}"
       Statistic: Sum
       Period: 300
       EvaluationPeriods: !Ref Bff5xxEvaluationPeriods
