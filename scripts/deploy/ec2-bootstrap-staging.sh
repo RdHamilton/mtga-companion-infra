@@ -240,7 +240,7 @@ limit_req_zone $binary_remote_addr zone=stg_api_limit:10m rate=30r/m;
 
 server {
     listen 80 default_server;
-    server_name staging-api.vaultmtg.app _;
+    server_name staging-api.vaultmtg.app;
 
     location /.well-known/acme-challenge/ {
         root /var/www/certbot;
