@@ -22,6 +22,7 @@ on:
           - cloudwatch-alarms-staging
           - cloudwatch-dashboards
           - logs
+          - logs-staging
           - logs-import
           - cdn
           - iam-gha-roles
@@ -77,6 +78,7 @@ jobs:
             cloudwatch-dashboards)      STACK_NAME="vaultmtg-cloudwatch-dashboards" ;     TEMPLATE_NAME="${{ inputs.stack }}" ;;
             staging-deploy-role)        STACK_NAME="mtga-companion-staging-deploy-role" ; TEMPLATE_NAME="${{ inputs.stack }}" ;;
             logs-import)                STACK_NAME="mtga-companion-logs" ;                TEMPLATE_NAME="logs" ;;
+            logs-staging)               STACK_NAME="mtga-companion-logs-staging" ;        TEMPLATE_NAME="logs" ;;
             rhamiltoneng-cdn)           STACK_NAME="rhamiltoneng-cdn" ;                   TEMPLATE_NAME="${{ inputs.stack }}" ;;
             ec2-sg-staging)             STACK_NAME="mtga-companion-ec2-sg-staging" ;      TEMPLATE_NAME="ec2-sg" ;;
             ec2-staging)                STACK_NAME="mtga-companion-ec2-staging" ;         TEMPLATE_NAME="ec2" ;;
