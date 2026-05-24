@@ -114,11 +114,13 @@ jobs:
     name: Synthetic deploy probe (OIDC -> SSM -> CFN dry-run -> healthz)
     runs-on: ubuntu-latest
     # production environment required -- gha-infra-cfn-deploy's trust policy
-    # only accepts ref:refs/heads/main, pull_request, and environment:production
-    # subs. A scheduled job on the default branch resolves to ref:refs/heads/main,
-    # but pinning to environment:production gives us the same approval gate that
-    # protects real production deploys (the environment subscription is bound to
-    # the named environment in repo settings).
+    # accepts ref:refs/heads/main, pull_request, environment:production, and
+    # environment:staging-alerts subs. A scheduled job on the default branch
+    # resolves to ref:refs/heads/main, but pinning to environment:production
+    # gives us the same approval gate that protects real production deploys
+    # (the environment subscription is bound to the named environment in repo
+    # settings). The notify-on-failure job below uses staging-alerts instead so
+    # that the SNS error notification path is not gated on approval.
     environment: production
     timeout-minutes: 15
 
@@ -402,7 +404,15 @@ jobs:
     permissions:
       id-token: write
       contents: read
-    environment: production
+    # staging-alerts environment (no required reviewers) -- producing a failure
+    # notification to SNS must not require a human approval. The `staging-alerts`
+    # environment sub is allowed in the gha-infra-cfn-deploy trust policy
+    # (cloudformation/iam-gha-roles.yml, see `environment:staging-alerts` line).
+    # The role's sns:Publish action is scoped to vaultmtg-staging-alerts only via
+    # the SNSPublishStagingAlerts Sid -- no other write access is conferred.
+    # Setup (one-time, before merge): `gh api -X PUT
+    # /repos/RdHamilton/mtga-companion-infra/environments/staging-alerts -f wait_timer=0`.
+    environment: staging-alerts
     env:
       AWS_REGION: us-east-1
       STAGING_ALERTS_TOPIC_ARN: arn:aws:sns:us-east-1:901347789205:vaultmtg-staging-alerts
