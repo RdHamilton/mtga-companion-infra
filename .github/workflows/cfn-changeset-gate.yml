@@ -583,10 +583,19 @@ jobs:
 
             # Walk each (logicalId, policy) pair and run validate-policy.
             # POLICIES_JSON is a stream of JSON objects (one per resource).
-            echo "$POLICIES_JSON" | python3 <<'PY'
+            #
+            # Pass POLICIES_JSON via env var, NOT via `echo "$POLICIES_JSON" | python3 <<'PY'`.
+            # That older pattern is broken: when both a pipe (|) and a heredoc (<<)
+            # target python's stdin, the heredoc wins -- python receives the script
+            # text on stdin, sys.stdin.read() returns empty, and the unread pipe
+            # data triggers SIGPIPE on the echo writer (visible in the runner log
+            # as `line 42: echo: write error: Broken pipe`). Under `set -euo pipefail`
+            # that aborts the whole job before any validate-policy call runs.
+            # See PR #168 S-10 run 26347408402 and ticket vault-mtg#TBD for evidence.
+            POLICIES_JSON="$POLICIES_JSON" python3 <<'PY'
           import json, sys, subprocess, os
 
-          stream = sys.stdin.read().strip()
+          stream = os.environ.get('POLICIES_JSON', '').strip()
           if not stream:
               sys.exit(0)
 
