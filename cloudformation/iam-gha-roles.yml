@@ -421,8 +421,13 @@ Resources:
                   - !Sub repo:${GitHubOrg}/${AppRepo}:ref:refs/tags/app/v*
                   - !Sub repo:${GitHubOrg}/${AppRepo}:ref:refs/tags/daemon/v*
                   - !Sub repo:${GitHubOrg}/${AppRepo}:ref:refs/tags/v*
-                  # vault-mtg: staging deploy jobs run in `environment: staging`
+                  # vault-mtg: staging deploy jobs run in `environment: staging`;
+                  # production deploy jobs (workflow_dispatch release.yml) run in
+                  # `environment: production`. Both environment subs must be allowed
+                  # explicitly -- a named GH environment sub replaces the ref-based
+                  # sub in the OIDC token. See vault-mtg run 26362262888 failure.
                   - !Sub repo:${GitHubOrg}/${AppRepo}:environment:staging
+                  - !Sub repo:${GitHubOrg}/${AppRepo}:environment:production
                   # vault-mtg-web: main branch and release tag deploys
                   - !Sub repo:${GitHubOrg}/${WebRepo}:ref:refs/heads/main
                   - !Sub repo:${GitHubOrg}/${WebRepo}:ref:refs/tags/v*
