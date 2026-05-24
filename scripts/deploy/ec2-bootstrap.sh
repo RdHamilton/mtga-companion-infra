@@ -437,6 +437,54 @@ else
 fi
 
 # ---------------------------------------------------------
+# 8b. BFF CloudWatch metric installers
+#
+# Installs the systemd timers that publish BFF restart count and BFF
+# p99 latency to CloudWatch (MTGA/BFF namespace), backing the
+# BffRestartAlarm and BffLatencyAlarm in cloudformation/cloudwatch-alarms.yml.
+#
+# Before this section was added, both installers had to be run by hand via
+# SSM Session Manager after every EC2 replacement (otherwise the alarms
+# silently saw zero data). Folding them into bootstrap means a fresh
+# instance is fully self-instrumenting.
+#
+# Ordering:
+#   - Must run AFTER the BFF systemd unit exists (section 5) -- the restart
+#     installer's smoke test reads its journal.
+#   - Must run AFTER certbot (section 8) -- the latency installer inserts a
+#     server-level access_log into the HTTPS server block that certbot writes
+#     during its --nginx run. The latency installer's nginx edit anchors on
+#     the "server_name <domain>; # managed by Certbot" line.
+#
+# The installer scripts are uploaded to S3 by .github/workflows/deploy.yml
+# alongside this bootstrap script (under bootstrap/installers/). The EC2
+# instance role already has s3:GetObject on this bucket via S3DeployArtifactsRead.
+# ---------------------------------------------------------
+log "Installing BFF metric publishers (restart count + p99 latency)..."
+INSTALLER_DIR=$(mktemp -d)
+aws s3 cp \
+    "s3://${DEPLOY_BUCKET}/bootstrap/installers/install-restart-metric-production.sh" \
+    "$INSTALLER_DIR/install-restart-metric-production.sh" \
+    --region "$REGION"
+aws s3 cp \
+    "s3://${DEPLOY_BUCKET}/bootstrap/installers/install-bff-latency-metric.sh" \
+    "$INSTALLER_DIR/install-bff-latency-metric.sh" \
+    --region "$REGION"
+
+bash "$INSTALLER_DIR/install-restart-metric-production.sh" \
+    || log "WARNING: install-restart-metric-production.sh failed; restart alarm will see no data until fixed."
+
+if [ -n "${DOMAIN:-}" ] && [ "$DOMAIN" != "None" ]; then
+    bash "$INSTALLER_DIR/install-bff-latency-metric.sh" production "$DOMAIN" \
+        || log "WARNING: install-bff-latency-metric.sh failed; latency alarm will see no data until fixed."
+else
+    log "Skipping install-bff-latency-metric.sh -- no domain set; latency installer needs"
+    log "the certbot-managed server_name to anchor the nginx access_log edit."
+fi
+
+rm -rf "$INSTALLER_DIR"
+
+# ---------------------------------------------------------
 # 9. BFF log forwarding via rsyslog
 # AL2023 uses journald only by default -- no /var/log/messages.
 # rsyslog filters mtga-bff entries (by syslog identifier) into a

@@ -807,7 +807,9 @@ Resources:
   # Metric source: a systemd timer on the EC2 instance that tails the
   # nginx access log, computes the p99 of request_time over the last
   # 60 s, and publishes it via cloudwatch put-metric-data.
-  # Install via scripts/install-bff-latency-metric.sh.
+  # Installed automatically by scripts/deploy/ec2-bootstrap.sh
+  # (section 8b) on instance launch; the installer source lives at
+  # scripts/install-bff-latency-metric.sh.
   #
   # Namespace : MTGA/BFF
   # MetricName: BffP99LatencyMs
@@ -870,8 +872,10 @@ Resources:
   # alarm intentionally track the REAL unit name to avoid the
   # wrong-unit-name class of bug (cf. v0.3.1 #2192).
   #
-  # Metric source: a systemd oneshot service + timer installed on the
-  # EC2 instance via scripts/install-restart-metric-production.sh.
+  # Metric source: a systemd oneshot service + timer installed
+  # automatically by scripts/deploy/ec2-bootstrap.sh (section 8b)
+  # on instance launch; the installer source lives at
+  # scripts/install-restart-metric-production.sh.
   # It runs every 60 s, counts mtga-companion.service restarts since
   # the last run, and calls cloudwatch put-metric-data.
   #

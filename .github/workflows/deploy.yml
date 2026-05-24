@@ -322,12 +322,21 @@ jobs:
           echo "✓ Template valid"
 
       - name: Upload bootstrap script (ec2 / ec2-staging stacks only)
-        # Uploads the appropriate bootstrap script to the artifacts bucket before
-        # the ec2 or ec2-staging stack is created/updated. The UserData stub
-        # fetches s3://<bucket>/bootstrap/ec2-bootstrap.sh at instance launch.
+        # Uploads the appropriate bootstrap script (and, for production, the
+        # BFF CloudWatch metric installer scripts it invokes) to the artifacts
+        # bucket before the ec2 or ec2-staging stack is created/updated. The
+        # UserData stub fetches s3://<bucket>/bootstrap/ec2-bootstrap.sh at
+        # instance launch; the bootstrap script then fetches the installers
+        # under s3://<bucket>/bootstrap/installers/ during its own setup.
         # Production: scripts/deploy/ec2-bootstrap.sh        -> s3://mtga-companion-deploy-artifacts-production/bootstrap/
         # Staging:    scripts/deploy/ec2-bootstrap-staging.sh -> s3://mtga-companion-deploy-artifacts-staging/bootstrap/
-        # IAM: gha-infra-cfn-deploy has s3:PutObject on both bucket paths (iam-gha-roles.yml).
+        # Installers (production only -- staging installers tracked separately):
+        #   scripts/install-restart-metric-production.sh \
+        #   scripts/install-bff-latency-metric.sh \
+        #     -> s3://mtga-companion-deploy-artifacts-production/bootstrap/installers/
+        # IAM: gha-infra-cfn-deploy has s3:PutObject on both bucket paths
+        # (iam-gha-roles.yml S3BootstrapWrite Sid). The /bootstrap/installers/
+        # sub-prefix is covered by the existing /bootstrap/* wildcard.
         if: ${{ (inputs.stack == 'ec2' || inputs.stack == 'ec2-staging') && !inputs.dry_run }}
         run: |
           if [ "${{ inputs.stack }}" = "ec2-staging" ]; then
@@ -341,6 +350,20 @@ jobs:
             s3://${BOOTSTRAP_BUCKET}/bootstrap/ec2-bootstrap.sh \
             --region us-east-1
           echo "Bootstrap script uploaded to s3://${BOOTSTRAP_BUCKET}/bootstrap/ec2-bootstrap.sh"
+
+          # Production bootstrap also fetches metric installers from S3 -- upload them
+          # alongside. Staging bootstrap does not currently invoke them (the existing
+          # scripts/install-restart-metric.sh references a stale staging unit name and
+          # needs an update before it can be folded into staging bootstrap).
+          if [ "${{ inputs.stack }}" = "ec2" ]; then
+            aws s3 cp scripts/install-restart-metric-production.sh \
+              s3://${BOOTSTRAP_BUCKET}/bootstrap/installers/install-restart-metric-production.sh \
+              --region us-east-1
+            aws s3 cp scripts/install-bff-latency-metric.sh \
+              s3://${BOOTSTRAP_BUCKET}/bootstrap/installers/install-bff-latency-metric.sh \
+              --region us-east-1
+            echo "Installer scripts uploaded to s3://${BOOTSTRAP_BUCKET}/bootstrap/installers/"
+          fi
 
       - name: Load parameters
         id: params
