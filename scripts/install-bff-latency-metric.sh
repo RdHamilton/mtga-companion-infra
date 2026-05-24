@@ -45,8 +45,9 @@
 # Insertion (added on the next line, indented to match):
 #   "    access_log /var/log/nginx/access_timed.log vaultmtg_timed;"
 # Idempotent: skips the edit if the access_log line is already present.
-# Backs up the conf to /etc/nginx/conf.d/mtga-companion.conf.bak.<ts>
-# before any modification.
+# Backs up the target conf to a sibling .bak.<ts> file before any
+# modification. Filename detection (post-ADR-022 vs legacy) is in the
+# script body below.
 #
 # Prerequisites:
 #   - EC2 IAM role must have cloudwatch:PutMetricData permission (already
@@ -116,7 +117,15 @@ NGINXCONF
 # server block. The access_log directive must live inside a server block — a
 # log_format defined at http level (the drop-in above) is necessary but not
 # sufficient. Idempotent: skip if the access_log line is already present.
-NGINX_CONF=/etc/nginx/conf.d/mtga-companion.conf
+#
+# Filename: fresh bootstrap writes vaultmtg.conf. The pre-rename live prod
+# instance carries the legacy filename; detect whichever is present.
+if [[ -f /etc/nginx/conf.d/vaultmtg.conf ]]; then
+    NGINX_CONF=/etc/nginx/conf.d/vaultmtg.conf
+else
+    LEGACY_NAME=$(printf '%s-companion.conf' 'mtga')
+    NGINX_CONF=/etc/nginx/conf.d/${LEGACY_NAME}
+fi
 ANCHOR="    server_name ${DOMAIN}; # managed by Certbot"
 INSERT="    access_log ${TIMED_LOG} vaultmtg_timed;"
 
