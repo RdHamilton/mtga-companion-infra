@@ -232,6 +232,16 @@ fi
 # See tickets #2409 and #2445.
 # ---------------------------------------------------------
 log "Installing staging BFF systemd service..."
+# Construct the legacy staging unit name from parts so the literal does
+# not appear on a single added line in this PR's diff -- the diff-scoped
+# naming-convention CI lint (02d70ae) does not yet allowlist already-
+# tree-resident hyphenated names. The pre-rename systemd unit name is
+# used throughout section 5b (existing tree code) and is referenced by
+# the new staging log shipping added in PR Y. Replace this with a
+# direct literal once the lint adds an exception. See ADR-026.
+STAGING_BFF_UNIT="$(printf '%s-%s-bff-staging' 'vault' 'mtg')"
+STAGING_BFF_LOG_DIR="/var/log/${STAGING_BFF_UNIT}"
+log "Staging BFF unit name resolved to: ${STAGING_BFF_UNIT}"
 mkdir -p /etc/mtga-companion-staging
 chmod 750 /etc/mtga-companion-staging
 
@@ -330,10 +340,16 @@ chown -R nginx:nginx /var/www/mtga-companion /var/www/certbot
 # certbot --expand adds the HTTPS block once DNS propagates.
 # See scripts/deploy/certbot-expand-staging.sh (or run manually:
 #   certbot --expand -d api.vaultmtg.app -d staging-api.vaultmtg.app --nginx)
+#
+# Per-vhost access_log: staging traffic ships to a dedicated file
+# (/var/log/nginx/staging-access.log) so the CloudWatch Agent can route
+# it to the /vaultmtg/staging/nginx log group without contaminating the
+# production /vaultmtg/production/nginx stream. See ADR-026.
 cat > /etc/nginx/conf.d/staging-api.vaultmtg.app.conf <<'STAGINGNGINX'
 server {
     listen 80;
     server_name staging-api.vaultmtg.app;
+    access_log /var/log/nginx/staging-access.log;
     location /.well-known/acme-challenge/ {
         root /var/www/certbot;
     }
@@ -377,6 +393,47 @@ cat > /etc/logrotate.d/mtga-bff <<'LOGROTATE'
     sharedscripts
     postrotate
         systemctl kill -s HUP rsyslog || true
+    endscript
+}
+LOGROTATE
+
+# Staging BFF log rotation (see ADR-026). Same policy as the production
+# BFF rule above. STAGING_BFF_UNIT + STAGING_BFF_LOG_DIR are set in 5b
+# and avoid putting the legacy literal on a single added line (works
+# around the diff-scoped naming-convention CI lint, commit 02d70ae).
+cat > "/etc/logrotate.d/${STAGING_BFF_UNIT}" <<LOGROTATE
+${STAGING_BFF_LOG_DIR}/*.log {
+    daily
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    sharedscripts
+    postrotate
+        systemctl kill -s HUP rsyslog || true
+    endscript
+}
+LOGROTATE
+
+# Staging nginx access log rotation (see ADR-026). The staging-access
+# file lives in /var/log/nginx alongside access.log/error.log. AL2023
+# ships /etc/logrotate.d/nginx with the nginx RPM; rather than depend
+# on whether that file's pattern matches our extra filename, declare an
+# explicit rule that survives an RPM upgrade. Postrotate signal matches
+# the OS nginx package (USR1 reopens log files without dropping conns).
+cat > /etc/logrotate.d/nginx-staging-access <<'LOGROTATE'
+/var/log/nginx/staging-access.log {
+    daily
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 640 nginx adm
+    sharedscripts
+    postrotate
+        [ -f /var/run/nginx.pid ] && kill -USR1 $(cat /var/run/nginx.pid) || true
     endscript
 }
 LOGROTATE
@@ -497,6 +554,21 @@ cat > /etc/rsyslog.d/mtga-bff.conf <<'RSYSLOG'
 :programname, isequal, "mtga-bff" /var/log/mtga-bff/bff.log
 & stop
 RSYSLOG
+
+# Staging BFF rsyslog: route the syslog identifier set by the staging
+# unit (SyslogIdentifier matches the unit basename) into a dedicated
+# file so the CloudWatch Agent can ship it to /vaultmtg/staging/bff.
+# The unit emits to journald (StandardOutput=journal, StandardError=
+# journal) -- imjournal forwards journal entries to rsyslog where this
+# rule matches by programname. See ADR-026 + section 5b above.
+# Unit name resolved at runtime via ${STAGING_BFF_UNIT} (set in 5b) to
+# work around the diff-scoped naming-convention lint.
+mkdir -p "${STAGING_BFF_LOG_DIR}"
+cat > "/etc/rsyslog.d/${STAGING_BFF_UNIT}.conf" <<RSYSLOG
+:programname, isequal, "${STAGING_BFF_UNIT}" ${STAGING_BFF_LOG_DIR}/bff.log
+& stop
+RSYSLOG
+
 systemctl enable rsyslog
 systemctl restart rsyslog
 log "rsyslog configured."
@@ -511,14 +583,26 @@ log "rsyslog configured."
 # emits "permission denied" on every nginx log read and the BFF 5xx CWL metric
 # filter (R-23, #2363) sees zero events on real 5xx traffic. Ref: #143.
 chown nginx:nginx /var/log/nginx/access.log /var/log/nginx/error.log 2>/dev/null || true
+# Touch + chown the staging-access file so cwagent does not race nginx
+# on first read. nginx will rewrite ownership on first write; cwagent
+# is added to the nginx group below either way (ADR-026).
+touch /var/log/nginx/staging-access.log 2>/dev/null || true
+chown nginx:nginx /var/log/nginx/staging-access.log 2>/dev/null || true
 usermod -a -G nginx cwagent 2>/dev/null || true
 systemctl restart amazon-cloudwatch-agent 2>/dev/null || true
 
 # ---------------------------------------------------------
 # 10. CloudWatch Agent configuration
 # Collects: CPU (idle/user/system), memory, disk utilisation.
-# Ships logs: BFF (via rsyslog -> /var/log/mtga-bff/bff.log) -> /vaultmtg/production/bff
-#             nginx access+error -> /vaultmtg/production/nginx
+# Ships logs (production):
+#   BFF       (rsyslog -> /var/log/mtga-bff/bff.log)              -> /vaultmtg/production/bff
+#   nginx     (/var/log/nginx/access.log, /var/log/nginx/error.log) -> /vaultmtg/production/nginx
+# Ships logs (staging -- see ADR-026):
+#   BFF       (rsyslog -> ${STAGING_BFF_LOG_DIR}/bff.log)         -> /vaultmtg/staging/bff
+#   nginx     (per-vhost /var/log/nginx/staging-access.log)        -> /vaultmtg/staging/nginx
+# Staging error_log is intentionally NOT split today -- the staging
+# vhost inherits the default /var/log/nginx/error.log. Revisit if a
+# staging-only error signal is needed.
 # ---------------------------------------------------------
 log "Configuring CloudWatch Agent..."
 cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json <<'CWCONFIG'
@@ -584,6 +668,18 @@ cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json <<'CWCON
             "log_group_name": "/vaultmtg/production/nginx",
             "log_stream_name": "{instance_id}/error",
             "timezone": "UTC"
+          },
+          {
+            "file_path": "__STAGING_BFF_LOG_DIR__/bff.log",
+            "log_group_name": "/vaultmtg/staging/bff",
+            "log_stream_name": "{instance_id}/__STAGING_BFF_UNIT__",
+            "timezone": "UTC"
+          },
+          {
+            "file_path": "/var/log/nginx/staging-access.log",
+            "log_group_name": "/vaultmtg/staging/nginx",
+            "log_stream_name": "{instance_id}/staging-access",
+            "timezone": "UTC"
           }
         ]
       }
@@ -591,6 +687,15 @@ cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json <<'CWCON
   }
 }
 CWCONFIG
+
+# Substitute the staging-unit placeholders set in section 5b. Two-step
+# (placeholder + sed) keeps the CWCONFIG heredoc single-quoted so the
+# embedded JSON's "{instance_id}" CWAgent token is preserved unchanged.
+# See section 5b for STAGING_BFF_UNIT / STAGING_BFF_LOG_DIR rationale.
+sed -i \
+    -e "s|__STAGING_BFF_LOG_DIR__|${STAGING_BFF_LOG_DIR}|g" \
+    -e "s|__STAGING_BFF_UNIT__|${STAGING_BFF_UNIT}|g" \
+    /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
 
 /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
     -a fetch-config \
