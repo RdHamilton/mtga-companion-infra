@@ -119,6 +119,14 @@ Resources:
               - cloudformation:ValidateTemplate
               - cloudformation:ListStacks
               - cloudformation:DescribeStacks
+              # DescribeStackDriftDetectionStatus has NO resource type in the
+              # AWS service-authorization reference (it is keyed by an opaque
+              # StackDriftDetectionId, not a stack ARN), so it can only be
+              # granted on Resource: "*". The other three drift actions
+              # (DetectStackDrift, DetectStackResourceDrift,
+              # DescribeStackResourceDrifts) ARE keyed by the stack resource
+              # type and are already covered by the CfnStack Sid above.
+              - cloudformation:DescribeStackDriftDetectionStatus
             Resource: "*"
 
           # mirrors inline IAMPassAndManageScoped -- specific actions only,
@@ -635,6 +643,21 @@ Resources:
                   - cloudformation:ValidateTemplate
                   - cloudformation:ListStacks
                   - cloudformation:DescribeStacks
+                  # DescribeStackDriftDetectionStatus is keyed by an opaque
+                  # StackDriftDetectionId, NOT by a stack ARN, and the AWS
+                  # service-authorization reference lists no resource type
+                  # for it -- so it can only be granted on Resource: "*".
+                  # The polling loop in .github/workflows/detect-drift.yml
+                  # calls this action once per stack; without it, every poll
+                  # returned AccessDenied -> "ERROR ERROR" silently and the
+                  # workflow burned its full 45-minute timeout (PR #179 made
+                  # the error visible; this PR makes it succeed).
+                  # The other three drift actions (DetectStackDrift,
+                  # DetectStackResourceDrift, DescribeStackResourceDrifts)
+                  # are keyed by stack ARN and are already granted by the
+                  # CloudFormationStackOperations Sid above. Mirrored into
+                  # GhaCfnDeployPermissionsBoundary CfnGlobal Sid above.
+                  - cloudformation:DescribeStackDriftDetectionStatus
                 Resource: "*"
               # IAM management — wildcarded inline (iam:*), capped to specific actions by
               # GhaCfnDeployPermissionsBoundary's IAMScoped Sid. The boundary is the real
