@@ -10,9 +10,5 @@
   {
     "ParameterKey": "OidcProviderArn",
     "ParameterValue": "arn:aws:iam::901347789205:oidc-provider/token.actions.githubusercontent.com"
-  },
-  {
-    "ParameterKey": "EC2RoleArn",
-    "ParameterValue": "arn:aws:iam::901347789205:role/mtga-companion-ec2-role-production"
   }
 ]
