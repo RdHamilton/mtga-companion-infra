@@ -38,7 +38,12 @@
 set -euo pipefail
 
 ENVIRONMENT="${1:-production}"
-REGION=$(curl -s http://169.254.169.254/latest/meta-data/placement/region)
+# Fetch instance metadata via IMDSv2 (token-authenticated). IMDSv1 is disabled
+# on this fleet (ec2.yml MetadataOptions.HttpTokens=required, S-21 / #2358).
+IMDS_TOKEN=$(curl -sX PUT "http://169.254.169.254/latest/api/token" \
+    -H "X-aws-ec2-metadata-token-ttl-seconds: 60")
+REGION=$(curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" \
+    http://169.254.169.254/latest/meta-data/placement/region)
 METRIC_SCRIPT=/usr/local/bin/put-bff-latency.sh
 TIMED_LOG=/var/log/nginx/access_timed.log
 LOGFORMAT_CONF=/etc/nginx/conf.d/00-vaultmtg-metrics-logformat.conf
@@ -94,7 +99,11 @@ cat > "$METRIC_SCRIPT" << SCRIPT
 set -euo pipefail
 
 ENVIRONMENT="${ENVIRONMENT}"
-REGION=\$(curl -s http://169.254.169.254/latest/meta-data/placement/region)
+# IMDSv2 token-authenticated fetch (HttpTokens=required on this fleet).
+IMDS_TOKEN=\$(curl -sX PUT "http://169.254.169.254/latest/api/token" \\
+    -H "X-aws-ec2-metadata-token-ttl-seconds: 60")
+REGION=\$(curl -s -H "X-aws-ec2-metadata-token: \$IMDS_TOKEN" \\
+    http://169.254.169.254/latest/meta-data/placement/region)
 TIMED_LOG="${TIMED_LOG}"
 WINDOW_SECONDS=65
 
