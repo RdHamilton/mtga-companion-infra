@@ -70,7 +70,7 @@ Resources:
   #   /vaultmtg/staging/*          -- BFF core + DB config + integration secrets
   #   /vaultmtg/app/staging/*      -- target namespace after R-13 cutover
   #   kms:Decrypt via SSM KMS key  -- SecureString params (CLERK_SECRET_KEY etc.)
-  #   secretsmanager:GetSecretValue on mtga-companion/staging/* -- staging RDS credential
+  #   secretsmanager:GetSecretValue on mtga-companion/staging/* -- staging RDS credential only
   #   secretsmanager:GetSecretValue on vaultmtg-production-app-db-* -- least-privilege
   #     app DB credential (ADR-024); deliberate cross-env exception per vault-mtg#2579
   #     to unblock Phase 4 BFF cutover. See inline rationale at StagingDBSecretRead.
