@@ -288,6 +288,19 @@ Resources:
           # the S-04 cap (vault-mtg#2325). The intersection with the inline
           # policy means those two actions are DENIED for this role even on
           # its own RDS secret. secretsmanager:* would silently break the cap.
+          #
+          # RotateSecret + CancelRotateSecret support the
+          # AWS::SecretsManager::RotationSchedule resource lifecycle in rds.yml
+          # (DBSecretRotationSchedule -> rds!db-* MasterUserSecret).
+          # CFN calls RotateSecret on Create AND Update (sets RotationRules /
+          # RotationLambdaARN / ScheduleExpression -- all schedule properties
+          # are configured through RotateSecret, not UpdateSecret). CFN calls
+          # CancelRotateSecret on Delete. UpdateSecret is NOT required for
+          # RotationSchedule because the resource does not touch secret
+          # metadata (description, KmsKeyId). Adding RotateSecret/Cancel does
+          # NOT widen the S-04 cap: neither action can read or write the
+          # plaintext secret value -- rotation is delegated to the
+          # AWS-managed RDS rotation Lambda which runs out-of-band.
           - Sid: SM
             Effect: Allow
             Action:
@@ -296,6 +309,8 @@ Resources:
               - secretsmanager:DescribeSecret
               - secretsmanager:TagResource
               - secretsmanager:ListSecrets
+              - secretsmanager:RotateSecret
+              - secretsmanager:CancelRotateSecret
             Resource: "*"
 
           - Sid: KMS
@@ -788,6 +803,16 @@ Resources:
                   - ssm:RemoveTagsFromResource
                   - ssm:ListDocuments
                 Resource: "*"
+              # RotateSecret + CancelRotateSecret added for
+              # AWS::SecretsManager::RotationSchedule (rds.yml
+              # DBSecretRotationSchedule). CFN calls RotateSecret on
+              # Create/Update and CancelRotateSecret on Delete. Mirrored in
+              # GhaCfnDeployPermissionsBoundary's SM Sid above (same PR --
+              # boundary-mirrors-inline invariant). UpdateSecret intentionally
+              # NOT added: RotationSchedule properties (RotationRules,
+              # RotationLambdaARN, ScheduleExpression) are all configured via
+              # RotateSecret, not UpdateSecret. GetSecretValue/PutSecretValue
+              # remain absent per S-04 cap (vault-mtg#2325).
               - Sid: SecretsManagerLifecycle
                 Effect: Allow
                 Action:
@@ -796,6 +821,8 @@ Resources:
                   - secretsmanager:DescribeSecret
                   - secretsmanager:TagResource
                   - secretsmanager:ListSecrets
+                  - secretsmanager:RotateSecret
+                  - secretsmanager:CancelRotateSecret
                 Resource: "*"
               - Sid: KMS
                 Effect: Allow
