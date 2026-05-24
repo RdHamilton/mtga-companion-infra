@@ -164,10 +164,15 @@ jobs:
           [ -n "$DENIED" ] && OVERALL_DENIED="$OVERALL_DENIED $DENIED"
 
           # --- CloudFormation global actions (not resource-scopable — policy grants on "*") ---
+          # DescribeStackDriftDetectionStatus added per PR #180: invoked by the
+          # drift-detect.yml workflow and by change-set operations that internally
+          # poll drift status. The action has no resource-level support per the
+          # IAM Service Authorization Reference, so the inline policy grants on "*".
           DENIED=$(aws iam simulate-principal-policy \
             --policy-source-arn "$DEPLOY_ROLE_ARN" \
             --action-names \
               cloudformation:DescribeStacks cloudformation:ValidateTemplate \
+              cloudformation:DescribeStackDriftDetectionStatus \
             --resource-arns "*" \
             --query 'EvaluationResults[?EvalDecision!=`allowed`].EvalActionName' \
             --output text)
@@ -187,39 +192,68 @@ jobs:
           [ -n "$DENIED" ] && OVERALL_DENIED="$OVERALL_DENIED $DENIED"
 
           # --- CloudWatch Logs actions (resource-scoped to /vaultmtg/* log groups) ---
+          # Metric-filter actions (PutMetricFilter / DeleteMetricFilter /
+          # DescribeMetricFilters) are resource-scopable to log-group ARN per the
+          # IAM Service Authorization Reference, and the inline policy
+          # (CloudWatchLogs Sid in iam-gha-roles.yml) grants them on /vaultmtg/*.
+          # Invoked by:
+          #   - security-alarms.yml (RootAccountUsageMetricFilter, IAMCredentialWritesMetricFilter)
+          #   - cloudwatch-alarms.yml + cloudwatch-alarms-staging (Bff5xxMetricFilter)
+          # TagResource / UntagResource are invoked by CFN whenever AWS::Logs::LogGroup
+          # has Tags (cloudtrail.yml, logs.yml). Added per PR #170 fallout: deploy-time
+          # failures only became visible at CFN runtime because the sim omitted them.
           DENIED=$(aws iam simulate-principal-policy \
             --policy-source-arn "$DEPLOY_ROLE_ARN" \
             --action-names \
               logs:CreateLogGroup logs:DeleteLogGroup logs:PutRetentionPolicy \
+              logs:TagResource logs:UntagResource \
+              logs:PutMetricFilter logs:DeleteMetricFilter logs:DescribeMetricFilters \
             --resource-arns "$LOGS_ARN" \
             --query 'EvaluationResults[?EvalDecision!=`allowed`].EvalActionName' \
             --output text)
           [ -n "$DENIED" ] && OVERALL_DENIED="$OVERALL_DENIED $DENIED"
 
-          # --- CloudWatch Logs global actions (DescribeLogGroups, metric filters, ListTags)
+          # --- CloudWatch Logs global actions (not resource-scopable) ---
+          # logs:DescribeLogGroups has an EMPTY Resource types column in the IAM
+          # Service Authorization Reference — it cannot be scoped to a log-group ARN.
+          # Required by CFN to resolve `!GetAtt <LogGroup>.Arn` on AWS::Logs::LogGroup
+          # resources (cloudtrail.yml CloudTrailLogsRole, logs.yml). Inline policy
+          # (CloudWatchLogsGlobal Sid in iam-gha-roles.yml) grants on Resource:"*".
+          # Re-enabled now that iam-gha-roles has been redeployed with that Sid
+          # (was previously commented-out pending the redeploy chicken-and-egg).
+          # The iam-gha-roles stack itself is still excluded from this whole sim
+          # block by the if: guard above, so the original deadlock concern is moot.
           #
-          # These actions do not support resource-level permissions in IAM. The inline
-          # policy (CloudWatchLogsGlobal Sid) grants them on Resource:"*" after the
-          # iam-gha-roles stack update that introduced that Sid. They are omitted from
-          # this simulation block because:
-          #   1. The iam-gha-roles stack is excluded from the simulation gate by design
-          #      (chicken-and-egg deadlock), so the CloudWatchLogsGlobal Sid change is
-          #      not yet live when deploy.yml first runs against a new iam-gha-roles PR.
-          #   2. These actions are only called by CFN for stacks that manage log groups
-          #      or metric filters (security-alarms, logs). They do not affect stacks
-          #      like staging-deploy-role that only create IAM roles.
-          # Re-add this block once iam-gha-roles has been redeployed with the
-          # CloudWatchLogsGlobal Sid. See vault-mtg PR that introduced this comment.
-          #
-          # DENIED=$(aws iam simulate-principal-policy \
-          #   --policy-source-arn "$DEPLOY_ROLE_ARN" \
-          #   --action-names \
-          #     logs:DescribeLogGroups logs:ListTagsForResource \
-          #     logs:PutMetricFilter logs:DeleteMetricFilter logs:DescribeMetricFilters \
-          #   --resource-arns "*" \
-          #   --query 'EvaluationResults[?EvalDecision!=`allowed`].EvalActionName' \
-          #   --output text)
-          # [ -n "$DENIED" ] && OVERALL_DENIED="$OVERALL_DENIED $DENIED"
+          # logs:ListTagsForResource is intentionally NOT simulated here: the inline
+          # cfn-stack-deploy policy does not grant it on "*" and no CFN deploy has
+          # surfaced a failure for it. If a future template introduces a need for it,
+          # grant it in the iam-gha-roles CloudWatchLogsGlobal Sid first, then add it
+          # here. Simulating ungranted actions yields permanent false-positive failure.
+          DENIED=$(aws iam simulate-principal-policy \
+            --policy-source-arn "$DEPLOY_ROLE_ARN" \
+            --action-names \
+              logs:DescribeLogGroups \
+            --resource-arns "*" \
+            --query 'EvaluationResults[?EvalDecision!=`allowed`].EvalActionName' \
+            --output text)
+          [ -n "$DENIED" ] && OVERALL_DENIED="$OVERALL_DENIED $DENIED"
+
+          # --- Secrets Manager rotation lifecycle (policy grants on "*") ---
+          # RotateSecret + CancelRotateSecret invoked by CFN for
+          # AWS::SecretsManager::RotationSchedule (rds.yml DBSecretRotationSchedule):
+          #   - RotateSecret on Create/Update
+          #   - CancelRotateSecret on Delete
+          # Inline policy SecretsManagerLifecycle Sid in iam-gha-roles.yml grants both
+          # on Resource:"*" (added in PR #174). Caught at deploy time previously;
+          # adding here lifts the failure surface back to CI.
+          DENIED=$(aws iam simulate-principal-policy \
+            --policy-source-arn "$DEPLOY_ROLE_ARN" \
+            --action-names \
+              secretsmanager:RotateSecret secretsmanager:CancelRotateSecret \
+            --resource-arns "*" \
+            --query 'EvaluationResults[?EvalDecision!=`allowed`].EvalActionName' \
+            --output text)
+          [ -n "$DENIED" ] && OVERALL_DENIED="$OVERALL_DENIED $DENIED"
 
           # --- S3 actions (policy grants on "*") ---
           DENIED=$(aws iam simulate-principal-policy \
