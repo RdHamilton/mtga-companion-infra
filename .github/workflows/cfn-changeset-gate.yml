@@ -512,9 +512,22 @@ jobs:
 
       - name: Install yq (YAML extraction)
         if: steps.cfn_check.outputs.has_cfn_changes == 'true'
+        env:
+          # Pin yq to a specific release + verify SHA-256 to close the
+          # supply-chain risk of pulling /releases/latest/ at install time
+          # (vault-mtg#2490, S-07 finding from PR #110 review).
+          # Bump both values together when upgrading yq.
+          # SHA-256 source: https://github.com/mikefarah/yq/releases/download/v4.53.2/checksums
+          # (column 19 per checksums_hashes_order — SHA-256 is the 18th hash, +1 for the filename column).
+          YQ_VERSION: v4.53.2
+          YQ_SHA256: d56bf5c6819e8e696340c312bd70f849dc1678a7cda9c2ad63eebd906371d56b
         run: |
-          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
-          sudo chmod +x /usr/local/bin/yq
+          set -euo pipefail
+          TMP_YQ="$(mktemp)"
+          wget -qO "$TMP_YQ" "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64"
+          echo "${YQ_SHA256}  ${TMP_YQ}" | sha256sum -c -
+          sudo install -m 0755 "$TMP_YQ" /usr/local/bin/yq
+          rm -f "$TMP_YQ"
           yq --version
 
       - name: Configure AWS credentials
