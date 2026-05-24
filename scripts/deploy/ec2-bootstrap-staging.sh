@@ -33,9 +33,37 @@ REGION="${AWS_DEFAULT_REGION:-us-east-1}"
 
 log() { echo "[setup] $(date '+%Y-%m-%dT%H:%M:%S') $*"; }
 
-# Fetch an SSM parameter value by name (with decryption).
-# Returns empty string on failure -- callers must check and fail-loud if required.
-fetch_ssm() {
+# SSM fetch helpers split by parameter type (least-capability -- mirrors PR #177
+# for the production bootstrap).
+#
+# fetch_ssm_plain   -- for String / StringList params. Does NOT request decryption.
+# fetch_ssm_secret  -- for SecureString params. Passes --with-decryption.
+# require_ssm_plain / require_ssm_secret -- same split, but fail loudly if the
+#   parameter is missing or empty.
+#
+# Callers must pick the variant that matches the parameter's actual SSM Type.
+# Mixing them up either (a) needlessly requests KMS decrypt on non-secret data
+# or (b) silently fails to decrypt a SecureString (AWS returns the ciphertext).
+#
+# Staging parameter inventory (mirrors the production layout verified in PR #177):
+#   SecureString : /vaultmtg/app/staging/daemon-jwt-secret
+#   String       : /vaultmtg/app/staging/ALLOWED_ORIGINS
+#                  /vaultmtg/app/staging/db-secret-arn
+#                  /vaultmtg/app/staging/db-endpoint
+#                  /vaultmtg/app/staging/db-name
+#                  /vaultmtg/app/staging/latest-bff-sha
+#                  /vaultmtg/app/staging/domain-name
+#                  /vaultmtg/app/staging/certbot-email
+
+fetch_ssm_plain() {
+    aws ssm get-parameter \
+        --region "$REGION" \
+        --name "$1" \
+        --query 'Parameter.Value' \
+        --output text 2>/dev/null || true
+}
+
+fetch_ssm_secret() {
     aws ssm get-parameter \
         --region "$REGION" \
         --name "$1" \
@@ -44,11 +72,21 @@ fetch_ssm() {
         --output text 2>/dev/null || true
 }
 
-# Fail loudly if a required SSM parameter is missing or empty.
-require_ssm() {
+require_ssm_plain() {
     local _name="$1"
     local _val
-    _val=$(fetch_ssm "$_name")
+    _val=$(fetch_ssm_plain "$_name")
+    if [ -z "$_val" ] || [ "$_val" = "None" ]; then
+        log "FATAL: required SSM parameter '$_name' is missing or empty. Aborting bootstrap."
+        exit 1
+    fi
+    printf '%s' "$_val"
+}
+
+require_ssm_secret() {
+    local _name="$1"
+    local _val
+    _val=$(fetch_ssm_secret "$_name")
     if [ -z "$_val" ] || [ "$_val" = "None" ]; then
         log "FATAL: required SSM parameter '$_name' is missing or empty. Aborting bootstrap."
         exit 1
@@ -86,10 +124,11 @@ log "Fetching config from SSM (/vaultmtg/app/staging/*)..."
 # any PORT= entry in the env file would be silently ignored, so we do not fetch
 # or write one here.
 
-ALLOWED_ORIGINS=$(require_ssm "/vaultmtg/app/staging/ALLOWED_ORIGINS")
+ALLOWED_ORIGINS=$(require_ssm_plain "/vaultmtg/app/staging/ALLOWED_ORIGINS")
 # daemon-jwt-secret is optional for staging (daemon not yet deployed to staging).
 # Fetch with fallback -- missing value logs a warning but does not abort bootstrap.
-DAEMON_JWT_SECRET=$(fetch_ssm "/vaultmtg/app/staging/daemon-jwt-secret")
+# SecureString param -- use the _secret variant so AWS decrypts the value.
+DAEMON_JWT_SECRET=$(fetch_ssm_secret "/vaultmtg/app/staging/daemon-jwt-secret")
 if [ -z "$DAEMON_JWT_SECRET" ] || [ "$DAEMON_JWT_SECRET" = "None" ]; then
     log "WARNING: /vaultmtg/app/staging/daemon-jwt-secret not set -- DAEMON_JWT_SECRET will be empty."
     DAEMON_JWT_SECRET=""
@@ -97,9 +136,9 @@ fi
 
 # Credential-free DATABASE_URL -- BFF resolves credentials via DB_SECRET_ARN
 # at startup.
-DB_SECRET_ARN=$(require_ssm "/vaultmtg/app/staging/db-secret-arn")
-DB_ENDPOINT=$(require_ssm "/vaultmtg/app/staging/db-endpoint")
-DB_NAME=$(require_ssm "/vaultmtg/app/staging/db-name")
+DB_SECRET_ARN=$(require_ssm_plain "/vaultmtg/app/staging/db-secret-arn")
+DB_ENDPOINT=$(require_ssm_plain "/vaultmtg/app/staging/db-endpoint")
+DB_NAME=$(require_ssm_plain "/vaultmtg/app/staging/db-name")
 DATABASE_URL="postgresql://${DB_ENDPOINT}:5432/${DB_NAME}?sslmode=require"
 
 log "Writing env file to $ENV_DIR/env..."
@@ -125,7 +164,7 @@ log "Env file written successfully."
 # If the param is absent (pre-first-deploy), skip start.
 # ---------------------------------------------------------
 log "Fetching BFF binary from S3..."
-DEPLOY_SHA=$(fetch_ssm "/vaultmtg/app/staging/latest-bff-sha")
+DEPLOY_SHA=$(fetch_ssm_plain "/vaultmtg/app/staging/latest-bff-sha")
 DEPLOY_BUCKET="mtga-companion-deploy-artifacts-staging"
 
 if [ -n "$DEPLOY_SHA" ] && [ "$DEPLOY_SHA" != "None" ]; then
@@ -291,10 +330,10 @@ LOGROTATE
 # Reads domain from SSM. Idempotent: skips if domain not set or cert exists.
 # ---------------------------------------------------------
 log "Checking for domain in SSM..."
-DOMAIN=$(fetch_ssm "/vaultmtg/app/staging/domain-name")
+DOMAIN=$(fetch_ssm_plain "/vaultmtg/app/staging/domain-name")
 if [ -n "$DOMAIN" ] && [ "$DOMAIN" != "None" ]; then
     log "Domain: $DOMAIN -- running certbot..."
-    CERTBOT_EMAIL=$(require_ssm "/vaultmtg/app/staging/certbot-email")
+    CERTBOT_EMAIL=$(require_ssm_plain "/vaultmtg/app/staging/certbot-email")
     if [ ! -d "/etc/letsencrypt/live/$DOMAIN" ]; then
         certbot --nginx --non-interactive --agree-tos \
             --email "$CERTBOT_EMAIL" \
