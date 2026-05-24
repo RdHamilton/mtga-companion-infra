@@ -1,0 +1,228 @@
+# naming-convention.yml
+#
+# Enforces the VaultMTG naming convention (ADR-022 addendum) on newly added
+# lines in pull requests. PR-diff-scoped on purpose -- the repo carries many
+# legacy `mtga-companion-*` and `vault-mtg-*` names which will be retired
+# incrementally; flagging them on every PR would block unrelated work.
+#
+# CONVENTION
+# ----------
+# - `vaultmtg`   (no hyphen) -- AWS resources, SSM paths, S3 buckets, domains,
+#                               tags, log groups, IAM role names, alarm names.
+# - `vault-mtg`  (hyphen)    -- repo slugs + Go module paths ONLY.
+#                               Allowed forms (exceptions):
+#                                 * `RdHamilton/vault-mtg`        (repo slug)
+#                                 * `RdHamilton/vault-mtg-docs`   (repo slug)
+#                                 * `vault-mtg-docs/`             (docs path)
+#                                 * `github.com/RdHamilton/vault-mtg` (Go module)
+#                                 * `vault-mtg#NNN`               (ticket ref)
+# - `VaultMTG`  (CamelCase)  -- human brand only (copy, comments).
+# - `mtga-companion-*`       -- LEGACY. Never use for new resources.
+#
+# Reference: ~/.claude/projects/.../reference_vaultmtg_naming_convention.md
+#
+# SCOPE
+# -----
+# Scans only ADDED lines (`^+` in unified diff, excluding `+++` header) in:
+#   - cloudformation/**.yml
+#   - scripts/**
+#   - nginx/**
+#   - systemd/**
+#   - config/**
+#
+# Test files (e.g., contract-test fixtures) are not present in this repo;
+# add a `tests/` glob here if/when one lands.
+#
+# RULE-INFRA-01: This is a NEW lint job against existing files. It only checks
+# diff-added lines, so it cannot fail on legacy names already in the tree.
+# It IS hard-fail (not continue-on-error) because the diff-scoping eliminates
+# the pre-existing-violations class entirely.
+
+name: Naming Convention Check
+
+on:
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: naming-convention-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  naming-convention:
+    name: Naming convention (vaultmtg/* per ADR-022)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6 -- SHA pinned
+        with:
+          fetch-depth: 0  # needed for git diff against base branch
+
+      - name: Detect in-scope changed files
+        id: detect
+        run: |
+          set -euo pipefail
+          # Added or modified files in the in-scope paths.
+          CHANGED=$(git diff --name-only --diff-filter=AM \
+            "origin/${{ github.base_ref }}...HEAD" \
+            -- 'cloudformation/**' 'scripts/**' 'nginx/**' 'systemd/**' 'config/**' \
+            || true)
+          if [ -z "$CHANGED" ]; then
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+            echo "No in-scope files changed; naming-convention check is a no-op."
+          else
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+            echo "In-scope changed files:"
+            echo "$CHANGED"
+            # Save to a workspace file for the next step.
+            echo "$CHANGED" > "$RUNNER_TEMP/changed-files.txt"
+          fi
+
+      - name: Pass (no in-scope files)
+        if: steps.detect.outputs.has_changes == 'false'
+        run: |
+          echo "Naming convention check: PASS (no files in scope)."
+
+      - name: Scan added lines for naming-convention violations
+        if: steps.detect.outputs.has_changes == 'true'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+
+          # ------------------------------------------------------------------
+          # Build a unified diff restricted to added lines in the in-scope
+          # files, then walk per-file and per-hunk to attach line numbers.
+          # ------------------------------------------------------------------
+          VIOLATIONS_FILE="$RUNNER_TEMP/violations.txt"
+          : > "$VIOLATIONS_FILE"
+
+          # Exception patterns -- if a hit also matches one of these, it is
+          # NOT a violation. Anchored to the substring around the hit so an
+          # incidental ticket ref or repo slug on the same line is fine.
+          #
+          # Order matters: longest/most-specific first so the broader patterns
+          # do not shadow them.
+          EXCEPTIONS=(
+            'RdHamilton/vault-mtg-docs'        # docs repo slug
+            'RdHamilton/vault-mtg'             # main repo slug
+            'github.com/RdHamilton/vault-mtg'  # Go module path
+            'vault-mtg-docs/'                  # docs repo path reference
+            'vault-mtg-docs '                  # docs repo path (trailing space)
+            'vault-mtg-docs$'                  # docs repo path (EOL)
+            'vault-mtg#'                       # ticket cross-ref (e.g., vault-mtg#2351)
+          )
+
+          while IFS= read -r FILE; do
+            [ -z "$FILE" ] && continue
+            [ ! -f "$FILE" ] && continue
+
+            # Per-file unified diff. -U0 = no context lines so only +/- lines.
+            DIFF=$(git diff --unified=0 \
+              "origin/${BASE_REF}...HEAD" -- "$FILE" || true)
+            [ -z "$DIFF" ] && continue
+
+            # Walk the diff. Track new-file line number from @@ hunk headers.
+            # Bash parses line-by-line; we use awk for the line-number arithmetic.
+            HITS=$(echo "$DIFF" | awk '
+              BEGIN { lineno = 0 }
+              /^@@ / {
+                # Parse the new-file start line: @@ -a,b +c,d @@
+                match($0, /\+[0-9]+/)
+                lineno = substr($0, RSTART + 1, RLENGTH - 1) + 0
+                next
+              }
+              /^\+\+\+/ { next }  # file header, not a diff line
+              /^\+/ {
+                # Strip the leading "+" to get the actual added line content.
+                content = substr($0, 2)
+                print lineno ":" content
+                lineno++
+              }
+              /^-/ { next }       # deletion, no new-file line advance
+              /^ / { lineno++ }   # context line (only present if -U0 is overridden upstream)
+            ')
+
+            [ -z "$HITS" ] && continue
+
+            # Per-line check for prohibited substrings.
+            while IFS= read -r LINE; do
+              [ -z "$LINE" ] && continue
+              LNO="${LINE%%:*}"
+              CONTENT="${LINE#*:}"
+
+              # --------------------------------------------------------------
+              # Check 1: legacy `mtga-companion` prefix.
+              # No exceptions -- this prefix is fully retired for new resources.
+              # --------------------------------------------------------------
+              if echo "$CONTENT" | grep -qE 'mtga-companion'; then
+                printf "VIOLATION (legacy mtga-companion): %s:%s: %s\n" \
+                  "$FILE" "$LNO" "$CONTENT" >> "$VIOLATIONS_FILE"
+                continue
+              fi
+
+              # --------------------------------------------------------------
+              # Check 2: hyphenated `vault-mtg` outside the exception set.
+              # Allowed: repo slugs, docs repo path, Go module path, ticket refs.
+              # --------------------------------------------------------------
+              if echo "$CONTENT" | grep -qE 'vault-mtg'; then
+                IS_EXCEPTION=false
+                for EXC in "${EXCEPTIONS[@]}"; do
+                  # Match the exception pattern against the line content. Use
+                  # `grep -E` so the `$` anchor in EOL patterns works.
+                  if echo "$CONTENT" | grep -qE "$EXC"; then
+                    # Strip every exception match from the line; if any
+                    # `vault-mtg` remains, that residual is a violation.
+                    RESIDUAL="$CONTENT"
+                    for STRIP in "${EXCEPTIONS[@]}"; do
+                      # sed -E for the EOL anchor; escape `/` inside patterns.
+                      ESCAPED=$(printf '%s' "$STRIP" | sed 's:/:\\/:g')
+                      RESIDUAL=$(echo "$RESIDUAL" | sed -E "s/${ESCAPED}//g")
+                    done
+                    if ! echo "$RESIDUAL" | grep -qE 'vault-mtg'; then
+                      IS_EXCEPTION=true
+                      break
+                    fi
+                  fi
+                done
+
+                if [ "$IS_EXCEPTION" = "false" ]; then
+                  printf "VIOLATION (hyphenated vault-mtg): %s:%s: %s\n" \
+                    "$FILE" "$LNO" "$CONTENT" >> "$VIOLATIONS_FILE"
+                fi
+              fi
+            done <<< "$HITS"
+          done < "$RUNNER_TEMP/changed-files.txt"
+
+          # ------------------------------------------------------------------
+          # Report
+          # ------------------------------------------------------------------
+          if [ -s "$VIOLATIONS_FILE" ]; then
+            echo ""
+            echo "=========================================="
+            echo "  NAMING CONVENTION VIOLATIONS"
+            echo "=========================================="
+            cat "$VIOLATIONS_FILE"
+            echo ""
+            echo "=========================================="
+            echo "Convention (ADR-022 addendum):"
+            echo "  vaultmtg   (no hyphen) -- AWS resources, SSM, S3, domains, tags"
+            echo "  vault-mtg  (hyphen)    -- repo slugs + Go module paths ONLY"
+            echo "  VaultMTG               -- human brand"
+            echo "  mtga-companion-*       -- LEGACY, never for new resources"
+            echo ""
+            echo "Allowed hyphenated forms:"
+            echo "  RdHamilton/vault-mtg, RdHamilton/vault-mtg-docs"
+            echo "  github.com/RdHamilton/vault-mtg, vault-mtg-docs/"
+            echo "  vault-mtg#NNN (ticket cross-references)"
+            echo "=========================================="
+            exit 1
+          fi
+
+          echo "Naming convention check: PASS (no violations in added lines)."
