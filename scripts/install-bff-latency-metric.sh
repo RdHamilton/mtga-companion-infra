@@ -3,11 +3,15 @@
 # Installs a systemd timer that computes the per-minute p99 of nginx
 # $request_time for BFF API requests and publishes it to CloudWatch.
 #
-# Run once via SSM Session Manager:
-#   sudo bash /tmp/install-bff-latency-metric.sh [environment]
+# Invocation (idempotent — safe to re-run; called from ec2-bootstrap.sh
+# during instance launch, and may also be re-run manually via SSM):
+#   sudo bash install-bff-latency-metric.sh <environment> <domain>
 #
 # Arguments:
-#   environment   production (default) or staging
+#   environment   production | staging
+#   domain        nginx server_name that certbot has annotated, e.g.
+#                 api.vaultmtg.app or staging-api.vaultmtg.app. Used to
+#                 anchor the access_log insertion (see "NGINX EDIT" below).
 #
 # Metric emitted every 60 s (only when there were requests in the window):
 #   Namespace : MTGA/BFF
@@ -25,19 +29,36 @@
 # "combined" log format, which does NOT record $request_time. This script
 # therefore installs a drop-in conf file that defines a "vaultmtg_timed" log
 # format (combined + $request_time) and writes a SECOND access log,
-# /var/log/nginx/access_timed.log, scoped to the BFF /api/ location.
+# /var/log/nginx/access_timed.log, via an access_log directive inserted
+# inside the certbot-managed HTTPS server block.
 #
-# The drop-in is /etc/nginx/conf.d/00-vaultmtg-metrics-logformat.conf. It only
-# ADDS a log_format and an access_log; it does not modify the existing
-# mtga-companion.conf, so the primary access log is unchanged.
+# The drop-in is /etc/nginx/conf.d/00-vaultmtg-metrics-logformat.conf
+# (log_format only). The access_log directive itself must live INSIDE a
+# server block — this script inserts it via a sed anchor on the
+# "server_name <domain>; # managed by Certbot" line that certbot writes
+# when it sets up the HTTPS vhost.
+#
+# NGINX EDIT — anchor + idempotency
+# ---------------------------------
+# Anchor line (certbot-managed, exact format):
+#   "    server_name <domain>; # managed by Certbot"
+# Insertion (added on the next line, indented to match):
+#   "    access_log /var/log/nginx/access_timed.log vaultmtg_timed;"
+# Idempotent: skips the edit if the access_log line is already present.
+# Backs up the conf to /etc/nginx/conf.d/mtga-companion.conf.bak.<ts>
+# before any modification.
 #
 # Prerequisites:
 #   - EC2 IAM role must have cloudwatch:PutMetricData permission (already
 #     granted via the CloudWatchMetricsPublish policy in ec2.yml).
+#   - certbot must have run against <domain> so the HTTPS vhost block
+#     (with "server_name <domain>; # managed by Certbot") exists. When
+#     called from ec2-bootstrap.sh this is guaranteed by ordering.
 
 set -euo pipefail
 
 ENVIRONMENT="${1:-production}"
+DOMAIN="${2:-}"
 # Fetch instance metadata via IMDSv2 (token-authenticated). IMDSv1 is disabled
 # on this fleet (ec2.yml MetadataOptions.HttpTokens=required, S-21 / #2358).
 IMDS_TOKEN=$(curl -sX PUT "http://169.254.169.254/latest/api/token" \
@@ -51,10 +72,17 @@ METRIC_USER=mtga-metrics
 
 log() { echo "[bff-latency-metric] $(date '+%Y-%m-%dT%H:%M:%S') $*"; }
 
-log "Region: $REGION  Environment: $ENVIRONMENT"
+log "Region: $REGION  Environment: $ENVIRONMENT  Domain: ${DOMAIN:-<none>}"
 
 if [[ "$ENVIRONMENT" != "production" && "$ENVIRONMENT" != "staging" ]]; then
-    echo "Usage: $0 [production|staging]"
+    echo "Usage: $0 <production|staging> <domain>"
+    exit 1
+fi
+
+if [[ -z "$DOMAIN" ]]; then
+    echo "Usage: $0 <production|staging> <domain>"
+    echo "ERROR: <domain> is required so the nginx access_log directive can be"
+    echo "       anchored on the certbot-managed 'server_name' line."
     exit 1
 fi
 
@@ -84,20 +112,58 @@ log_format vaultmtg_timed '$remote_addr - $remote_user [$time_local] '
                           '"$http_referer" "$http_user_agent" rt=$request_time';
 NGINXCONF
 
-# Append a second access_log to the /api/ location if not already present.
-# The access_log directive must live inside the server/location block; we
-# add a server-level access_log for the timed format scoped via a map so it
-# only captures /api/ requests.
-if ! grep -q "access_timed.log" /etc/nginx/conf.d/mtga-companion.conf 2>/dev/null; then
-    log "NOTE: a server-level 'access_log $TIMED_LOG vaultmtg_timed;' line must"
-    log "      exist in the BFF server block. Add it once inside the server {}"
-    log "      block of /etc/nginx/conf.d/mtga-companion.conf, then 'nginx -t'"
-    log "      and 'systemctl reload nginx'. This drop-in only defines the format."
+# Insert a server-level access_log directive into the certbot-managed HTTPS
+# server block. The access_log directive must live inside a server block — a
+# log_format defined at http level (the drop-in above) is necessary but not
+# sufficient. Idempotent: skip if the access_log line is already present.
+NGINX_CONF=/etc/nginx/conf.d/mtga-companion.conf
+ANCHOR="    server_name ${DOMAIN}; # managed by Certbot"
+INSERT="    access_log ${TIMED_LOG} vaultmtg_timed;"
+
+if [[ ! -f "$NGINX_CONF" ]]; then
+    log "ERROR: $NGINX_CONF not found. ec2-bootstrap.sh must have written it before"
+    log "       this script runs. Aborting."
+    exit 1
 fi
 
-nginx -t
+if grep -qF "$INSERT" "$NGINX_CONF"; then
+    log "access_log directive already present in $NGINX_CONF -- skipping nginx edit."
+elif ! grep -qF "$ANCHOR" "$NGINX_CONF"; then
+    log "ERROR: anchor line not found in $NGINX_CONF:"
+    log "         $ANCHOR"
+    log "       certbot must have run against ${DOMAIN} and rewritten the conf"
+    log "       before this installer is invoked. If you're running this manually"
+    log "       on a fresh box, run certbot first."
+    exit 1
+else
+    BACKUP="${NGINX_CONF}.bak.$(date +%s)"
+    cp -a "$NGINX_CONF" "$BACKUP"
+    log "Backed up $NGINX_CONF -> $BACKUP"
+
+    # Use awk for the insertion (sed -i + escaped newline portability across
+    # GNU/BSD sed is brittle on dollar-prefixed log-format names). Insert
+    # INSERT on the line immediately after ANCHOR. If ANCHOR appears more
+    # than once (shouldn't, but be defensive), only insert after the first.
+    TMP="$(mktemp)"
+    awk -v anchor="$ANCHOR" -v insert="$INSERT" '
+        { print }
+        !done && $0 == anchor { print insert; done = 1 }
+    ' "$NGINX_CONF" > "$TMP"
+    mv "$TMP" "$NGINX_CONF"
+    chmod 644 "$NGINX_CONF"
+    log "Inserted access_log directive after server_name ${DOMAIN} in $NGINX_CONF"
+fi
+
+if ! nginx -t; then
+    log "ERROR: nginx -t failed after edit. Restoring backup."
+    if [[ -n "${BACKUP:-}" && -f "$BACKUP" ]]; then
+        cp -a "$BACKUP" "$NGINX_CONF"
+        nginx -t || true
+    fi
+    exit 1
+fi
 systemctl reload nginx
-log "nginx reloaded; vaultmtg_timed log format active."
+log "nginx reloaded; vaultmtg_timed log format active and access_timed.log enabled."
 
 # ----------------------------------------------------------
 # 2. Write the metric publisher script
