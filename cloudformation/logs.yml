@@ -4,10 +4,18 @@ Description: |
   Manages BFF, nginx, and Lambda log groups for the VaultMTG stack.
   All groups are set to 30-day retention to bound storage cost.
   Deploy order: independent (no cross-stack imports or exports required).
+  Multi-env: BFF + nginx groups are provisioned per environment under
+  /vaultmtg/<env>/<tier> (production AND staging). Lambda log groups
+  are production-only and gated off in staging via the IsProduction
+  condition -- the Lambda functions themselves are production-only.
+  See ADR-026 for the staging-side rationale.
   INITIAL DEPLOY: use the logs-import workflow input or supply
   --resources-to-import file://cloudformation/parameters/logs-import.json
   (required because all five groups already exist and must be imported,
   not created). Subsequent updates use the normal UPDATE changeset path.
+  Staging stack (mtga-companion-logs-staging) is a clean CREATE -- no
+  import path needed since /vaultmtg/staging/* log groups do not yet
+  exist in the live account.
 
 Parameters:
   Environment:
@@ -38,6 +46,14 @@ Parameters:
     Type: String
     Description: Name of the CloudFormation VPC-config custom-resource Lambda.
     Default: mtga-companion-production-cfn-vpc-config
+
+Conditions:
+  # The Lambda functions whose log groups this template adopts
+  # (vault-mtg-sync, mtga-sync, mtga-companion-production-cfn-vpc-config)
+  # exist only in production. The staging variant of this stack
+  # provisions only the BFF + nginx log groups; the Lambda log groups
+  # are gated off via this condition. See ADR-026.
+  IsProduction: !Equals [!Ref Environment, "production"]
 
 Resources:
 
@@ -96,6 +112,7 @@ Resources:
   # ---------------------------------------------------------
   LambdaSyncLogGroup:
     Type: AWS::Logs::LogGroup
+    Condition: IsProduction
     DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
     Properties:
@@ -115,6 +132,7 @@ Resources:
   # ---------------------------------------------------------
   LambdaLegacySyncLogGroup:
     Type: AWS::Logs::LogGroup
+    Condition: IsProduction
     DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
     Properties:
@@ -135,6 +153,7 @@ Resources:
   # ---------------------------------------------------------
   LambdaVpcConfigLogGroup:
     Type: AWS::Logs::LogGroup
+    Condition: IsProduction
     DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
     Properties:
