@@ -69,7 +69,6 @@ Resources:
   #
   #   /vaultmtg/staging/*          -- BFF core + DB config + integration secrets
   #   /vaultmtg/app/staging/*      -- target namespace after R-13 cutover
-  #   /mtga-companion/staging/*    -- legacy path; dropped in step 5d
   #   kms:Decrypt via SSM KMS key  -- SecureString params (CLERK_SECRET_KEY etc.)
   #   secretsmanager:GetSecretValue on mtga-companion/staging/* -- staging RDS credential only
   #   s3:ListBucket / s3:GetObject on vaultmtg-deploy-artifacts-staging
@@ -145,7 +144,8 @@ Resources:
         # SSM reads: exactly the staging parameter paths provision-staging-env.sh
         # enumerates. Both the current flat paths and the post-cutover app sub-path
         # are granted so the role works before, during, and after the R-13 namespace
-        # migration. The mtga-companion/staging/* entry is dropped in step 5d.
+        # migration. The legacy staging-namespace grant was dropped in
+        # step 5d (#1996 Band A, 2026-05-24) after consumer cutover verified.
         - PolicyName: StagingProvisioningSSMRead
           PolicyDocument:
             Version: "2012-10-17"
@@ -161,8 +161,6 @@ Resources:
                   - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/vaultmtg/staging/*"
                   # Target path (post-R-13 namespace cutover)
                   - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/vaultmtg/app/staging/*"
-                  # Legacy path (dropped in step 5d after SSM cutover verified)
-                  - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/mtga-companion/staging/*"
         # KMS Decrypt: required for two distinct envelope-encrypted reads:
         #   1. SecureString SSM parameters (CLERK_SECRET_KEY, CLERK_PUBLISHABLE_KEY,
         #      etc.) encrypted with the AWS-managed SSM KMS key (alias/aws/ssm).
