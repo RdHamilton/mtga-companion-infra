@@ -1,6 +1,6 @@
 [
   { "ParameterKey": "Environment",                "ParameterValue": "staging" },
-  { "ParameterKey": "AlarmEmail",                 "ParameterValue": "ray.hamilton@stablekernel.com" },
+  { "ParameterKey": "AlarmEmail",                 "ParameterValue": "ramone.d.hamilton@gmail.com" },
   { "ParameterKey": "DiskAlarmThreshold",         "ParameterValue": "85" },
   { "ParameterKey": "RestartCountThreshold",      "ParameterValue": "5" },
   { "ParameterKey": "Bff5xxThreshold",            "ParameterValue": "10" },
