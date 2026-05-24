@@ -8,11 +8,13 @@
 # It is uploaded by deploy.yml before the ec2-staging CloudFormation stack is deployed.
 #
 # Differences from ec2-bootstrap.sh (production):
-#   - Reads SSM params from /vaultmtg/app/staging/* instead of production.
+#   - Reads SSM params from /vaultmtg/app/staging/* (canonical namespace, post R-13).
+#     The legacy /vaultmtg/staging/* SSM namespace is retired; do not reintroduce it.
 #   - Primary BFF service name: vault-mtg-bff-staging (port 8080).
 #   - Does NOT install the collocated staging secondary unit (staging IS the primary).
 #   - nginx configured for staging-api.vaultmtg.app only (no api.vaultmtg.app vhost).
-#   - CloudWatch log groups: /vaultmtg/staging/bff and /vaultmtg/staging/nginx.
+#   - CloudWatch log group names: /vaultmtg/staging/bff and /vaultmtg/staging/nginx
+#     (these are CloudWatch Logs group names, not SSM Parameter Store paths).
 #   - Deploy bucket: mtga-companion-deploy-artifacts-staging.
 #
 # Shell options: errexit + pipefail, no xtrace.
@@ -79,8 +81,10 @@ chmod 750 "$ENV_DIR"
 # ---------------------------------------------------------
 log "Fetching config from SSM (/vaultmtg/app/staging/*)..."
 
-PORT=$(fetch_ssm "/vaultmtg/app/staging/PORT")
-PORT="${PORT:-8080}"
+# Port is controlled exclusively by the systemd unit's Environment=BFF_PORT=8080
+# directive below. The BFF binary reads BFF_PORT only (services/bff/cmd/main.go);
+# any PORT= entry in the env file would be silently ignored, so we do not fetch
+# or write one here.
 
 ALLOWED_ORIGINS=$(require_ssm "/vaultmtg/app/staging/ALLOWED_ORIGINS")
 # daemon-jwt-secret is optional for staging (daemon not yet deployed to staging).
@@ -100,7 +104,6 @@ DATABASE_URL="postgresql://${DB_ENDPOINT}:5432/${DB_NAME}?sslmode=require"
 
 log "Writing env file to $ENV_DIR/env..."
 {
-    printf 'PORT=%s\n'              "$PORT"
     printf 'DATABASE_URL=%s\n'     "$DATABASE_URL"
     printf 'DB_SECRET_ARN=%s\n'    "$DB_SECRET_ARN"
     printf 'MTGA_ENV=staging\n'
