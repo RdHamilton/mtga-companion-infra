@@ -425,7 +425,7 @@ Resources:
                   # production deploy jobs (workflow_dispatch release.yml) run in
                   # `environment: production`. Both environment subs must be allowed
                   # explicitly -- a named GH environment sub replaces the ref-based
-                  # sub in the OIDC token. See vault-mtg run 26362262888 failure.
+                  # sub in the OIDC token. See RdHamilton/vault-mtg run 26362262888 failure.
                   - !Sub repo:${GitHubOrg}/${AppRepo}:environment:staging
                   - !Sub repo:${GitHubOrg}/${AppRepo}:environment:production
                   # vault-mtg-web: main branch and release tag deploys
