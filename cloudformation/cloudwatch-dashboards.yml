@@ -64,7 +64,7 @@ Resources:
                 "view": "timeSeries",
                 "stacked": false,
                 "metrics": [
-                  ["MTGA/BFF", "Http5xxCount", "Environment", "production", {"stat": "Sum", "period": 300, "label": "5xx count"}]
+                  ["MTGA/BFF", "Http5xxCount-production", {"stat": "Sum", "period": 300, "label": "5xx count"}]
                 ],
                 "region": "us-east-1",
                 "yAxis": {"left": {"min": 0}},
@@ -231,7 +231,7 @@ Resources:
                 "view": "timeSeries",
                 "stacked": false,
                 "metrics": [
-                  ["MTGA/BFF", "Http5xxCount", "Environment", "staging", {"stat": "Sum", "period": 300, "label": "5xx count"}]
+                  ["MTGA/BFF", "Http5xxCount-staging", {"stat": "Sum", "period": 300, "label": "5xx count"}]
                 ],
                 "region": "us-east-1",
                 "yAxis": {"left": {"min": 0}},
