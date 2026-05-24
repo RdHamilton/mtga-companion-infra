@@ -601,8 +601,8 @@ Resources:
               StringEquals:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
               StringLike:
-                # S-05: pinned to main branch, pull_request, and the
-                # production environment sub only.
+                # S-05: pinned to main branch, pull_request, and named
+                # GitHub environments only (production, staging-alerts).
                 # deploy.yml (workflow_dispatch) and staging-rebuild-smoke-gate.yml
                 # run their deploy jobs in `environment: production`. A job
                 # targeting a named GitHub environment gets an OIDC token sub of
@@ -612,10 +612,21 @@ Resources:
                 # 2026-05-22 (post-PR #87 #2332).
                 # cfn-changeset-gate.yml (pull_request) emits a pull_request sub.
                 # No feature-branch, fork, or tag ref can assume this role.
+                #
+                # `environment:staging-alerts` (P-12 follow-up): scoped to the
+                # notify-on-failure job in scheduled-synthetic-staging-deploy.yml
+                # which publishes a failure notification to the staging alerts
+                # SNS topic. Using a dedicated environment WITHOUT required
+                # reviewers separates the SNS publish path from the production
+                # approval gate -- producing an error notification should not
+                # require a human in the loop. The role's `sns:Publish` action
+                # is still scoped to the staging alerts topic ARN only via the
+                # SNSPublishStagingAlerts Sid below.
                 token.actions.githubusercontent.com:sub:
                   - !Sub repo:${GitHubOrg}/${InfraRepo}:ref:refs/heads/main
                   - !Sub repo:${GitHubOrg}/${InfraRepo}:pull_request
                   - !Sub repo:${GitHubOrg}/${InfraRepo}:environment:production
+                  - !Sub repo:${GitHubOrg}/${InfraRepo}:environment:staging-alerts
       Policies:
         - PolicyName: cfn-stack-deploy
           # CFN deploy role inline policy. OPTIMIZED for size (was 10,029 bytes — at the
