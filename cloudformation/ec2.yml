@@ -139,6 +139,32 @@ Resources:
                   - ec2messages:SendReply
                 Resource: "*"
         # ---------------------------------------------------------
+        # StagingDeployProvisionerAssumeRole (Path X PR 1, vault-mtg#2525).
+        #
+        # Grants the production EC2 instance role the single sts:AssumeRole
+        # action targeting vaultmtg-staging-deploy-provisioner. This is the
+        # Path A bridge half (the matching trust statement lives in
+        # staging-deploy-role.yml). provision-staging-env.sh, running on
+        # this instance via SSM RunCommand, calls sts:AssumeRole on the
+        # provisioner ARN and exports scoped credentials before any SSM read.
+        #
+        # ADR-022 sect4A.7 (Path X reversal, 2026-05-24) makes Path A the
+        # canonical interim until the Path B GHA-runner refactor lands in
+        # Wave-2 hardening. This grant is strictly smaller than the legacy
+        # blanket /vaultmtg/* SSM grant it replaces (S-02).
+        #
+        # Removal trigger: Path B refactor of provision-staging-env.sh
+        # (Wave-2). At that point this policy AND the EC2InstanceRoleBridge
+        # trust statement in staging-deploy-role.yml are removed together.
+        # ---------------------------------------------------------
+        - PolicyName: StagingDeployProvisionerAssumeRole
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: sts:AssumeRole
+                Resource: arn:aws:iam::901347789205:role/vaultmtg-staging-deploy-provisioner
+        # ---------------------------------------------------------
         # SecretsManagerStagingDBAccess (#2375).
         #
         # Scoped down from the former SecretsManagerDBAccess policy, which

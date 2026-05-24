@@ -5,8 +5,10 @@ Description: >
   Scoped to /vaultmtg/staging/*, /vaultmtg/app/staging/*, /mtga-companion/staging/*,
   kms:Decrypt via alias/aws/ssm, and secretsmanager:GetSecretValue on mtga-companion/staging/* only.
   No production SSM access. No writes. No S3. No EC2 control-plane.
-  Trust: GitHub OIDC only (Path B). Gates S-02 and EC-6.
-  Deploy order: standalone. See RdHamilton/vault-mtg#2364.
+  Trust: GitHub OIDC (Path B, end state) + EC2 instance AssumeRole bridge
+  (Path A, interim - restored Path X 2026-05-24, ADR-022 sect4A.7 addendum).
+  Gates S-02 and EC-6.
+  Deploy order: standalone. See RdHamilton/vault-mtg#2364, #2525.
 
 Parameters:
   GitHubOrg:
@@ -23,6 +25,15 @@ Parameters:
     Type: String
     Default: arn:aws:iam::901347789205:oidc-provider/token.actions.githubusercontent.com
     Description: ARN of the GitHub Actions OIDC provider in this account
+
+  EC2RoleArn:
+    Type: String
+    Default: arn:aws:iam::901347789205:role/mtga-companion-ec2-role-production
+    Description: >
+      ARN of the production EC2 instance role. Used for the Path A interim trust
+      statement (sts:AssumeRole bridge). Path A is the canonical interim per
+      ADR-022 sect4A.7 (Path X reversal, 2026-05-24); Path B (GHA-runner render)
+      is deferred to Wave-2 hardening. Removed when Path B refactor lands.
 
 Resources:
 
@@ -99,6 +110,19 @@ Resources:
                 token.actions.githubusercontent.com:sub:
                   - !Sub "repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/main"
                   - !Sub "repo:${GitHubOrg}/${GitHubRepo}:environment:staging"
+          # Path A -- interim bridge (canonical interim per ADR-022 sect4A.7,
+          # restored 2026-05-24 via Path X reversal; removed when Path B
+          # GHA-runner refactor lands in Wave-2 hardening).
+          # Allows provision-staging-env.sh, running on-instance via SSM RunCommand,
+          # to call sts:AssumeRole and export scoped credentials before any SSM read.
+          # The EC2 instance role needs only sts:AssumeRole on this one ARN (S-02
+          # replaces the current blanket /vaultmtg/* grant with this pinhole).
+          # Tracked for removal: Wave-2 Path B refactor ticket.
+          - Sid: EC2InstanceRoleBridge
+            Effect: Allow
+            Principal:
+              AWS: !Ref EC2RoleArn
+            Action: sts:AssumeRole
       Policies:
         # SSM reads: exactly the staging parameter paths provision-staging-env.sh
         # enumerates. Both the current flat paths and the post-cutover app sub-path
