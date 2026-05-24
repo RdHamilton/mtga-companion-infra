@@ -1,7 +1,4 @@
 [
-  { "ParameterKey": "Environment",                  "ParameterValue": "staging" },
-  { "ParameterKey": "RetentionDays",                "ParameterValue": "30" },
-  { "ParameterKey": "LambdaSyncFunctionName",       "ParameterValue": "vault-mtg-sync" },
-  { "ParameterKey": "LambdaLegacySyncFunctionName", "ParameterValue": "mtga-sync" },
-  { "ParameterKey": "LambdaVpcConfigFunctionName",  "ParameterValue": "mtga-companion-production-cfn-vpc-config" }
+  { "ParameterKey": "Environment",  "ParameterValue": "staging" },
+  { "ParameterKey": "RetentionDays", "ParameterValue": "30" }
 ]
