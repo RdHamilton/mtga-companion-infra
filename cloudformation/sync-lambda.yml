@@ -376,8 +376,17 @@ Resources:
             Resource: !GetAtt SyncDLQ.Arn
 
   # Lambda async invocation config: 2 retries; failed events land in the DLQ
+  #
+  # DependsOn: LambdaExecutionRole is required because the Lambda
+  # PutFunctionEventInvokeConfig API validates the function's execution role
+  # has sqs:SendMessage on the OnFailure destination at API call time.
+  # The inferred dependency on SyncDLQ alone is insufficient -- without this
+  # explicit DependsOn, CFN races the EventInvokeConfig create against the
+  # LambdaExecutionRole update that adds the DLQSendMessage inline policy.
+  # See incident #2611 (2026-05-25 deploy run 26388880578).
   SyncLambdaEventInvokeConfig:
     Type: AWS::Lambda::EventInvokeConfig
+    DependsOn: LambdaExecutionRole
     Properties:
       FunctionName: !Ref LambdaFunctionName
       Qualifier: $LATEST
