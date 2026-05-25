@@ -117,6 +117,10 @@ jobs:
             'vault-mtg-docs '                  # docs repo path (trailing space)
             'vault-mtg-docs$'                  # docs repo path (EOL)
             'vault-mtg#'                       # ticket cross-ref (e.g., vault-mtg#2351)
+            # Deployed sync-lambda resource name literal restored by PR #217
+            # (#2605) — proper rename deferred per ADR-022 §3 maintenance-window
+            # plan. Remove when the resource is recreated under the vaultmtg-* prefix.
+            'vault-mtg-\$\{Environment\}-vpc-config-lambda-role'  # comment-only reference to the prior rename literal restored by PR #43 revert (#2605); deferred per ADR-022 §3
           )
 
           # Legacy-slug exceptions for the rename progression. These specific
@@ -128,6 +132,22 @@ jobs:
           # (see #1759 §8 follow-on list).
           LEGACY_EXCEPTIONS=(
             'RdHamilton/mtga-companion-infra'  # infra repo legacy slug (dual-trust in iam-gha-roles.yml; removed after rename + 30-day soak per #1759 §8)
+            # Deployed sync-lambda resource name literals restored by PR #217
+            # (#2605) — proper rename deferred per ADR-022 §3 maintenance-window
+            # plan. Remove each entry when its resource is recreated under the
+            # vaultmtg-* prefix. Order: longest/most-specific first so the
+            # bare-prefix fallback does not shadow the per-resource entries.
+            'mtga-companion-\$\{Environment\}-sync-lambda-errors'   # CloudWatch alarm (sync-lambda.yml L405)
+            'mtga-companion-\$\{Environment\}-sync-scheduler-role'  # EventBridge scheduler IAM role (sync-lambda.yml L260)
+            'mtga-companion-\$\{Environment\}-sync-cards-manual'    # EventBridge manual schedule (sync-lambda.yml L316)
+            'mtga-companion-\$\{Environment\}-sync-lambda-role'     # sync Lambda execution IAM role (sync-lambda.yml L108)
+            'mtga-companion-\$\{Environment\}-cfn-vpc-config'       # vpc-config custom-resource Lambda (sync-lambda.yml L145)
+            'mtga-companion-\$\{Environment\}-sync-lambda-sg'       # sync Lambda security group Name tag (sync-lambda.yml L89)
+            'mtga-companion-\$\{Environment\}-sync-dlq-depth'       # CloudWatch alarm on DLQ depth (sync-lambda.yml L451)
+            'mtga-companion-\$\{Environment\}-sync-daily'           # EventBridge daily schedule (sync-lambda.yml L295)
+            'mtga-companion-\$\{Environment\}-sync-dlq'             # sync Lambda dead-letter SQS queue (sync-lambda.yml L354)
+            'mtga-companion-sync-lambda-LambdaVpcConfigRole-jaapidGm6Kmp'  # CFN-generated physical ID referenced in sync-lambda.yml L198 comment
+            'mtga-companion-\$\{Environment\} sync Lambda outbound access'  # sync Lambda SG GroupDescription literal (sync-lambda.yml L69) — narrow match avoids exempting unrelated mtga-companion-${Environment}-* resources
           )
 
           while IFS= read -r FILE; do
