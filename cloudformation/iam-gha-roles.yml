@@ -167,12 +167,19 @@ Resources:
               - iam:GetInstanceProfile
               - iam:AddRoleToInstanceProfile
               - iam:RemoveRoleFromInstanceProfile
-              # AWS::IAM::OIDCProvider lifecycle (single fixed provider ARN)
+              # AWS::IAM::OIDCProvider lifecycle (single fixed provider ARN).
+              # AWS now requires iam:ListOpenIDConnectProviderTags whenever CFN
+              # applies tag mutations to an OIDC provider (verified against the
+              # 2026-05-25 P0 -- deploy-artifacts stuck UPDATE_ROLLBACK_FAILED).
+              # Untag is the symmetric partner of Tag and is required for any
+              # tag removal during rollback or property drift.
               - iam:CreateOpenIDConnectProvider
               - iam:DeleteOpenIDConnectProvider
               - iam:GetOpenIDConnectProvider
               - iam:UpdateOpenIDConnectProvider
               - iam:TagOpenIDConnectProvider
+              - iam:UntagOpenIDConnectProvider
+              - iam:ListOpenIDConnectProviderTags
               # AWS::IAM::ManagedPolicy lifecycle (Create / Update / Delete / drift-read)
               - iam:CreatePolicy
               - iam:CreatePolicyVersion
