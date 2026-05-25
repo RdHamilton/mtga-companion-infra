@@ -35,7 +35,7 @@ Resources:
   EC2SecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: "VaultMTG EC2 - HTTP/HTTPS inbound, all outbound"
+      GroupDescription: "MTGA Companion EC2 - HTTP/HTTPS inbound, all outbound"
       VpcId: !Ref VpcId
       SecurityGroupIngress:
         - IpProtocol: tcp
