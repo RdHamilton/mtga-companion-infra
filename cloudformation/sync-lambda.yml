@@ -66,7 +66,7 @@ Resources:
   LambdaSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: !Sub "vault-mtg-${Environment} sync Lambda outbound access"
+      GroupDescription: !Sub "mtga-companion-${Environment} sync Lambda outbound access"
       VpcId: vpc-01d097c495e941d32
       SecurityGroupEgress:
         - IpProtocol: tcp
@@ -86,7 +86,7 @@ Resources:
         - Key: Environment
           Value: !Ref Environment
         - Key: Name
-          Value: !Sub "vault-mtg-${Environment}-sync-lambda-sg"
+          Value: !Sub "mtga-companion-${Environment}-sync-lambda-sg"
 
   # Inject ingress rule into RDS security group to allow Lambda access
   RDSIngressFromLambda:
@@ -105,7 +105,7 @@ Resources:
     Type: AWS::IAM::Role
     DependsOn: SyncDLQ
     Properties:
-      RoleName: !Sub "vault-mtg-${Environment}-sync-lambda-role"
+      RoleName: !Sub "mtga-companion-${Environment}-sync-lambda-role"
       Description: Execution role for sync Lambda with VPC and RDS IAM auth access
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
@@ -142,7 +142,7 @@ Resources:
   LambdaVpcConfigFunction:
     Type: AWS::Lambda::Function
     Properties:
-      FunctionName: !Sub "vault-mtg-${Environment}-cfn-vpc-config"
+      FunctionName: !Sub "mtga-companion-${Environment}-cfn-vpc-config"
       Description: CloudFormation custom resource to configure VPC placement on sync Lambda
       Runtime: python3.12
       Handler: index.handler
@@ -194,7 +194,12 @@ Resources:
     Type: AWS::IAM::Role
     Properties:
       Description: Role for the VPC config custom resource Lambda
-      RoleName: !Sub "vault-mtg-${Environment}-vpc-config-lambda-role"
+      # RoleName intentionally omitted -- CFN auto-generates to match the
+      # deployed physical ID 'mtga-companion-sync-lambda-LambdaVpcConfigRole-jaapidGm6Kmp'.
+      # The literal 'vault-mtg-${Environment}-vpc-config-lambda-role' that lived here
+      # was an out-of-window rename (PR #43) deferred per ADR-022 §3; restoring to
+      # CFN-managed name avoids replacement until the maintenance-window rename
+      # batch can re-add the proper 'vaultmtg-*' (no hyphen) form.
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -252,7 +257,7 @@ Resources:
     Type: AWS::IAM::Role
     DependsOn: SyncDLQ
     Properties:
-      RoleName: !Sub "vault-mtg-${Environment}-sync-scheduler-role"
+      RoleName: !Sub "mtga-companion-${Environment}-sync-scheduler-role"
       Description: Role for EventBridge Scheduler to invoke sync Lambda and write to DLQ
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
@@ -287,7 +292,7 @@ Resources:
     Type: AWS::Scheduler::Schedule
     DependsOn: SyncDLQ
     Properties:
-      Name: !Sub "vault-mtg-${Environment}-sync-daily"
+      Name: !Sub "mtga-companion-${Environment}-sync-daily"
       Description: Daily sync Lambda trigger at 02:00 UTC
       ScheduleExpression: !Ref ScheduleCron
       ScheduleExpressionTimezone: UTC
@@ -308,7 +313,7 @@ Resources:
     Type: AWS::Scheduler::Schedule
     DependsOn: SyncDLQ
     Properties:
-      Name: !Sub "vault-mtg-${Environment}-sync-cards-manual"
+      Name: !Sub "mtga-companion-${Environment}-sync-cards-manual"
       Description: On-demand schedule for manual card metadata sync - enable to trigger
       ScheduleExpression: 'rate(1 day)'
       ScheduleExpressionTimezone: UTC
@@ -346,7 +351,7 @@ Resources:
   SyncDLQ:
     Type: AWS::SQS::Queue
     Properties:
-      QueueName: !Sub "vault-mtg-${Environment}-sync-dlq"
+      QueueName: !Sub "mtga-companion-${Environment}-sync-dlq"
       MessageRetentionPeriod: 1209600
       Tags:
         - Key: Project
@@ -397,7 +402,7 @@ Resources:
     Type: AWS::CloudWatch::Alarm
     DependsOn: SyncDLQ
     Properties:
-      AlarmName: !Sub "vault-mtg-${Environment}-sync-lambda-errors"
+      AlarmName: !Sub "mtga-companion-${Environment}-sync-lambda-errors"
       AlarmDescription: !Sub |
         Sync Lambda (${LambdaFunctionName}) reported invocation errors.
         Check CloudWatch Logs for the Lambda function and inspect the DLQ:
@@ -443,7 +448,7 @@ Resources:
     Type: AWS::CloudWatch::Alarm
     DependsOn: SyncDLQ
     Properties:
-      AlarmName: !Sub "vault-mtg-${Environment}-sync-dlq-depth"
+      AlarmName: !Sub "mtga-companion-${Environment}-sync-dlq-depth"
       AlarmDescription: !Sub |
         Messages have landed in the sync DLQ (${SyncDLQ}).
         This means the sync Lambda failed and exhausted all EventBridge retries.
