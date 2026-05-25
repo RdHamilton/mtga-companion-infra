@@ -78,9 +78,20 @@ Resources:
 # ---------------------------------------------------------------------------
 # Outputs
 # ---------------------------------------------------------------------------
+# Dual-emit (#1759 PR-A): both legacy and new export names point to the same
+# physical SG. The legacy-prefix export remains the sole consumer (see
+# ec2.yml:421-422 and ADR-022 §3 GAP-A). PR-B (full sweep + consumer cutover)
+# flips consumers to the `vaultmtg-*` export, and a later PR removes the
+# legacy export once no stack imports it.
 Outputs:
   EC2SecurityGroupId:
-    Description: EC2 SG ID - pass to rds.yml as EC2SecurityGroupId
+    Description: EC2 SG ID - pass to rds.yml as EC2SecurityGroupId (legacy export name)
     Value: !Ref EC2SecurityGroup
     Export:
       Name: !Sub "mtga-companion-${Environment}-EC2SecurityGroupId"
+
+  EC2SecurityGroupIdVaultMTG:
+    Description: EC2 SG ID - vaultmtg-prefixed export (PR-B will migrate consumers here)
+    Value: !Ref EC2SecurityGroup
+    Export:
+      Name: !Sub "vaultmtg-${Environment}-EC2SecurityGroupId"
