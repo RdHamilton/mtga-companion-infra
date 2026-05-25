@@ -376,7 +376,7 @@ Resources:
                 Resource: "*"
       Tags:
         - Key: Project
-          Value: mtga-companion
+          Value: vaultmtg
         - Key: Environment
           Value: !Ref Environment
 
@@ -418,8 +418,13 @@ Resources:
       InstanceType: !Ref InstanceType
       IamInstanceProfile: !Ref EC2InstanceProfile
       SecurityGroupIds:
+        # Consumer cutover (#1759 PR-B): imports the new `vaultmtg-*` export
+        # produced by ec2-sg.yml. The legacy-prefix export remains dual-emitted
+        # on the ec2-sg stack for one full release cycle (PR-A established the
+        # dual-emit; a follow-on ticket removes the legacy alias). Either name
+        # resolves to the same physical SG.
         - !ImportValue
-          Fn::Sub: "mtga-companion-${Environment}-EC2SecurityGroupId"
+          Fn::Sub: "vaultmtg-${Environment}-EC2SecurityGroupId"
       SubnetId: subnet-021e2cc715f426da1
       KeyName: !If [HasKeyName, !Ref KeyName, !Ref "AWS::NoValue"]
       # ---------------------------------------------------------
@@ -472,9 +477,9 @@ Resources:
           AWS_DEFAULT_REGION=${AWS::Region} bash /tmp/ec2-bootstrap.sh
       Tags:
         - Key: Name
-          Value: !Sub "mtga-companion-bff-${Environment}"
+          Value: !Sub "vaultmtg-bff-${Environment}"
         - Key: Project
-          Value: mtga-companion
+          Value: vaultmtg
         - Key: Environment
           Value: !Ref Environment
 
@@ -500,7 +505,7 @@ Resources:
       Domain: vpc
       Tags:
         - Key: Name
-          Value: !Sub "mtga-companion-eip-${Environment}"
+          Value: !Sub "vaultmtg-eip-${Environment}"
         - Key: Project
           Value: vaultmtg
         - Key: Environment

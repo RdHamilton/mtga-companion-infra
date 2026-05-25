@@ -82,7 +82,7 @@ Resources:
           Description: Allow outbound HTTPS for AWS API calls and RDS IAM token
       Tags:
         - Key: Project
-          Value: mtga-companion
+          Value: vaultmtg
         - Key: Environment
           Value: !Ref Environment
         - Key: Name
@@ -133,7 +133,7 @@ Resources:
                 Resource: !GetAtt SyncDLQ.Arn
       Tags:
         - Key: Project
-          Value: mtga-companion
+          Value: vaultmtg
         - Key: Environment
           Value: !Ref Environment
 
@@ -226,7 +226,7 @@ Resources:
                 Resource: "*"
       Tags:
         - Key: Project
-          Value: mtga-companion
+          Value: vaultmtg
         - Key: Environment
           Value: !Ref Environment
 
@@ -278,7 +278,7 @@ Resources:
                 Resource: !GetAtt SyncDLQ.Arn
       Tags:
         - Key: Project
-          Value: mtga-companion
+          Value: vaultmtg
         - Key: Environment
           Value: !Ref Environment
 
@@ -350,7 +350,7 @@ Resources:
       MessageRetentionPeriod: 1209600
       Tags:
         - Key: Project
-          Value: mtga-companion
+          Value: vaultmtg
         - Key: Environment
           Value: !Ref Environment
 
@@ -423,7 +423,7 @@ Resources:
           Fn::Sub: "vaultmtg-${Environment}-AlertTopicArn"
       Tags:
         - Key: Project
-          Value: mtga-companion
+          Value: vaultmtg
         - Key: Environment
           Value: !Ref Environment
 
@@ -469,7 +469,7 @@ Resources:
           Fn::Sub: "vaultmtg-${Environment}-AlertTopicArn"
       Tags:
         - Key: Project
-          Value: mtga-companion
+          Value: vaultmtg
         - Key: Environment
           Value: !Ref Environment
 

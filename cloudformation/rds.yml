@@ -1,8 +1,7 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
-  MTGA Companion -RDS PostgreSQL instance.
+  VaultMTG RDS PostgreSQL instance.
   Private subnet only, pgvector-enabled parameter group, encrypted at rest.
-  Hold deployment until AWS Activate credits are confirmed.
 
 # ---------------------------------------------------------------------------
 # Parameters
@@ -54,9 +53,9 @@ Resources:
       VpcId: !Ref VpcId
       Tags:
         - Key: Name
-          Value: mtga-companion-rds-sg
+          Value: vaultmtg-rds-sg
         - Key: Project
-          Value: mtga-companion
+          Value: vaultmtg
         - Key: Environment
           Value: !Ref Environment
 
@@ -64,13 +63,13 @@ Resources:
   DBSubnetGroup:
     Type: AWS::RDS::DBSubnetGroup
     Properties:
-      DBSubnetGroupDescription: Private subnets for MTGA Companion RDS
+      DBSubnetGroupDescription: Private subnets for VaultMTG RDS
       SubnetIds:
         - !Ref PrivateSubnet1Id
         - !Ref PrivateSubnet2Id
       Tags:
         - Key: Project
-          Value: mtga-companion
+          Value: vaultmtg
         - Key: Environment
           Value: !Ref Environment
 
@@ -79,7 +78,7 @@ Resources:
   DBParameterGroup:
     Type: AWS::RDS::DBParameterGroup
     Properties:
-      Description: MTGA Companion PostgreSQL 15
+      Description: VaultMTG PostgreSQL 15
       Family: postgres15
       Parameters:
         shared_preload_libraries: pg_stat_statements
@@ -88,7 +87,7 @@ Resources:
         log_min_duration_statement: "1000"   # log queries > 1s
       Tags:
         - Key: Project
-          Value: mtga-companion
+          Value: vaultmtg
         - Key: Environment
           Value: !Ref Environment
 
@@ -114,6 +113,17 @@ Resources:
     DeletionPolicy: Snapshot   # take a final snapshot on stack deletion
     UpdateReplacePolicy: Snapshot   # also snapshot if a property change forces replacement
     Properties:
+      # DBInstanceIdentifier intentionally retains the legacy name in PR-B
+      # (#1759). The live RDS instance was named at create time and cannot be
+      # renamed via a CFN property change — it requires an out-of-band
+      # `aws rds modify-db-instance --new-db-instance-identifier` (a short
+      # reboot) followed by the CFN template flip in the same window. That
+      # out-of-band rename is tracked in #1996 §5e and has not yet shipped —
+      # verified via `aws rds describe-db-instances`. Flipping this line ahead
+      # of the live rename would fail the stack with "DBInstance not found"
+      # on the next CFN update, so the line is held in the legacy state and
+      # carried in the ADR-022 §C grandfathered allowlist until #1996 §5e
+      # delivers the live rename.
       DBInstanceIdentifier: mtga-companion-postgres
       DBName: !Ref DBName
       Engine: postgres
@@ -137,7 +147,7 @@ Resources:
       AutoMinorVersionUpgrade: true
       Tags:
         - Key: Project
-          Value: mtga-companion
+          Value: vaultmtg
         - Key: Environment
           Value: !Ref Environment
 

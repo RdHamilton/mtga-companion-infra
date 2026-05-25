@@ -1,8 +1,8 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
-  GitHub Actions OIDC IAM roles for mtga-companion-infra CI/CD. Roles were
-  provisioned out-of-band and reconciled byte-faithful for import-only
-  change sets (see PR #36, #39).
+  GitHub Actions OIDC IAM roles for the VaultMTG infra repo CI/CD pipelines.
+  Roles were provisioned out-of-band and reconciled byte-faithful for
+  import-only change sets (see PR #36, #39).
 
   S-04 (vault-mtg#2325): GhaCfnDeployPermissionsBoundary caps the effective
   permissions of gha-infra-cfn-deploy -- see the resource-level comment for
@@ -511,7 +511,7 @@ Resources:
                 Resource: arn:aws:lambda:us-east-1:901347789205:function:mtga-sync
       Tags:
         - Key: Project
-          Value: mtga-companion
+          Value: vaultmtg
         - Key: Environment
           Value: production
 
@@ -529,7 +529,7 @@ Resources:
     UpdateReplacePolicy: Retain
     Properties:
       RoleName: gha-infra-sync-deploy
-      Description: GitHub Actions OIDC role for mtga-companion-infra sync Lambda deploy workflow (main branch only)
+      Description: GitHub Actions OIDC role for VaultMTG infra repo sync Lambda deploy workflow (main branch only)
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
@@ -549,9 +549,21 @@ Resources:
                 # `repo:<org>/<repo>:environment:<name>` instead of a ref-based
                 # sub -- both must be allowed or AssumeRoleWithWebIdentity is
                 # denied. See P1 incident 2026-05-22 (post-PR #87 #2332).
+                #
+                # #1759 PR-B dual-trust: the legacy repo slug literals coexist
+                # with the parameterized form so the GitHub Settings repo
+                # rename can be executed without an OIDC lockout (#2485
+                # self-lockout class). Both subs trust the same role. After
+                # the rename + 30-day soak, the legacy literals are removed
+                # in a follow-on PR per the #1759 §8 follow-on list. The
+                # legacy literals are allowed past the naming-convention CI
+                # gate via the LEGACY_EXCEPTIONS list in
+                # .github/workflows/naming-convention.yml (added in this PR).
                 token.actions.githubusercontent.com:sub:
                   - !Sub repo:${GitHubOrg}/${InfraRepo}:ref:refs/heads/main
                   - !Sub repo:${GitHubOrg}/${InfraRepo}:environment:production
+                  - repo:RdHamilton/mtga-companion-infra:ref:refs/heads/main
+                  - repo:RdHamilton/mtga-companion-infra:environment:production
       Policies:
         - PolicyName: sync-lambda-deploy
           PolicyDocument:
@@ -598,7 +610,7 @@ Resources:
     UpdateReplacePolicy: Retain
     Properties:
       RoleName: gha-infra-cfn-deploy
-      Description: GitHub Actions OIDC role for mtga-companion-infra CloudFormation deploy workflow
+      Description: GitHub Actions OIDC role for VaultMTG infra repo CloudFormation deploy workflow
       PermissionsBoundary: !Ref GhaCfnDeployPermissionsBoundary
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
@@ -632,11 +644,23 @@ Resources:
                 # require a human in the loop. The role's `sns:Publish` action
                 # is still scoped to the staging alerts topic ARN only via the
                 # SNSPublishStagingAlerts Sid below.
+                #
+                # #1759 PR-B dual-trust: legacy repo slug literals coexist
+                # with the parameterized form so the GitHub Settings repo
+                # rename can be executed without an OIDC lockout (#2485
+                # self-lockout class). After rename + 30-day soak, the legacy
+                # literals are removed in a follow-on PR (#1759 §8). The
+                # legacy literals are allowed past the naming-convention CI
+                # gate via LEGACY_EXCEPTIONS in naming-convention.yml.
                 token.actions.githubusercontent.com:sub:
                   - !Sub repo:${GitHubOrg}/${InfraRepo}:ref:refs/heads/main
                   - !Sub repo:${GitHubOrg}/${InfraRepo}:pull_request
                   - !Sub repo:${GitHubOrg}/${InfraRepo}:environment:production
                   - !Sub repo:${GitHubOrg}/${InfraRepo}:environment:staging-alerts
+                  - repo:RdHamilton/mtga-companion-infra:ref:refs/heads/main
+                  - repo:RdHamilton/mtga-companion-infra:pull_request
+                  - repo:RdHamilton/mtga-companion-infra:environment:production
+                  - repo:RdHamilton/mtga-companion-infra:environment:staging-alerts
       Policies:
         - PolicyName: cfn-stack-deploy
           # CFN deploy role inline policy. OPTIMIZED for size (was 10,029 bytes — at the

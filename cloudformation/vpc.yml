@@ -1,6 +1,6 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
-  MTGA Companion -VPC with public subnets (EC2) and private subnets (RDS).
+  VaultMTG VPC with public subnets (EC2) and private subnets (RDS).
   No NAT Gateway: EC2 is public-facing, RDS is private and reachable only from within the VPC.
   Deploy this stack first; pass its outputs into rds.yml and future EC2 stacks.
 
@@ -52,7 +52,7 @@ Resources:
       EnableDnsHostnames: true
       Tags:
         - Key: Name
-          Value: !Sub "mtga-companion-${Environment}"
+          Value: !Sub "vaultmtg-${Environment}"
         - Key: Environment
           Value: !Ref Environment
 
@@ -62,7 +62,7 @@ Resources:
     Properties:
       Tags:
         - Key: Name
-          Value: !Sub "mtga-companion-igw-${Environment}"
+          Value: !Sub "vaultmtg-igw-${Environment}"
 
   IGWAttachment:
     Type: AWS::EC2::VPCGatewayAttachment
@@ -80,7 +80,7 @@ Resources:
       MapPublicIpOnLaunch: true
       Tags:
         - Key: Name
-          Value: !Sub "mtga-companion-public-1-${Environment}"
+          Value: !Sub "vaultmtg-public-1-${Environment}"
 
   PublicSubnet2:
     Type: AWS::EC2::Subnet
@@ -91,7 +91,7 @@ Resources:
       MapPublicIpOnLaunch: true
       Tags:
         - Key: Name
-          Value: !Sub "mtga-companion-public-2-${Environment}"
+          Value: !Sub "vaultmtg-public-2-${Environment}"
 
   PrivateSubnet1:
     Type: AWS::EC2::Subnet
@@ -102,7 +102,7 @@ Resources:
       MapPublicIpOnLaunch: false
       Tags:
         - Key: Name
-          Value: !Sub "mtga-companion-private-1-${Environment}"
+          Value: !Sub "vaultmtg-private-1-${Environment}"
 
   PrivateSubnet2:
     Type: AWS::EC2::Subnet
@@ -113,7 +113,7 @@ Resources:
       MapPublicIpOnLaunch: false
       Tags:
         - Key: Name
-          Value: !Sub "mtga-companion-private-2-${Environment}"
+          Value: !Sub "vaultmtg-private-2-${Environment}"
 
   # ── Public Route Table ────────────────────────────────────────────────────
   PublicRouteTable:
@@ -122,7 +122,7 @@ Resources:
       VpcId: !Ref VPC
       Tags:
         - Key: Name
-          Value: !Sub "mtga-companion-public-rt-${Environment}"
+          Value: !Sub "vaultmtg-public-rt-${Environment}"
 
   PublicRoute:
     Type: AWS::EC2::Route
@@ -151,7 +151,7 @@ Resources:
       VpcId: !Ref VPC
       Tags:
         - Key: Name
-          Value: !Sub "mtga-companion-private-rt-${Environment}"
+          Value: !Sub "vaultmtg-private-rt-${Environment}"
 
   PrivateSubnet1RouteTableAssoc:
     Type: AWS::EC2::SubnetRouteTableAssociation
@@ -171,7 +171,7 @@ Resources:
   EC2SecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: "MTGA Companion EC2 - allows HTTP/HTTPS inbound, all outbound"
+      GroupDescription: "VaultMTG EC2 - allows HTTP/HTTPS inbound, all outbound"
       VpcId: !Ref VPC
       SecurityGroupIngress:
         - IpProtocol: tcp
@@ -190,44 +190,54 @@ Resources:
           Description: "All outbound"
       Tags:
         - Key: Name
-          Value: !Sub "mtga-companion-ec2-sg-${Environment}"
+          Value: !Sub "vaultmtg-ec2-sg-${Environment}"
 
 # ---------------------------------------------------------------------------
 # Outputs -passed as inputs to rds.yml and future EC2 stack
 # ---------------------------------------------------------------------------
 Outputs:
+  # Export names use the `vaultmtg-${Environment}-*` prefix per ADR-022 §C
+  # naming addendum. Live AWS audit (#1759 PR-B plan §2.3) confirmed zero
+  # consumers for the prior legacy-prefix export names defined here — they
+  # were declared but never imported by any live stack. Safe rename.
+  # The lone live VPC-style export (`EC2SecurityGroupId`) is produced by
+  # `ec2-sg.yml`, not by this file; see ec2-sg.yml dual-emit and ec2.yml:422.
   VpcId:
     Description: VPC ID
     Value: !Ref VPC
     Export:
-      Name: !Sub "mtga-companion-${Environment}-VpcId"
+      Name: !Sub "vaultmtg-${Environment}-VpcId"
 
   PublicSubnet1Id:
     Description: Public subnet AZ-a (EC2)
     Value: !Ref PublicSubnet1
     Export:
-      Name: !Sub "mtga-companion-${Environment}-PublicSubnet1Id"
+      Name: !Sub "vaultmtg-${Environment}-PublicSubnet1Id"
 
   PublicSubnet2Id:
     Description: Public subnet AZ-b
     Value: !Ref PublicSubnet2
     Export:
-      Name: !Sub "mtga-companion-${Environment}-PublicSubnet2Id"
+      Name: !Sub "vaultmtg-${Environment}-PublicSubnet2Id"
 
   PrivateSubnet1Id:
     Description: Private subnet AZ-a (RDS primary)
     Value: !Ref PrivateSubnet1
     Export:
-      Name: !Sub "mtga-companion-${Environment}-PrivateSubnet1Id"
+      Name: !Sub "vaultmtg-${Environment}-PrivateSubnet1Id"
 
   PrivateSubnet2Id:
     Description: Private subnet AZ-b (RDS standby)
     Value: !Ref PrivateSubnet2
     Export:
-      Name: !Sub "mtga-companion-${Environment}-PrivateSubnet2Id"
+      Name: !Sub "vaultmtg-${Environment}-PrivateSubnet2Id"
 
-  EC2SecurityGroupId:
-    Description: EC2 security group ID -pass to rds.yml as EC2SecurityGroupId
-    Value: !Ref EC2SecurityGroup
-    Export:
-      Name: !Sub "mtga-companion-${Environment}-EC2SecurityGroupId"
+  # NOTE: The original `EC2SecurityGroupId` export on this stack was REMOVED in
+  # #1759 PR-B. It was a dead alias — vpc.yml has never been deployed to AWS,
+  # so this export was never live. The canonical live `EC2SecurityGroupId`
+  # export is produced by `ec2-sg.yml` (under both the legacy-prefix and new
+  # `vaultmtg-*` names — see ec2-sg.yml dual-emit). Keeping a same-named export
+  # here would create a CloudFormation per-region uniqueness collision if
+  # vpc.yml were ever deployed. The `EC2SecurityGroup` resource in this
+  # template is still defined and is referenced by future stacks; only the
+  # orphaned export is removed.

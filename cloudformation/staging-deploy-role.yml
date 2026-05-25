@@ -295,7 +295,7 @@ Resources:
                   - arn:aws:s3:::vaultmtg-deploy-artifacts-staging/infra-db/*
       Tags:
         - Key: Project
-          Value: mtga-companion
+          Value: vaultmtg
         - Key: Environment
           Value: staging
         - Key: ManagedBy

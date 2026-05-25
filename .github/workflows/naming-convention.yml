@@ -119,6 +119,17 @@ jobs:
             'vault-mtg#'                       # ticket cross-ref (e.g., vault-mtg#2351)
           )
 
+          # Legacy-slug exceptions for the rename progression. These specific
+          # forms are allowed in added lines because they are part of the
+          # rename machinery itself — defeating the #2485 self-lockout class
+          # requires emitting both the legacy and new repo slugs in the OIDC
+          # trust policy during the cutover window. Each entry should be
+          # removed once the corresponding follow-on cleanup ticket ships
+          # (see #1759 §8 follow-on list).
+          LEGACY_EXCEPTIONS=(
+            'RdHamilton/mtga-companion-infra'  # infra repo legacy slug (dual-trust in iam-gha-roles.yml; removed after rename + 30-day soak per #1759 §8)
+          )
+
           while IFS= read -r FILE; do
             [ -z "$FILE" ] && continue
             [ ! -f "$FILE" ] && continue
@@ -159,11 +170,26 @@ jobs:
 
               # --------------------------------------------------------------
               # Check 1: legacy `mtga-companion` prefix.
-              # No exceptions -- this prefix is fully retired for new resources.
+              # Exceptions: LEGACY_EXCEPTIONS list (rename-machinery refs).
+              # Same pattern as Check 2: strip every legacy exception from the
+              # line; if any `mtga-companion` substring remains, that residual
+              # is a violation.
               # --------------------------------------------------------------
               if echo "$CONTENT" | grep -qE 'mtga-companion'; then
-                printf "VIOLATION (legacy mtga-companion): %s:%s: %s\n" \
-                  "$FILE" "$LNO" "$CONTENT" >> "$VIOLATIONS_FILE"
+                IS_LEGACY_EXCEPTION=false
+                LEGACY_RESIDUAL="$CONTENT"
+                for STRIP in "${LEGACY_EXCEPTIONS[@]}"; do
+                  ESCAPED_STRIP=$(printf '%s' "$STRIP" | sed 's:/:\\/:g')
+                  LEGACY_RESIDUAL=$(echo "$LEGACY_RESIDUAL" | sed -E "s/${ESCAPED_STRIP}//g")
+                done
+                if ! echo "$LEGACY_RESIDUAL" | grep -qE 'mtga-companion'; then
+                  IS_LEGACY_EXCEPTION=true
+                fi
+
+                if [ "$IS_LEGACY_EXCEPTION" = "false" ]; then
+                  printf "VIOLATION (legacy mtga-companion): %s:%s: %s\n" \
+                    "$FILE" "$LNO" "$CONTENT" >> "$VIOLATIONS_FILE"
+                fi
                 continue
               fi
 
