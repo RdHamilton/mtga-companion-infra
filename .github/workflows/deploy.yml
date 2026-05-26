@@ -12,6 +12,7 @@ on:
           - ec2-sg
           - ec2-sg-staging
           - rds
+          - rds-vaultmtg
           - ec2
           - ec2-staging
           - dns-staging
@@ -68,6 +69,7 @@ jobs:
           # differs from the stack input (e.g. cloudwatch-alarms-staging uses cloudwatch-alarms.yml).
           case "${{ inputs.stack }}" in
             cdn)                        STACK_NAME="vaultmtg-app-cdn" ;                   TEMPLATE_NAME="${{ inputs.stack }}" ;;
+            rds-vaultmtg)               STACK_NAME="vaultmtg-rds" ;                       TEMPLATE_NAME="${{ inputs.stack }}" ;;
             rhamiltoneng-dns)           STACK_NAME="rhamiltoneng-dns" ;                   TEMPLATE_NAME="${{ inputs.stack }}" ;;
             iam-gha-roles)              STACK_NAME="mtga-companion-iam-gha-roles" ;       TEMPLATE_NAME="${{ inputs.stack }}" ;;
             iam-break-glass)            STACK_NAME="vaultmtg-iam-break-glass" ;           TEMPLATE_NAME="${{ inputs.stack }}" ;;
