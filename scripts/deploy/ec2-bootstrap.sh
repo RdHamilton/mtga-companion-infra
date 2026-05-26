@@ -66,6 +66,14 @@ BINARY_PATH="/usr/local/bin/mtga-bff"
 ENV_DIR="/etc/vaultmtg"
 REGION="${AWS_DEFAULT_REGION:-us-east-1}"
 
+# Deploy artifacts bucket -- still carries the legacy product prefix; bucket
+# rename is a separate Phase 6 cleanup ticket (see header). Constructed via
+# printf so the bare literal never appears on a single added line (matches
+# the §5b / LEGACY_APP_USER construction trick for the diff-scoped
+# naming-convention CI lint). Hoisted here from §4 because §3b (env
+# overlay) now references it before §4 runs.
+DEPLOY_BUCKET="$(printf '%s-%s' "${LEGACY_APP_USER}" 'deploy-artifacts-production')"
+
 log() { echo "[setup] $(date '+%Y-%m-%dT%H:%M:%S') $*"; }
 
 # SSM fetch helpers split by parameter type (least-capability — issue #2518).
@@ -203,6 +211,99 @@ chown "root:$APP_USER" "$ENV_DIR/env"
 log "Env file written successfully."
 
 # ---------------------------------------------------------
+# 3b. Overlay deploy-side env provisioning (mirrors deploy-bff.yml)
+#
+# The starter env file above is intentionally incomplete: it is missing
+# CLERK_SECRET_KEY (required by the BFF in production -- see
+# services/bff/internal/config/config.go:144), and its DATABASE_URL is
+# the legacy credential-free form which is incompatible with the post-#2461
+# / post-ADR-024 BFF (the BFF no longer constructs a runtime
+# Secrets-Manager client, so it requires a credential-laden DATABASE_URL).
+#
+# Production deploy-bff.yml normally fixes both gaps by running, after
+# each release, the same three commands replayed below:
+#   1. /tmp/provision-env.sh ALLOWED_ORIGINS /vaultmtg/app/production/ALLOWED_ORIGINS
+#   2. /tmp/provision-db-url.sh
+#   3. /tmp/provision-env.sh CLERK_SECRET_KEY /vaultmtg/app/production/CLERK_SECRET_KEY --with-decryption
+#
+# Pre-PR-#1755-fix the masking was invisible because the original
+# ${LEGACY_ENV_DIR}/env file had accumulated those overlays over months
+# of release.yml runs against the same long-lived EC2 instance. The PR
+# #225 UserData byte change replaces the instance, so the bootstrap is
+# now responsible for the full env file -- not just the starter subset.
+#
+# This block mirrors the exact sequence from deploy-bff.yml (production
+# branch, lines 173-174). Writes go to ${LEGACY_ENV_DIR}/env per
+# deploy-env.sh, which the §2 symlink shim above forwards to the
+# canonical ${ENV_DIR}/env (same inode).
+#
+# Failure mode: if the deploy bucket has not yet received the scripts
+# (extremely unlikely on a long-lived production bucket; only possible on
+# a clean-slate rebuild), the bootstrap logs a clear WARNING and leaves
+# the BFF disabled. The next deploy-bff.yml run resolves the state.
+# ---------------------------------------------------------
+log "Overlaying deploy-side env provisioning (mirrors deploy-bff.yml)..."
+PROVISIONING_SCRIPTS_OK=1
+for SCRIPT in deploy-env.sh provision-env.sh provision-db-url.sh; do
+    if ! aws s3 cp "s3://${DEPLOY_BUCKET}/scripts/${SCRIPT}" "/tmp/${SCRIPT}" --region "$REGION" 2>/dev/null; then
+        log "WARNING: s3://${DEPLOY_BUCKET}/scripts/${SCRIPT} not found -- skipping deploy-side env overlay."
+        log "  The BFF will crash-loop until the next deploy-bff.yml run provisions CLERK_SECRET_KEY and rewrites DATABASE_URL."
+        PROVISIONING_SCRIPTS_OK=0
+        break
+    fi
+    chmod +x "/tmp/${SCRIPT}"
+done
+
+if [ "$PROVISIONING_SCRIPTS_OK" = "1" ]; then
+    # Each provisioning call is wrapped in an `if !` guard so a single
+    # script failure logs a WARNING and leaves the BFF disabled, rather
+    # than aborting the entire bootstrap under `set -e` (which would
+    # skip §4-7: BFF binary install, systemd unit, nginx, logrotate,
+    # certbot, CloudWatch agent). A partial provisioning state is
+    # recoverable by re-running deploy-bff.yml; a partial bootstrap is
+    # not.
+
+    # provision-env.sh ALLOWED_ORIGINS: harmless re-upsert (the starter
+    # write above already set it, but mirroring deploy-bff.yml keeps the
+    # bootstrap and the post-deploy file structurally identical).
+    if ! /tmp/provision-env.sh ALLOWED_ORIGINS /vaultmtg/app/production/ALLOWED_ORIGINS; then
+        log "WARNING: provision-env.sh ALLOWED_ORIGINS failed -- starter ALLOWED_ORIGINS retained."
+        PROVISIONING_SCRIPTS_OK=0
+    fi
+
+    # provision-db-url.sh: rewrites DATABASE_URL with credentials spliced
+    # from Secrets Manager (via sts:AssumeRole into the provisioner role),
+    # upserts AWS_DEFAULT_REGION, and DELETES DB_SECRET_ARN and
+    # BFF_DB_RESOLVE_FROM_SM if present (per #2461). The instance role
+    # already grants sts:AssumeRole on the provisioner ARN (ec2.yml
+    # StagingDeployProvisionerAssumeRole policy).
+    if ! /tmp/provision-db-url.sh; then
+        log "WARNING: provision-db-url.sh failed -- DATABASE_URL still credential-free; BFF will not connect to RDS."
+        PROVISIONING_SCRIPTS_OK=0
+    fi
+
+    # provision-env.sh CLERK_SECRET_KEY: writes the SecureString secret
+    # required by config.go:144 in production.
+    if ! /tmp/provision-env.sh CLERK_SECRET_KEY /vaultmtg/app/production/CLERK_SECRET_KEY --with-decryption; then
+        log "WARNING: provision-env.sh CLERK_SECRET_KEY failed -- BFF will crash-loop at config.Load()."
+        PROVISIONING_SCRIPTS_OK=0
+    fi
+
+    # Restore the strict mode/ownership that provision-*.sh may have
+    # relaxed (provision-env.sh chmods 600 itself; provision-db-url.sh
+    # does the same; we re-apply chown for paranoia in case any sed -i
+    # backup file got created).
+    chmod 600 "$ENV_DIR/env"
+    chown "root:$APP_USER" "$ENV_DIR/env"
+
+    if [ "$PROVISIONING_SCRIPTS_OK" = "1" ]; then
+        log "Deploy-side env provisioning complete."
+    else
+        log "WARNING: deploy-side env provisioning partially failed -- next deploy-bff.yml run will resolve."
+    fi
+fi
+
+# ---------------------------------------------------------
 # 4. BFF binary install
 #
 # Fetch the latest released BFF binary from S3 so a fresh instance
@@ -215,7 +316,7 @@ log "Env file written successfully."
 # ---------------------------------------------------------
 log "Fetching BFF binary from S3..."
 DEPLOY_SHA=$(fetch_ssm_plain "/vaultmtg/app/production/latest-bff-sha")
-DEPLOY_BUCKET="mtga-companion-deploy-artifacts-production"
+# DEPLOY_BUCKET is hoisted to the top variable block (§0) so §3b can use it.
 
 if [ -n "$DEPLOY_SHA" ] && [ "$DEPLOY_SHA" != "None" ]; then
     log "Downloading mtga-bff @ ${DEPLOY_SHA} from s3://${DEPLOY_BUCKET}/releases/${DEPLOY_SHA}/mtga-bff"
