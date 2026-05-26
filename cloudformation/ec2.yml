@@ -479,7 +479,7 @@ Resources:
         # (23,742 raw bytes / 31,656 base64 bytes) after #66, #77, and #78 merged.
         Fn::Base64: !Sub |
           #!/bin/bash -xe
-          exec > >(tee /var/log/mtga-companion-setup.log) 2>&1
+          exec > >(tee /var/log/vaultmtg-setup.log) 2>&1
           echo "[userdata-stub] $(date '+%Y-%m-%dT%H:%M:%S') Fetching bootstrap script from S3..."
           aws s3 cp \
             s3://mtga-companion-deploy-artifacts-${Environment}/bootstrap/ec2-bootstrap.sh \

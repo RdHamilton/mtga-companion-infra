@@ -1,5 +1,5 @@
 [Unit]
-Description=MTGA Companion BFF Service
+Description=VaultMTG BFF Service
 After=network-online.target
 Wants=network-online.target
 
@@ -13,9 +13,7 @@ RestartSec=5
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=mtga-bff
-
-# Environment file — populated by setup.sh from Secrets Manager / SSM
-EnvironmentFile=/etc/mtga-companion/env
+EnvironmentFile=/etc/vaultmtg/env
 
 # Hardening
 NoNewPrivileges=true
