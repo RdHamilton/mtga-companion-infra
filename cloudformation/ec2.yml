@@ -188,7 +188,7 @@ Resources:
         # to call SM in steady state. The toggle is retained as an escape
         # hatch for future rotation patterns.
         #
-        # Statement 1 (mtga-companion/staging/*):
+        # Statement 1 (legacy staging SM path; preserved for in-flight staging tickets):
         #   The live consumer is the deploy-time script
         #   scripts/deploy/provision-staging-env.sh, which runs ON this
         #   instance via AWS-RunShellScript (app-repo deploy-bff.yml) and
