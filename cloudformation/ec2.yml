@@ -165,7 +165,12 @@ Resources:
                 Action: sts:AssumeRole
                 Resource: arn:aws:iam::901347789205:role/vaultmtg-staging-deploy-provisioner
         # ---------------------------------------------------------
-        # SecretsManagerStagingDBAccess (#2375).
+        # SecretsManagerStagingDBAccess (#2375, #2634).
+        #
+        # NOTE: Policy name is now misleading -- both staging AND production
+        # secret access live in this policy as of #2634. Rename to
+        # SecretsManagerDBAccess is tracked as a follow-on tech-debt ticket
+        # (deferred because renaming an inline policy is Replacement: True).
         #
         # Scoped down from the former SecretsManagerDBAccess policy, which
         # over-granted secretsmanager:GetSecretValue on (a) the production
@@ -183,20 +188,25 @@ Resources:
         # to call SM in steady state. The toggle is retained as an escape
         # hatch for future rotation patterns.
         #
-        # The live consumer of an instance-role Secrets Manager grant is
-        # still the deploy-time script scripts/deploy/provision-staging-env.sh,
-        # which runs ON this instance via AWS-RunShellScript (app-repo
-        # deploy-bff.yml) and calls secretsmanager:GetSecretValue on the
-        # staging RDS secret to assemble the staging DATABASE_URL.
+        # Statement 1 (mtga-companion/staging/*):
+        #   The live consumer is the deploy-time script
+        #   scripts/deploy/provision-staging-env.sh, which runs ON this
+        #   instance via AWS-RunShellScript (app-repo deploy-bff.yml) and
+        #   calls secretsmanager:GetSecretValue on the staging RDS secret
+        #   to assemble the staging DATABASE_URL. Full removal of this
+        #   statement is gated on the Path B (OIDC) refactor of
+        #   provision-staging-env.sh, which moves the GetSecretValue call
+        #   under the dedicated vaultmtg-staging-deploy-provisioner role
+        #   (vault-mtg#2402). Until #2402 lands, this scoped grant must remain.
         #
-        # Production secret access and the mtga-companion/* wildcard are
-        # therefore removed; the grant is scoped to mtga-companion/staging/*
-        # only — exactly the secret provision-staging-env.sh consumes.
-        #
-        # Full removal of this policy is gated on the Path B (OIDC) refactor
-        # of provision-staging-env.sh, which moves the GetSecretValue call
-        # under the dedicated vaultmtg-staging-deploy-provisioner role
-        # (vault-mtg#2402). Until #2402 lands, this scoped grant must remain.
+        # Statement 2 (vaultmtg-production-app-db-*):
+        #   Added #2634 as a prerequisite for vault-mtg#2583's verification
+        #   path. The BFF runtime path (BFF_DB_RESOLVE_FROM_SM=true escape
+        #   hatch) and #2583's hardened create-production-db.sh verification
+        #   step both need to read the production app DB secret. Suffix
+        #   wildcard matches Secrets Manager's 6-char random secret name
+        #   suffix and tolerates rotation-replacement. Strictly additive --
+        #   no broader namespace wildcard.
         # ---------------------------------------------------------
         - PolicyName: SecretsManagerStagingDBAccess
           PolicyDocument:
@@ -205,6 +215,9 @@ Resources:
               - Effect: Allow
                 Action: secretsmanager:GetSecretValue
                 Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:mtga-companion/staging/*"
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:vaultmtg-production-app-db-*"
         - PolicyName: SSMParameterStoreAccess
           PolicyDocument:
             Version: "2012-10-17"
