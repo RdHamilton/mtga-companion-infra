@@ -145,6 +145,16 @@ Resources:
       StorageEncrypted: true
       MasterUsername: !Ref DBUsername
       ManageMasterUserPassword: true
+      # IAM database authentication is required by the sync Lambda (ADR-003,
+      # ADR-035). Without this flag set on the instance, the rds_iam Postgres
+      # role does not exist and the engine treats inbound IAM tokens as raw
+      # passwords -- producing the SASL "password authentication failed"
+      # error observed against mtga_sync on the live instance prior to this
+      # change. Enabling IAM auth is an online operation (Update requires:
+      # No interruption) and is non-destructive: existing password-auth
+      # connections (vaultmtg_app, mtga_admin) continue to work alongside
+      # token-auth connections from the sync Lambda. See vault-mtg-tickets#37.
+      EnableIAMDatabaseAuthentication: true
       DBSubnetGroupName: !Ref DBSubnetGroup
       VPCSecurityGroups:
         - !Ref RDSSecurityGroup
