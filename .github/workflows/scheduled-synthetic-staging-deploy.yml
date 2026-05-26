@@ -116,7 +116,10 @@ env:
   # present in staging and that gha-infra-cfn-deploy can read via ssm:* on "*".
   # database-url is the simplest stable choice -- present since the staging
   # RDS was provisioned and used by every staging deploy.
-  STAGING_SSM_PROBE_PARAM: /mtga-companion/staging/database-url
+  # Moved from legacy /mtga-companion/staging/database-url to the canonical
+  # /vaultmtg/app/staging/database-url path as a precondition for the
+  # /mtga-companion/* SSM tree deletion (issue #1757).
+  STAGING_SSM_PROBE_PARAM: /vaultmtg/app/staging/database-url
   # SNS topic for failure notifications. ARN is constructed (not exported here)
   # so the workflow does not need cloudformation:ListExports to discover it.
   STAGING_ALERTS_TOPIC_ARN: arn:aws:sns:us-east-1:901347789205:vaultmtg-staging-alerts
