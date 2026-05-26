@@ -358,6 +358,7 @@ jobs:
           echo "✓ Template valid"
 
       - name: Upload bootstrap script (ec2 / ec2-staging stacks only)
+        id: upload_bootstrap
         # Uploads the appropriate bootstrap script (and, for production, the
         # BFF CloudWatch metric installer scripts it invokes) to the artifacts
         # bucket before the ec2 or ec2-staging stack is created/updated. The
@@ -386,6 +387,17 @@ jobs:
             s3://${BOOTSTRAP_BUCKET}/bootstrap/ec2-bootstrap.sh \
             --region us-east-1
           echo "Bootstrap script uploaded to s3://${BOOTSTRAP_BUCKET}/bootstrap/ec2-bootstrap.sh"
+
+          # Bug 3 fix (vault-mtg-tickets#3): compute the SHA-256 of the bootstrap
+          # script and expose it as a step output. The changeset-creation step
+          # below injects this value as the BootstrapSha CloudFormation parameter.
+          # Without this, UserData is content-stable across bootstrap changes
+          # (the UserData stub only references s3://.../bootstrap/ec2-bootstrap.sh
+          # by path) and CFN sees zero drift on AWS::EC2::Instance — the new
+          # bootstrap is uploaded to S3 but the live instance is never replaced.
+          BOOTSTRAP_SHA="$(sha256sum "${BOOTSTRAP_SRC}" | awk '{print $1}')"
+          echo "bootstrap_sha=${BOOTSTRAP_SHA}" >> "$GITHUB_OUTPUT"
+          echo "Bootstrap SHA-256: ${BOOTSTRAP_SHA}"
 
           # Production bootstrap also fetches metric installers from S3 -- upload them
           # alongside. Staging bootstrap does not currently invoke them (the existing
@@ -515,7 +527,30 @@ jobs:
 
             PARAMS_FILE="cloudformation/parameters/${{ inputs.stack }}.json"
             PARAMS_ARG=""
-            [ -f "$PARAMS_FILE" ] && PARAMS_ARG="--parameters file://$PARAMS_FILE"
+
+            # Bug 3 fix (vault-mtg-tickets#3): inject BootstrapSha into the
+            # ec2 / ec2-staging stack parameters so any content change to
+            # scripts/deploy/ec2-bootstrap.sh forces a UserData byte change.
+            # The SHA was computed and uploaded in the "Upload bootstrap script"
+            # step above. We materialise a merged parameters JSON in $RUNNER_TEMP
+            # rather than mutating the source file in the workspace.
+            if [ "${{ inputs.stack }}" = "ec2" ] || [ "${{ inputs.stack }}" = "ec2-staging" ]; then
+              MERGED_PARAMS="${RUNNER_TEMP}/${{ inputs.stack }}-merged-params.json"
+              if [ -f "$PARAMS_FILE" ]; then
+                # Append BootstrapSha (overriding any pre-existing entry).
+                jq --arg sha "${{ steps.upload_bootstrap.outputs.bootstrap_sha }}" \
+                   '[.[] | select(.ParameterKey != "BootstrapSha")] + [{ParameterKey:"BootstrapSha", ParameterValue:$sha}]' \
+                   "$PARAMS_FILE" > "$MERGED_PARAMS"
+              else
+                jq -n --arg sha "${{ steps.upload_bootstrap.outputs.bootstrap_sha }}" \
+                   '[{ParameterKey:"BootstrapSha", ParameterValue:$sha}]' \
+                   > "$MERGED_PARAMS"
+              fi
+              PARAMS_ARG="--parameters file://$MERGED_PARAMS"
+              echo "Injected BootstrapSha=${{ steps.upload_bootstrap.outputs.bootstrap_sha }} into changeset parameters"
+            else
+              [ -f "$PARAMS_FILE" ] && PARAMS_ARG="--parameters file://$PARAMS_FILE"
+            fi
 
             aws cloudformation create-change-set \
               --stack-name "${{ env.STACK_NAME }}" \
