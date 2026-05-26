@@ -57,6 +57,8 @@ Resources:
   # inline rules — see #2534 for the symmetric-refactor history.
   RDSSecurityGroup:
     Type: AWS::EC2::SecurityGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       GroupDescription: Allow PostgreSQL access from EC2 only
       VpcId: !Ref VpcId
@@ -71,6 +73,8 @@ Resources:
   # --- Subnet Group -----------------------------------------------------------
   DBSubnetGroup:
     Type: AWS::RDS::DBSubnetGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       DBSubnetGroupDescription: Private subnets for VaultMTG RDS
       SubnetIds:
@@ -86,6 +90,8 @@ Resources:
   # pgvector must be listed as a shared_preload_library to activate the extension.
   DBParameterGroup:
     Type: AWS::RDS::DBParameterGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       Description: VaultMTG PostgreSQL 15
       Family: postgres15
@@ -110,6 +116,8 @@ Resources:
   # internally by the RDS service, not by a customer-deployed Lambda.
   DBSecretRotationSchedule:
     Type: AWS::SecretsManager::RotationSchedule
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     DependsOn: DBInstance
     Properties:
       SecretId: !GetAtt DBInstance.MasterUserSecret.SecretArn
@@ -119,8 +127,8 @@ Resources:
   # --- RDS Instance -----------------------------------------------------------
   DBInstance:
     Type: AWS::RDS::DBInstance
-    DeletionPolicy: Snapshot   # take a final snapshot on stack deletion
-    UpdateReplacePolicy: Snapshot   # also snapshot if a property change forces replacement
+    DeletionPolicy: Retain   # PR A.5 (#2592): flipped from Snapshot to Retain for the IMPORT-changeset transition
+    UpdateReplacePolicy: Retain   # PR A.5 (#2592): flipped from Snapshot to Retain for the IMPORT-changeset transition
     Properties:
       # DBInstanceIdentifier intentionally retains the legacy name in PR-B
       # (#1759). The live RDS instance was named at create time and cannot be
