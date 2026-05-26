@@ -92,7 +92,6 @@ jobs:
         mtga-companion-ec2-sg
         mtga-companion-iam-gha-roles
         mtga-companion-logs
-        mtga-companion-rds
         mtga-companion-sync-lambda
         mtga-companion-staging-deploy-role
         vaultmtg-app-cdn
