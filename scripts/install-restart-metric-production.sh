@@ -15,10 +15,11 @@
 # BffRestartCountThreshold (default 3).
 #
 # IMPORTANT -- unit name: the production BFF runs as the systemd unit
-# "mtga-companion.service" (binary /usr/local/bin/mtga-bff), created by
-# scripts/deploy/ec2-bootstrap.sh. Issue #2331 referred to it as
-# "vault-mtg-bff.service"; this script tracks the REAL unit name so the
-# metric is not silently always-zero.
+# "vaultmtg-bff.service" (binary /usr/local/bin/mtga-bff), created by
+# scripts/deploy/ec2-bootstrap.sh after the Window B systemd rename (#1755).
+# Pre-Window-B it was "mtga-companion.service"; issue #2331 referred to it
+# as "vault-mtg-bff.service"; this script tracks the REAL post-rename unit
+# name so the metric is not silently always-zero.
 #
 # Prerequisites:
 #   - EC2 IAM role must have cloudwatch:PutMetricData permission (already
@@ -26,7 +27,7 @@
 
 set -euo pipefail
 
-BFF_UNIT="mtga-companion.service"
+BFF_UNIT="vaultmtg-bff.service"
 # Fetch instance metadata via IMDSv2 (token-authenticated). IMDSv1 is disabled
 # on this fleet (ec2.yml MetadataOptions.HttpTokens=required, S-21 / #2358).
 IMDS_TOKEN=$(curl -sX PUT "http://169.254.169.254/latest/api/token" \
@@ -60,7 +61,7 @@ usermod -a -G systemd-journal "$METRIC_USER"
 log "Writing metric script to $METRIC_SCRIPT..."
 cat > "$METRIC_SCRIPT" << SCRIPT
 #!/usr/bin/env bash
-# Counts mtga-companion.service restarts in the past 65 seconds
+# Counts vaultmtg-bff.service restarts in the past 65 seconds
 # (slight overlap to avoid missing restarts at the boundary) and
 # publishes the count to CloudWatch.
 set -euo pipefail

@@ -1,6 +1,6 @@
 # mtga-companion-infra
 
-Infrastructure as Code for MTGA Companion — CloudFormation templates, EC2/RDS setup, nginx config, and deployment scripts.
+Infrastructure as Code for VaultMTG — CloudFormation templates, EC2/RDS setup, nginx config, and deployment scripts. (Repository slug rename to `vaultmtg-infra` is tracked as a follow-on user-action ticket per #1759.)
 
 ## Structure
 
@@ -63,14 +63,14 @@ Route 53 records for `vaultmtg.app` are managed directly in the AWS console — 
 - [ ] VPC + security groups (`cloudformation/vpc.yml`)
 - [x] RDS PostgreSQL db.t3.micro (`cloudformation/rds.yml`) — pgvector-enabled, private subnet only
 - [x] EC2 IAM instance profile + Secrets Manager access (`cloudformation/ec2.yml`) — ready to deploy
-- [ ] nginx + SSL (`nginx/mtga-companion.conf`)
-- [ ] systemd service (`systemd/mtga-companion.service`)
+- [ ] nginx + SSL (`nginx/mtga-companion.conf` -- vhost filename rename deferred per ADR-026 PR Y footnote)
+- [x] systemd service (`systemd/vaultmtg-bff.service`) -- production unit renamed in Window B (#1755); legacy `mtga-companion.service` removed
 - [ ] GitHub Actions deploy step
 
 ## Frontend Serving
 
 Production frontend is served by **Vercel** -- see ADR-007 in the main app repo (RdHamilton/MTGA-Companion).
 
-The EC2 nginx static-serve path (`/var/www/mtga-companion/`) is preserved for disaster recovery and preview only. There is intentionally no automatic frontend deploy workflow in this repo. The EC2 frontend deploy workflow lives in the app repo (`.github/workflows/frontend.yml`) and is `workflow_dispatch`-only.
+The EC2 nginx static-serve path (`/var/www/vaultmtg/`, with a `/var/www/mtga-companion -> /var/www/vaultmtg` compat symlink installed by `ec2-bootstrap.sh` during the Window B soak) is preserved for disaster recovery and preview only. There is intentionally no automatic frontend deploy workflow in this repo. The EC2 frontend deploy workflow lives in the app repo (`.github/workflows/frontend.yml`) and is `workflow_dispatch`-only.
 
 A duplicate `deploy-frontend.yml` that existed in this repo was removed in PR #18 (closes RdHamilton/MTGA-Companion#1211).

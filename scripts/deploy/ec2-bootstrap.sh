@@ -1,7 +1,7 @@
 #!/bin/bash
 # ec2-bootstrap.sh — Bootstrap script for VaultMTG EC2 instance (Amazon Linux 2023).
 # Runs once at instance launch via CloudFormation UserData stub.
-# All output logged to /var/log/mtga-companion-setup.log.
+# All output logged to /var/log/vaultmtg-setup.log.
 #
 # This script is stored in S3 and fetched by the inline UserData stub:
 #   s3://mtga-companion-deploy-artifacts-production/bootstrap/ec2-bootstrap.sh
@@ -10,20 +10,44 @@
 # Covers: BFF install, CloudWatch Agent config, certbot systemd timer,
 #         staging BFF unit install, env provisioning, nginx config.
 # Tickets: #66 (CloudWatch Agent), #77 (certbot timer), #78 (staging BFF unit),
-#          #2459 (externalize to S3 — under 16 KiB UserData limit).
+#          #2459 (externalize to S3 — under 16 KiB UserData limit),
+#          #1755 (Window B: systemd unit + filesystem rename to vaultmtg-bff).
 #
 # Shell options: errexit + pipefail, no xtrace.
 # xtrace (-x) was removed because it echoes every command and its expanded
 # arguments to stderr, which means decrypted SSM secret values (DAEMON_JWT_SECRET,
-# DB_SECRET_ARN, etc.) end up in /var/log/mtga-companion-setup.log. The explicit
+# DB_SECRET_ARN, etc.) end up in /var/log/vaultmtg-setup.log. The explicit
 # log() calls below are sufficient for operational tracing.
+#
+# Window B (#1755) systemd + filesystem cutover:
+#   - Production BFF unit: mtga-companion.service -> vaultmtg-bff.service.
+#   - Config dir:          /etc/mtga-companion    -> /etc/vaultmtg.
+#   - Web root:            /var/www/mtga-companion -> /var/www/vaultmtg.
+#   - Setup log:           /var/log/mtga-companion-setup.log -> /var/log/vaultmtg-setup.log.
+#   - Logrotate file:      /etc/logrotate.d/mtga-companion -> /etc/logrotate.d/vaultmtg-bff.
+#   - Binary file name (/usr/local/bin/mtga-bff) is intentionally UNCHANGED.
+#     The systemd unit name and the ExecStart binary file name are decoupled;
+#     renaming the binary cascades through 6 workflows (release.yml, ci.yml,
+#     staging-deploy.yml, e2e-smoke.yml, deploy-bff.yml, stage-binary*.sh) and
+#     is tracked as a follow-on ticket.
+#   - APP_USER (mtga-companion) is also intentionally UNCHANGED. Renaming the
+#     system user cascades through logrotate `su` directives and S3 deploy
+#     artifact ownership; tracked as a separate follow-on ticket.
+#   - Staging unit (vault-mtg-bff-staging.service) and staging paths
+#     (/etc/mtga-companion-staging, /var/log/vault-mtg-bff-staging) are
+#     out of scope for Window B per the plan.
+#   - A compatibility symlink shim is installed on first boot:
+#       /etc/mtga-companion    -> /etc/vaultmtg
+#       /var/www/mtga-companion -> /var/www/vaultmtg
+#     so any stale tooling that still resolves the legacy paths keeps working
+#     through the soak window. The shims are removed in a follow-on cleanup.
 set -e
 set -o pipefail
-exec > >(tee /var/log/mtga-companion-setup.log) 2>&1
+exec > >(tee /var/log/vaultmtg-setup.log) 2>&1
 
 APP_USER="mtga-companion"
 BINARY_PATH="/usr/local/bin/mtga-bff"
-ENV_DIR="/etc/mtga-companion"
+ENV_DIR="/etc/vaultmtg"
 REGION="${AWS_DEFAULT_REGION:-us-east-1}"
 
 log() { echo "[setup] $(date '+%Y-%m-%dT%H:%M:%S') $*"; }
@@ -106,6 +130,17 @@ id "$APP_USER" &>/dev/null || useradd --system --no-create-home --shell /sbin/no
 mkdir -p "$(dirname "$BINARY_PATH")" "$ENV_DIR"
 chmod 750 "$ENV_DIR"
 
+# Window B (#1755) compatibility shim: any stale tooling that still references
+# the legacy /etc/mtga-companion path resolves through this symlink to the new
+# canonical /etc/vaultmtg directory. The shim is created only when the legacy
+# path is absent so we never clobber a real directory on an upgrade in place.
+# Removed in a follow-on cleanup once the soak window confirms no consumer is
+# still touching the legacy path.
+if [ ! -e /etc/mtga-companion ]; then
+    ln -sfn /etc/vaultmtg /etc/mtga-companion
+    log "Installed compatibility symlink: /etc/mtga-companion -> /etc/vaultmtg"
+fi
+
 # ---------------------------------------------------------
 # 3. Environment file from SSM
 #
@@ -180,11 +215,18 @@ fi
 
 # ---------------------------------------------------------
 # 5. systemd service
+#
+# Window B (#1755): unit name is "vaultmtg-bff.service". The legacy unit
+# "mtga-companion.service" is NOT written by this bootstrap; CFN UserData
+# change triggers an instance replacement, so the new instance never had
+# the legacy unit in the first place. EnvironmentFile reads from the new
+# canonical path /etc/vaultmtg/env. The binary file remains /usr/local/bin/mtga-bff
+# (binary rename is out of scope -- see header).
 # ---------------------------------------------------------
 log "Installing systemd service..."
-cat > /etc/systemd/system/mtga-companion.service <<'UNIT'
+cat > /etc/systemd/system/vaultmtg-bff.service <<'UNIT'
 [Unit]
-Description=MTGA Companion BFF Service
+Description=VaultMTG BFF Service
 After=network-online.target
 Wants=network-online.target
 
@@ -198,7 +240,7 @@ RestartSec=5
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=mtga-bff
-EnvironmentFile=/etc/mtga-companion/env
+EnvironmentFile=/etc/vaultmtg/env
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
@@ -208,13 +250,13 @@ WantedBy=multi-user.target
 UNIT
 
 systemctl daemon-reload
-systemctl enable mtga-companion
+systemctl enable vaultmtg-bff
 
 if [ -f "$BINARY_PATH" ]; then
-    log "Starting mtga-companion service..."
-    systemctl start mtga-companion
-    systemctl is-active mtga-companion && log "mtga-companion started successfully." || \
-        log "WARNING: mtga-companion failed to start. Check: journalctl -u mtga-companion"
+    log "Starting vaultmtg-bff service..."
+    systemctl start vaultmtg-bff
+    systemctl is-active vaultmtg-bff && log "vaultmtg-bff started successfully." || \
+        log "WARNING: vaultmtg-bff failed to start. Check: journalctl -u vaultmtg-bff"
 else
     log "Skipping service start -- binary not present (pending first CI deploy)."
 fi
@@ -319,7 +361,7 @@ server {
         access_log off;
     }
 
-    root /var/www/mtga-companion;
+    root /var/www/vaultmtg;
     index index.html;
 
     location / {
@@ -333,8 +375,15 @@ server {
 NGINX
 
 rm -f /etc/nginx/conf.d/default.conf
-mkdir -p /var/www/mtga-companion /var/www/certbot
-chown -R nginx:nginx /var/www/mtga-companion /var/www/certbot
+mkdir -p /var/www/vaultmtg /var/www/certbot
+chown -R nginx:nginx /var/www/vaultmtg /var/www/certbot
+
+# Window B (#1755) compatibility shim for the web root. See the /etc/vaultmtg
+# shim above for rationale.
+if [ ! -e /var/www/mtga-companion ]; then
+    ln -sfn /var/www/vaultmtg /var/www/mtga-companion
+    log "Installed compatibility symlink: /var/www/mtga-companion -> /var/www/vaultmtg"
+fi
 
 # Staging nginx vhost — HTTP-only block at bootstrap time.
 # certbot --expand adds the HTTPS block once DNS propagates.
@@ -367,8 +416,15 @@ systemctl start nginx
 # 7. Log rotation
 # ---------------------------------------------------------
 log "Configuring logrotate..."
-cat > /etc/logrotate.d/mtga-companion <<'LOGROTATE'
-/var/log/mtga-companion/*.log {
+# Window B (#1755): merged the legacy /etc/logrotate.d/mtga-companion and
+# /etc/logrotate.d/mtga-bff rules into a single /etc/logrotate.d/vaultmtg-bff
+# file. The first block rotates the (nominal) BFF unit log dir and HUPs the
+# renamed vaultmtg-bff systemd unit; the second block rotates the rsyslog
+# destination file /var/log/mtga-bff/*.log (the binary file name stays
+# mtga-bff -- see header for binary-rename deferral rationale) and HUPs
+# rsyslog. Two blocks, one file.
+cat > /etc/logrotate.d/vaultmtg-bff <<'LOGROTATE'
+/var/log/vaultmtg/*.log {
     daily
     rotate 14
     compress
@@ -377,12 +433,10 @@ cat > /etc/logrotate.d/mtga-companion <<'LOGROTATE'
     notifempty
     sharedscripts
     postrotate
-        systemctl kill -s HUP mtga-companion || true
+        systemctl kill -s HUP vaultmtg-bff || true
     endscript
 }
-LOGROTATE
 
-cat > /etc/logrotate.d/mtga-bff <<'LOGROTATE'
 /var/log/mtga-bff/*.log {
     daily
     rotate 14
