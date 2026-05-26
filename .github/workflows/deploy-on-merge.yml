@@ -114,7 +114,28 @@ jobs:
           # Templates we deliberately ignore on path triggers — log them but
           # do not dispatch. If you genuinely need a re-import, run deploy.yml
           # manually with the *-import stack input.
-          IGNORE_TEMPLATES=(vaultmtg-security-services-import.yml)
+          IGNORE_TEMPLATES=(
+            vaultmtg-security-services-import.yml
+            # rds.yml — legacy stack is DRIFTED post-Window A (DBInstance
+            # escaped during the 5e rename; the mtga-companion-rds stack now
+            # thinks its DBInstance is DELETED). An auto-deploy of current
+            # rds.yml against that drifted state would attempt CREATE on the
+            # missing DBInstance and produce a duplicate mtga-companion-postgres
+            # with the same identifier but a different endpoint and zero data.
+            # The STACK_MAP entry for rds.yml is intentionally retained as a
+            # record; this IGNORE entry suppresses the dispatch. Remove this
+            # line when PR C ships (#2592 final cleanup: rds.yml deleted from
+            # the repo + mtga-companion-rds stack deleted).
+            rds.yml
+            # rds-vaultmtg.yml — new IMPORT template added in PR #219. The
+            # vaultmtg-rds stack does not yet exist; an auto-deploy would
+            # attempt a normal CREATE rather than the IMPORT changeset that
+            # Phase 2 of #2592 requires to adopt the live DBInstance without
+            # data loss. Switch this entry to a STACK_MAP mapping
+            # [rds-vaultmtg.yml]="rds-vaultmtg" once the IMPORT changeset has
+            # been executed manually in Phase 2 of #2592.
+            rds-vaultmtg.yml
+          )
 
           # Collect unique stacks to dispatch (a single push can change multiple
           # templates; dedupe so we never fire two parallel deploys for one stack).
