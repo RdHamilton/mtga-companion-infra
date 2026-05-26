@@ -61,6 +61,33 @@ Parameters:
     Description: |
       Number of visible messages in the DLQ that triggers the SyncDLQDepthAlarm.
       Default 1 means any message landing in the DLQ fires the alarm.
+  # ---------------------------------------------------------
+  # Sync Lambda runtime environment variables (ADR-035)
+  #
+  # Per ADR-035, this CloudFormation template is the single
+  # source-of-record for the sync Lambda's Environment.Variables.
+  # SSM paths are resolved declaratively at stack-update time
+  # via CFN-native '{{resolve:ssm:...}}' dynamic references.
+  # AWS_REGION is intentionally NOT declared here -- the Lambda
+  # runtime auto-populates it. LAMBDA_LOCAL_DSN is a local-dev
+  # override and is FORBIDDEN in production.
+  # ---------------------------------------------------------
+  DbEndpointSsmPath:
+    Type: String
+    Default: /vaultmtg/app/production/db-endpoint
+    Description: SSM Parameter Store path that holds the RDS endpoint hostname (resolved at stack-update time into DB_HOST).
+  DbNameSsmPath:
+    Type: String
+    Default: /vaultmtg/app/production/db-name
+    Description: SSM Parameter Store path that holds the PostgreSQL database name (resolved at stack-update time into DB_NAME).
+  DbUser:
+    Type: String
+    Default: mtga_sync
+    Description: PostgreSQL role the sync Lambda authenticates as via RDS IAM auth (DB_USER). Pinned to the role granted rds-db:connect in LambdaExecutionRole.
+  DbPort:
+    Type: String
+    Default: '5432'
+    Description: PostgreSQL port the sync Lambda connects to (DB_PORT).
 
 Resources:
 
@@ -179,7 +206,11 @@ Resources:
                       return
                   waiter = client.get_waiter('function_updated')
                   waiter.wait(FunctionName=props['FunctionName'])
-                  client.update_function_configuration(
+                  # Per ADR-035, this custom resource is the single source-of-record
+                  # for Environment.Variables on the sync Lambda. When the template
+                  # supplies EnvironmentVariables, pass it through; when absent, omit
+                  # the Environment kwarg so the call is a no-op on that field.
+                  kwargs = dict(
                       FunctionName=props['FunctionName'],
                       VpcConfig={
                           'SubnetIds': props['SubnetIds'],
@@ -189,6 +220,10 @@ Resources:
                       Timeout=int(props['Timeout']),
                       MemorySize=int(props['MemorySize']),
                   )
+                  env_vars = props.get('EnvironmentVariables')
+                  if env_vars:
+                      kwargs['Environment'] = {'Variables': dict(env_vars)}
+                  client.update_function_configuration(**kwargs)
                   waiter.wait(FunctionName=props['FunctionName'])
                   send(event, context, 'SUCCESS')
               except Exception as e:
@@ -255,6 +290,16 @@ Resources:
       ExecutionRoleArn: !GetAtt LambdaExecutionRole.Arn
       Timeout: !Ref LambdaTimeout
       MemorySize: !Ref LambdaMemorySize
+      # Per ADR-035, the CFN template is the source-of-record for the sync
+      # Lambda's Environment.Variables. SSM-backed values are resolved at
+      # stack-update time via CFN-native dynamic references. Literal values
+      # (DB_USER, DB_PORT) come from template parameters. AWS_REGION is
+      # auto-injected by the Lambda runtime and is intentionally omitted.
+      EnvironmentVariables:
+        DB_HOST: !Sub '{{resolve:ssm:${DbEndpointSsmPath}}}'
+        DB_NAME: !Sub '{{resolve:ssm:${DbNameSsmPath}}}'
+        DB_USER: !Ref DbUser
+        DB_PORT: !Ref DbPort
 
   # EventBridge Scheduler execution role
   SchedulerExecutionRole:

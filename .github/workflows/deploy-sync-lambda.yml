@@ -158,6 +158,11 @@ jobs:
         # drift event or out-of-band change cannot silently revert these values.
         # The 3-second AWS default timeout causes every sync run to fail (runs
         # take >10s); this step ensures the correct values are always in place.
+        #
+        # Per ADR-035, this step intentionally does NOT touch Environment.Variables --
+        # that contract is owned by cloudformation/sync-lambda.yml (the CFN custom
+        # resource LambdaVpcConfigCustomResource is the single source-of-record).
+        # Do not add --environment here without superseding ADR-035.
         if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.dry_run) }}
         run: |
           echo "Applying Timeout=300 and MemorySize=256 to ${{ env.LAMBDA_FUNCTION_NAME }}..."
