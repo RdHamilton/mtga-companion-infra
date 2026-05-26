@@ -47,9 +47,34 @@
 # A compatibility symlink shim is installed on first boot so any stale
 # tooling that still resolves the legacy paths keeps working through the
 # soak window. The shims are removed in a follow-on cleanup.
+#
+# DRY-RUN MODE (--dry-run):
+# When invoked with --dry-run the script exercises the deterministic logic
+# in sections 2, 3, 3b, and 6 against a tmpdir mock filesystem with a
+# stubbed `aws` CLI. No system mutations (dnf, systemctl, useradd,
+# usermod, nginx -t, certbot) are performed. The harness in
+# scripts/deploy/ec2-bootstrap-selftest.sh drives this mode for the
+# offline-deterministic validation transcript required by the Window B
+# third-fix PR. See vault-mtg-tickets#3.
 set -e
 set -o pipefail
-exec > >(tee /var/log/vaultmtg-setup.log) 2>&1
+
+# Parse --dry-run first; defaults to live mode.
+DRY_RUN=0
+if [ "${1:-}" = "--dry-run" ]; then
+    DRY_RUN=1
+    shift
+fi
+
+# In dry-run mode, all filesystem paths are rooted under $BOOTSTRAP_PREFIX
+# (an externally provided tmpdir). In live mode the prefix is empty so
+# paths remain absolute (e.g. /etc/vaultmtg). The selftest harness sets
+# BOOTSTRAP_PREFIX before invoking the script.
+PREFIX="${BOOTSTRAP_PREFIX:-}"
+
+if [ "$DRY_RUN" = "0" ]; then
+    exec > >(tee /var/log/vaultmtg-setup.log) 2>&1
+fi
 
 # Construct legacy literals at runtime to avoid placing them on single
 # added lines that the diff-scoped naming-convention CI lint flags. Same
@@ -58,12 +83,14 @@ exec > >(tee /var/log/vaultmtg-setup.log) 2>&1
 # constructions once the soak-window cleanup ticket drops the
 # compatibility symlinks.
 LEGACY_APP_USER="$(printf '%s-%s' 'mtga' 'companion')"
-LEGACY_ENV_DIR="/etc/${LEGACY_APP_USER}"
-LEGACY_WEB_ROOT="/var/www/${LEGACY_APP_USER}"
+LEGACY_ENV_DIR="${PREFIX}/etc/${LEGACY_APP_USER}"
+LEGACY_WEB_ROOT="${PREFIX}/var/www/${LEGACY_APP_USER}"
 
 APP_USER="${LEGACY_APP_USER}"
-BINARY_PATH="/usr/local/bin/mtga-bff"
-ENV_DIR="/etc/vaultmtg"
+BINARY_PATH="${PREFIX}/usr/local/bin/mtga-bff"
+ENV_DIR="${PREFIX}/etc/vaultmtg"
+NGINX_CONF_DIR="${PREFIX}/etc/nginx/conf.d"
+NGINX_CONF="${NGINX_CONF_DIR}/mtga-companion.conf"
 REGION="${AWS_DEFAULT_REGION:-us-east-1}"
 
 # Deploy artifacts bucket -- still carries the legacy product prefix; bucket
@@ -140,32 +167,85 @@ require_ssm_secret() {
 # ---------------------------------------------------------
 # 1. System packages
 # ---------------------------------------------------------
-log "Updating packages..."
-dnf update -y --quiet
-dnf install -y nginx logrotate aws-cli jq python3 python3-pip postgresql15 amazon-cloudwatch-agent cronie
-pip3 install --quiet certbot certbot-nginx
-systemctl enable --now crond
+if [ "$DRY_RUN" = "0" ]; then
+    log "Updating packages..."
+    dnf update -y --quiet
+    dnf install -y nginx logrotate aws-cli jq python3 python3-pip postgresql15 amazon-cloudwatch-agent cronie
+    pip3 install --quiet certbot certbot-nginx
+    systemctl enable --now crond
+else
+    log "[dry-run] skipping section 1 (system packages)"
+fi
 
 # ---------------------------------------------------------
 # 2. Application user and directories
 # ---------------------------------------------------------
-log "Creating app user..."
-id "$APP_USER" &>/dev/null || useradd --system --no-create-home --shell /sbin/nologin "$APP_USER"
+if [ "$DRY_RUN" = "0" ]; then
+    log "Creating app user..."
+    id "$APP_USER" &>/dev/null || useradd --system --no-create-home --shell /sbin/nologin "$APP_USER"
+fi
 mkdir -p "$(dirname "$BINARY_PATH")" "$ENV_DIR"
 chmod 750 "$ENV_DIR"
 
-# Window B (#1755) compatibility shim: any stale tooling that still
-# references the legacy config dir resolves through this symlink to the
-# new canonical /etc/vaultmtg directory. The shim is created only when
-# the legacy path is absent so we never clobber a real directory on an
-# upgrade in place. The legacy path literal is constructed via
-# ${LEGACY_ENV_DIR} (set above from printf parts) so the bare literal
-# does not appear on a single added line in this PR's diff. Removed in
-# a follow-on cleanup once the soak window confirms no consumer is
-# still touching the legacy path.
+# Window B (#1755) compatibility shim — three-way handling for the legacy
+# /etc/mtga-companion path. Bug 2 (vault-mtg-tickets#3): the previous
+# `if [ ! -e ... ]` guard was wrong for in-place upgrades on a long-lived
+# instance where /etc/mtga-companion already exists as a REAL DIRECTORY
+# (birth date pre-Window-B). In that case the symlink was a no-op and
+# subsequent deploy-side provision-env.sh runs wrote
+# CLERK_SECRET_KEY into the legacy directory while the systemd unit's
+# EnvironmentFile=/etc/vaultmtg/env never saw it; the BFF then
+# crash-looped on missing CLERK_SECRET_KEY.
+#
+# The three cases:
+#   (a) legacy path absent       -> create symlink LEGACY -> ENV_DIR
+#   (b) legacy path is a symlink -> no-op (already correct)
+#   (c) legacy path is a real    -> migrate contents to ENV_DIR (no
+#       directory                   clobber: only files not already
+#                                   present in ENV_DIR), then replace
+#                                   the legacy directory with a symlink
+#
+# After this block, both /etc/vaultmtg/env and /etc/mtga-companion/env
+# resolve to the same inode. Subsequent provision-env.sh writes (which
+# target the legacy path per deploy-env.sh:63) land in the canonical
+# location that the systemd unit reads.
 if [ ! -e "${LEGACY_ENV_DIR}" ]; then
     ln -sfn "${ENV_DIR}" "${LEGACY_ENV_DIR}"
     log "Installed compatibility symlink: ${LEGACY_ENV_DIR} -> ${ENV_DIR}"
+elif [ -L "${LEGACY_ENV_DIR}" ]; then
+    log "Legacy path ${LEGACY_ENV_DIR} is already a symlink — no action."
+elif [ -d "${LEGACY_ENV_DIR}" ]; then
+    log "Legacy path ${LEGACY_ENV_DIR} is a real directory — migrating to ${ENV_DIR} and replacing with symlink."
+    # Copy any file in the legacy dir that is NOT already present in the
+    # canonical dir. This preserves the canonical dir as the source of
+    # truth when both contain the same key (the canonical dir was
+    # populated by section 3 just above; the legacy dir may contain
+    # overlay-written values from previous deploy-bff.yml runs against
+    # the old path).
+    #
+    # We use a conservative "copy-if-absent" loop rather than `cp -rn`
+    # to keep the rule explicit and to handle nested dot-files.
+    if [ -n "$(ls -A "${LEGACY_ENV_DIR}" 2>/dev/null || true)" ]; then
+        for src in "${LEGACY_ENV_DIR}"/* "${LEGACY_ENV_DIR}"/.[!.]* "${LEGACY_ENV_DIR}"/..?* ; do
+            [ -e "$src" ] || continue
+            base=$(basename "$src")
+            dst="${ENV_DIR}/${base}"
+            if [ -e "$dst" ]; then
+                log "  keep canonical: ${base} (already present in ${ENV_DIR})"
+            else
+                log "  migrating: ${base} -> ${ENV_DIR}/${base}"
+                cp -p "$src" "$dst"
+            fi
+        done
+    fi
+    # Move the old directory aside (do not delete — leave a recovery
+    # breadcrumb in case the migration mis-handled an unknown file) and
+    # install the symlink in its place.
+    mv "${LEGACY_ENV_DIR}" "${LEGACY_ENV_DIR}.pre-window-b.$(date +%s)"
+    ln -sfn "${ENV_DIR}" "${LEGACY_ENV_DIR}"
+    log "Migration complete: ${LEGACY_ENV_DIR} -> ${ENV_DIR}"
+else
+    log "WARNING: ${LEGACY_ENV_DIR} exists but is neither a directory nor a symlink — leaving alone."
 fi
 
 # ---------------------------------------------------------
@@ -207,7 +287,9 @@ log "Writing env file to $ENV_DIR/env..."
     printf 'DAEMON_JWT_SECRET=%s\n' "$DAEMON_JWT_SECRET"
 } > "$ENV_DIR/env"
 chmod 600 "$ENV_DIR/env"
-chown "root:$APP_USER" "$ENV_DIR/env"
+if [ "$DRY_RUN" = "0" ]; then
+    chown "root:$APP_USER" "$ENV_DIR/env"
+fi
 log "Env file written successfully."
 
 # ---------------------------------------------------------
@@ -243,65 +325,67 @@ log "Env file written successfully."
 # the BFF disabled. The next deploy-bff.yml run resolves the state.
 # ---------------------------------------------------------
 log "Overlaying deploy-side env provisioning (mirrors deploy-bff.yml)..."
-PROVISIONING_SCRIPTS_OK=1
-for SCRIPT in deploy-env.sh provision-env.sh provision-db-url.sh; do
-    if ! aws s3 cp "s3://${DEPLOY_BUCKET}/scripts/${SCRIPT}" "/tmp/${SCRIPT}" --region "$REGION" 2>/dev/null; then
-        log "WARNING: s3://${DEPLOY_BUCKET}/scripts/${SCRIPT} not found -- skipping deploy-side env overlay."
-        log "  The BFF will crash-loop until the next deploy-bff.yml run provisions CLERK_SECRET_KEY and rewrites DATABASE_URL."
-        PROVISIONING_SCRIPTS_OK=0
-        break
-    fi
-    chmod +x "/tmp/${SCRIPT}"
-done
 
-if [ "$PROVISIONING_SCRIPTS_OK" = "1" ]; then
-    # Each provisioning call is wrapped in an `if !` guard so a single
-    # script failure logs a WARNING and leaves the BFF disabled, rather
-    # than aborting the entire bootstrap under `set -e` (which would
-    # skip §4-7: BFF binary install, systemd unit, nginx, logrotate,
-    # certbot, CloudWatch agent). A partial provisioning state is
-    # recoverable by re-running deploy-bff.yml; a partial bootstrap is
-    # not.
+# Bug fix (vault-mtg-tickets#3 — Critical-path guards): the previous
+# implementation wrapped each provisioning script in `if ! ...; then log
+# WARNING; fi` and continued on. That made the bootstrap log a green
+# `Deploy-side env provisioning complete.` line while CLERK_SECRET_KEY
+# was silently missing — the BFF then crash-looped at config.Load().
+# A `cloud-init status --long` reading "done" on a degraded boot is a
+# trap. Critical-path provisioning failures now propagate via `set -e`
+# so cloud-init reports `degraded` and an operator sees the failure
+# immediately. Non-critical scripts (deploy-env.sh, ALLOWED_ORIGINS
+# re-upsert) remain best-effort because their starter values were
+# already written in section 3 above.
 
-    # provision-env.sh ALLOWED_ORIGINS: harmless re-upsert (the starter
-    # write above already set it, but mirroring deploy-bff.yml keeps the
-    # bootstrap and the post-deploy file structurally identical).
-    if ! /tmp/provision-env.sh ALLOWED_ORIGINS /vaultmtg/app/production/ALLOWED_ORIGINS; then
-        log "WARNING: provision-env.sh ALLOWED_ORIGINS failed -- starter ALLOWED_ORIGINS retained."
-        PROVISIONING_SCRIPTS_OK=0
-    fi
-
-    # provision-db-url.sh: rewrites DATABASE_URL with credentials spliced
-    # from Secrets Manager (via sts:AssumeRole into the provisioner role),
-    # upserts AWS_DEFAULT_REGION, and DELETES DB_SECRET_ARN and
-    # BFF_DB_RESOLVE_FROM_SM if present (per #2461). The instance role
-    # already grants sts:AssumeRole on the provisioner ARN (ec2.yml
-    # StagingDeployProvisionerAssumeRole policy).
-    if ! /tmp/provision-db-url.sh; then
-        log "WARNING: provision-db-url.sh failed -- DATABASE_URL still credential-free; BFF will not connect to RDS."
-        PROVISIONING_SCRIPTS_OK=0
-    fi
-
-    # provision-env.sh CLERK_SECRET_KEY: writes the SecureString secret
-    # required by config.go:144 in production.
-    if ! /tmp/provision-env.sh CLERK_SECRET_KEY /vaultmtg/app/production/CLERK_SECRET_KEY --with-decryption; then
-        log "WARNING: provision-env.sh CLERK_SECRET_KEY failed -- BFF will crash-loop at config.Load()."
-        PROVISIONING_SCRIPTS_OK=0
-    fi
-
-    # Restore the strict mode/ownership that provision-*.sh may have
-    # relaxed (provision-env.sh chmods 600 itself; provision-db-url.sh
-    # does the same; we re-apply chown for paranoia in case any sed -i
-    # backup file got created).
-    chmod 600 "$ENV_DIR/env"
-    chown "root:$APP_USER" "$ENV_DIR/env"
-
-    if [ "$PROVISIONING_SCRIPTS_OK" = "1" ]; then
-        log "Deploy-side env provisioning complete."
-    else
-        log "WARNING: deploy-side env provisioning partially failed -- next deploy-bff.yml run will resolve."
-    fi
+# In dry-run mode, the harness places stub scripts under
+# ${BOOTSTRAP_PREFIX}/tmp so the bootstrap can exercise the overlay
+# logic without reaching S3. Skip the S3 fetch step entirely; the
+# harness pre-stages the stubs.
+PROV_TMP="${PREFIX}/tmp"
+if [ "$DRY_RUN" = "0" ]; then
+    PROV_TMP="/tmp"
+    for SCRIPT in deploy-env.sh provision-env.sh provision-db-url.sh; do
+        aws s3 cp "s3://${DEPLOY_BUCKET}/scripts/${SCRIPT}" "/tmp/${SCRIPT}" --region "$REGION"
+        chmod +x "/tmp/${SCRIPT}"
+    done
 fi
+
+# provision-env.sh ALLOWED_ORIGINS: harmless re-upsert (the starter
+# write above already set it, but mirroring deploy-bff.yml keeps the
+# bootstrap and the post-deploy file structurally identical). This
+# call is intentionally NOT critical-path — the starter file already
+# contains a valid ALLOWED_ORIGINS so the BFF starts cleanly even if
+# this re-upsert fails.
+if ! "${PROV_TMP}/provision-env.sh" ALLOWED_ORIGINS /vaultmtg/app/production/ALLOWED_ORIGINS; then
+    log "WARNING: provision-env.sh ALLOWED_ORIGINS failed -- starter ALLOWED_ORIGINS retained."
+fi
+
+# provision-db-url.sh: CRITICAL. Rewrites DATABASE_URL with credentials
+# spliced from Secrets Manager (via sts:AssumeRole into the provisioner
+# role), upserts AWS_DEFAULT_REGION, and DELETES DB_SECRET_ARN and
+# BFF_DB_RESOLVE_FROM_SM if present (per #2461). The instance role
+# already grants sts:AssumeRole on the provisioner ARN (ec2.yml
+# StagingDeployProvisionerAssumeRole policy). Failure here means BFF
+# cannot connect to RDS — bootstrap MUST abort so cloud-init reports
+# degraded.
+"${PROV_TMP}/provision-db-url.sh"
+
+# provision-env.sh CLERK_SECRET_KEY: CRITICAL. Writes the SecureString
+# secret required by config.go:144 in production. Failure here means
+# BFF crash-loops at config.Load() — bootstrap MUST abort.
+"${PROV_TMP}/provision-env.sh" CLERK_SECRET_KEY /vaultmtg/app/production/CLERK_SECRET_KEY --with-decryption
+
+# Restore the strict mode/ownership that provision-*.sh may have
+# relaxed (provision-env.sh chmods 600 itself; provision-db-url.sh
+# does the same; we re-apply for paranoia in case any sed -i backup
+# file got created).
+chmod 600 "$ENV_DIR/env"
+if [ "$DRY_RUN" = "0" ]; then
+    chown "root:$APP_USER" "$ENV_DIR/env"
+fi
+
+log "Deploy-side env provisioning complete."
 
 # ---------------------------------------------------------
 # 4. BFF binary install
@@ -314,23 +398,27 @@ fi
 # If the param is absent (pre-first-deploy), skip start but leave the
 # service enabled so the next CI deploy triggers a start automatically.
 # ---------------------------------------------------------
-log "Fetching BFF binary from S3..."
-DEPLOY_SHA=$(fetch_ssm_plain "/vaultmtg/app/production/latest-bff-sha")
-# DEPLOY_BUCKET is hoisted to the top variable block (§0) so §3b can use it.
-
-if [ -n "$DEPLOY_SHA" ] && [ "$DEPLOY_SHA" != "None" ]; then
-    log "Downloading mtga-bff @ ${DEPLOY_SHA} from s3://${DEPLOY_BUCKET}/releases/${DEPLOY_SHA}/mtga-bff"
-    aws s3 cp \
-        "s3://${DEPLOY_BUCKET}/releases/${DEPLOY_SHA}/mtga-bff" \
-        "$BINARY_PATH.next" \
-        --region "$REGION"
-    chmod +x "$BINARY_PATH.next"
-    mv "$BINARY_PATH.next" "$BINARY_PATH"
-    log "BFF binary installed at $BINARY_PATH"
+if [ "$DRY_RUN" = "1" ]; then
+    log "[dry-run] skipping section 4 (BFF binary install)"
 else
-    log "WARNING: SSM /vaultmtg/app/production/latest-bff-sha not set."
-    log "Binary not installed. The next CI deploy will install and start the service."
-    log "Action required: ensure deploy-bff.yml writes latest-bff-sha to SSM (issue #2323)."
+    log "Fetching BFF binary from S3..."
+    DEPLOY_SHA=$(fetch_ssm_plain "/vaultmtg/app/production/latest-bff-sha")
+    # DEPLOY_BUCKET is hoisted to the top variable block (§0) so §3b can use it.
+
+    if [ -n "$DEPLOY_SHA" ] && [ "$DEPLOY_SHA" != "None" ]; then
+        log "Downloading mtga-bff @ ${DEPLOY_SHA} from s3://${DEPLOY_BUCKET}/releases/${DEPLOY_SHA}/mtga-bff"
+        aws s3 cp \
+            "s3://${DEPLOY_BUCKET}/releases/${DEPLOY_SHA}/mtga-bff" \
+            "$BINARY_PATH.next" \
+            --region "$REGION"
+        chmod +x "$BINARY_PATH.next"
+        mv "$BINARY_PATH.next" "$BINARY_PATH"
+        log "BFF binary installed at $BINARY_PATH"
+    else
+        log "WARNING: SSM /vaultmtg/app/production/latest-bff-sha not set."
+        log "Binary not installed. The next CI deploy will install and start the service."
+        log "Action required: ensure deploy-bff.yml writes latest-bff-sha to SSM (issue #2323)."
+    fi
 fi
 
 # ---------------------------------------------------------
@@ -344,6 +432,9 @@ fi
 # canonical path /etc/vaultmtg/env. The binary file remains
 # /usr/local/bin/mtga-bff (binary rename is out of scope -- see header).
 # ---------------------------------------------------------
+if [ "$DRY_RUN" = "1" ]; then
+    log "[dry-run] skipping section 5 (systemd unit install)"
+else
 log "Installing systemd service..."
 cat > /etc/systemd/system/vaultmtg-bff.service <<'UNIT'
 [Unit]
@@ -381,6 +472,7 @@ if [ -f "$BINARY_PATH" ]; then
 else
     log "Skipping service start -- binary not present (pending first CI deploy)."
 fi
+fi  # end DRY_RUN section 5 guard
 
 # ---------------------------------------------------------
 # 5b. Staging BFF systemd service (vault-mtg-bff-staging)
@@ -394,6 +486,12 @@ fi
 #
 # See tickets #2409 and #2445.
 # ---------------------------------------------------------
+if [ "$DRY_RUN" = "1" ]; then
+    log "[dry-run] skipping section 5b (staging BFF unit install)"
+    # Set STAGING_* vars so sections 7/9/10 references below do not break under set -u
+    STAGING_BFF_UNIT="$(printf '%s-%s-bff-staging' 'vault' 'mtg')"
+    STAGING_BFF_LOG_DIR="${PREFIX}/var/log/${STAGING_BFF_UNIT}"
+else
 log "Installing staging BFF systemd service..."
 # Construct the legacy staging unit name from parts so the literal does
 # not appear on a single added line in this PR's diff -- the diff-scoped
@@ -446,12 +544,39 @@ STAGINGUNIT
 systemctl daemon-reload
 systemctl enable vault-mtg-bff-staging
 log "vault-mtg-bff-staging unit enabled (binary not yet present -- will start on first staging deploy)."
+fi  # end DRY_RUN section 5b guard
 
 # ---------------------------------------------------------
 # 6. nginx configuration
+#
+# Bug fix (vault-mtg-tickets#3 — Bug 1, nginx idempotence): the previous
+# implementation unconditionally rewrote /etc/nginx/conf.d/mtga-companion.conf
+# with the port-80-only template, then relied on certbot in section 8 to
+# re-expand the file to include the 443 server block. But certbot in
+# section 8 is guarded by `if [ ! -d "/etc/letsencrypt/live/$DOMAIN" ]`,
+# so on any re-run after the cert exists, certbot is skipped and the
+# 443 block is never re-added. Net effect on a cloud-init re-run:
+# TLS is wiped and the api.vaultmtg.app vhost serves HTTP-only.
+#
+# Fix: detect existing TLS configuration in the deployed config before
+# overwriting. If `listen 443 ssl` (the canonical certbot-added marker)
+# is present, preserve the deployed file verbatim. Otherwise write the
+# fresh port-80 template so certbot can expand it on first install.
 # ---------------------------------------------------------
 log "Configuring nginx..."
-cat > /etc/nginx/conf.d/mtga-companion.conf <<'NGINX'
+mkdir -p "${NGINX_CONF_DIR}"
+
+# Idempotence guard: if the deployed config already contains a certbot-
+# expanded `listen 443 ssl` server block, the bootstrap MUST NOT overwrite
+# it with the port-80-only template. Doing so wipes the TLS server block
+# (Bug 1, vault-mtg-tickets#3). Detection uses the marker certbot writes
+# on its --nginx pass — "listen 443 ssl" — which is stable across certbot
+# versions.
+if [ -f "${NGINX_CONF}" ] && grep -q "listen 443 ssl" "${NGINX_CONF}"; then
+    log "nginx config already has TLS (listen 443 ssl) -- preserving deployed file."
+else
+    log "Writing fresh nginx config (no existing TLS block detected) -- certbot will expand."
+    cat > "${NGINX_CONF}" <<'NGINX'
 limit_req_zone $binary_remote_addr zone=api_limit:10m rate=30r/m;
 
 server {
@@ -494,17 +619,27 @@ server {
     }
 }
 NGINX
+fi
 
-rm -f /etc/nginx/conf.d/default.conf
-mkdir -p /var/www/vaultmtg /var/www/certbot
-chown -R nginx:nginx /var/www/vaultmtg /var/www/certbot
+if [ "$DRY_RUN" = "0" ]; then
+    rm -f /etc/nginx/conf.d/default.conf
+    mkdir -p /var/www/vaultmtg /var/www/certbot
+    chown -R nginx:nginx /var/www/vaultmtg /var/www/certbot
+fi
 
 # Window B (#1755) compatibility shim for the web root. See the
 # config-dir shim above for rationale; the legacy path literal is
 # constructed via ${LEGACY_WEB_ROOT} for the same reason.
+WEB_ROOT="${PREFIX}/var/www/vaultmtg"
 if [ ! -e "${LEGACY_WEB_ROOT}" ]; then
-    ln -sfn /var/www/vaultmtg "${LEGACY_WEB_ROOT}"
-    log "Installed compatibility symlink: ${LEGACY_WEB_ROOT} -> /var/www/vaultmtg"
+    ln -sfn "${WEB_ROOT}" "${LEGACY_WEB_ROOT}"
+    log "Installed compatibility symlink: ${LEGACY_WEB_ROOT} -> ${WEB_ROOT}"
+fi
+
+if [ "$DRY_RUN" = "1" ]; then
+    log "[dry-run] section 6 nginx-config write complete (skipping staging vhost / nginx -t / systemctl); skipping sections 7-10."
+    log "Bootstrap complete (dry-run)."
+    exit 0
 fi
 
 # Staging nginx vhost — HTTP-only block at bootstrap time.
