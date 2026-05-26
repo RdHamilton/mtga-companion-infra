@@ -83,11 +83,17 @@ Parameters:
   DbUser:
     Type: String
     Default: mtga_sync
-    Description: PostgreSQL role the sync Lambda authenticates as via RDS IAM auth (DB_USER). Pinned to the role granted rds-db:connect in LambdaExecutionRole.
+    Description: PostgreSQL role the sync Lambda authenticates as via password auth (DB_USER). M2M-only role; password is set out-of-band by the master user and stored in SSM at DbPasswordSsmPath.
   DbPort:
     Type: String
     Default: '5432'
     Description: PostgreSQL port the sync Lambda connects to (DB_PORT).
+  DbPasswordSsmPath:
+    Type: String
+    Default: /vaultmtg/app/production/sync-db-password
+    Description: |
+      SSM Parameter Store path that holds the sync Lambda's PostgreSQL password (resolved at stack-update time into DB_PASSWORD).
+      Type: String (NOT SecureString) -- per AWS docs, the '{{resolve:ssm-secure:...}}' dynamic reference is not supported for Lambda environment variables. The sync DB credential is M2M-only with no user PII path; SSM String type is acceptable per the VaultMTG security model. See ADR-035 + the #37 pivot PR body for the full security trade-off.
 
 Resources:
 
@@ -109,7 +115,7 @@ Resources:
           FromPort: 443
           ToPort: 443
           CidrIp: 0.0.0.0/0
-          Description: Allow outbound HTTPS for AWS API calls and RDS IAM token
+          Description: Allow outbound HTTPS for AWS API calls (CloudWatch logs, SSM-resolved env at runtime if added later)
       Tags:
         - Key: Project
           Value: vaultmtg
@@ -137,7 +143,7 @@ Resources:
     DependsOn: SyncDLQ
     Properties:
       RoleName: !Sub "mtga-companion-${Environment}-sync-lambda-role"
-      Description: Execution role for sync Lambda with VPC and RDS IAM auth access
+      Description: Execution role for sync Lambda with VPC access (RDS auth is password-based via DB_PASSWORD env injected from SSM)
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -147,14 +153,12 @@ Resources:
             Action: sts:AssumeRole
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      # NOTE: the former 'RdsIamConnect' inline policy granting rds-db:connect
+      # was removed in the #37 pivot PR. The sync Lambda now authenticates to
+      # RDS via password auth -- DB_PASSWORD is injected by CFN at stack-update
+      # time from SSM (see DbPasswordSsmPath above). PR #2650 retains the
+      # forensic record of the prior IAM-auth attempt.
       Policies:
-        - PolicyName: RdsIamConnect
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Effect: Allow
-                Action: rds-db:connect
-                Resource: !Sub "arn:aws:rds-db:${AWS::Region}:${AWS::AccountId}:dbuser:*/mtga_sync"
         - PolicyName: DLQSendMessage
           PolicyDocument:
             Version: '2012-10-17'
@@ -300,6 +304,14 @@ Resources:
         DB_NAME: !Sub '{{resolve:ssm:${DbNameSsmPath}}}'
         DB_USER: !Ref DbUser
         DB_PORT: !Ref DbPort
+        # DB_PASSWORD is resolved from SSM at stack-update time and injected
+        # into the Lambda's env. Per AWS docs, '{{resolve:ssm-secure:...}}' is
+        # NOT supported in Lambda env vars, so DbPasswordSsmPath is an SSM
+        # parameter of Type=String. The credential is M2M-only -- see the
+        # security trade-off in the #37 pivot PR body. The orchestrator
+        # provisions the SSM parameter + sets the DB user's password
+        # out-of-band; this template just resolves whatever the param holds.
+        DB_PASSWORD: !Sub '{{resolve:ssm:${DbPasswordSsmPath}}}'
 
   # EventBridge Scheduler execution role
   SchedulerExecutionRole:
