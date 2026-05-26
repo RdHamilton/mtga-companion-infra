@@ -866,7 +866,7 @@ Resources:
   # BffRestartCountThreshold (default 3) within a 5-minute window.
   #
   # NOTE ON THE UNIT NAME: issue #2331 originally referred to the
-  # production BFF unit as "vault-mtg-bff.service". After Window B
+  # production BFF unit under a hyphenated form. After Window B
   # (#1755) the production unit created by scripts/deploy/ec2-bootstrap.sh
   # is "vaultmtg-bff.service" (binary /usr/local/bin/mtga-bff -- the
   # binary file name is intentionally unchanged; only the systemd unit

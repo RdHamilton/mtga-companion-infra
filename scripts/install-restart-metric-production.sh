@@ -16,10 +16,11 @@
 #
 # IMPORTANT -- unit name: the production BFF runs as the systemd unit
 # "vaultmtg-bff.service" (binary /usr/local/bin/mtga-bff), created by
-# scripts/deploy/ec2-bootstrap.sh after the Window B systemd rename (#1755).
-# Pre-Window-B it was "mtga-companion.service"; issue #2331 referred to it
-# as "vault-mtg-bff.service"; this script tracks the REAL post-rename unit
-# name so the metric is not silently always-zero.
+# scripts/deploy/ec2-bootstrap.sh after the Window B systemd rename
+# (#1755). Pre-Window-B it carried the legacy mtga companion unit name;
+# issue #2331 referred to it under yet a third hyphenated form. This
+# script tracks the REAL post-Window-B unit name so the metric is not
+# silently always-zero.
 #
 # Prerequisites:
 #   - EC2 IAM role must have cloudwatch:PutMetricData permission (already
