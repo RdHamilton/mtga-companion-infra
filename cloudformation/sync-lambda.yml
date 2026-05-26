@@ -14,7 +14,7 @@ Parameters:
   # NOTE: the former 'RdsStackName' parameter (default 'mtga-companion-rds')
   # was removed in #2592 PR B. The RDS security group ID is now pinned to the
   # live physical ID inline (see LambdaSecurityGroup.SecurityGroupEgress and
-  # RDSIngressFromLambda below). The legacy mtga-companion-rds stack exports
+  # RDSIngressFromLambda below). The legacy 'mtga-companion-rds' stack exports
   # are being deleted; the same SG is being adopted into vaultmtg-rds via a
   # CFN IMPORT changeset, so the literal remains correct across the rename.
   AlarmsStackName:
@@ -75,7 +75,7 @@ Resources:
           FromPort: 5432
           ToPort: 5432
           # RDS SG pinned to live physical ID (#2592 PR B). Previously imported
-          # via "${RdsStackName}-RDSSecurityGroupId" against mtga-companion-rds.
+          # via "${RdsStackName}-RDSSecurityGroupId" against 'mtga-companion-rds'.
           DestinationSecurityGroupId: sg-0290854dc63d3b6e9
           Description: Allow outbound to RDS PostgreSQL
         - IpProtocol: tcp

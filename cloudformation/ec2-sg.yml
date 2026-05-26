@@ -65,10 +65,10 @@ Resources:
   # Resolves the #2534 false-positive drift on the rds stack.
   #
   # GroupId is pinned to the live RDS SG physical ID rather than imported
-  # from the (DRIFTED, about-to-be-deleted) mtga-companion-rds stack. The
+  # from the (DRIFTED, about-to-be-deleted) 'mtga-companion-rds' stack. The
   # same SG will be adopted into the vaultmtg-rds IMPORT stack (#2592 PR C)
   # so the literal remains correct across the rename. See ADR-022 stack-
-  # rename + #2592 PR B (consumer migration off mtga-companion-rds-* exports).
+  # rename + #2592 PR B (consumer migration off 'mtga-companion-rds' stack exports).
   RDSIngressFromEC2:
     Type: AWS::EC2::SecurityGroupIngress
     Condition: IsProduction
