@@ -11,10 +11,12 @@ Parameters:
     Type: String
     Default: vault-mtg-sync
     Description: Name of the existing sync Lambda function
-  RdsStackName:
-    Type: String
-    Default: mtga-companion-rds
-    Description: Name of the RDS CloudFormation stack for cross-stack imports
+  # NOTE: the former 'RdsStackName' parameter (default 'mtga-companion-rds')
+  # was removed in #2592 PR B. The RDS security group ID is now pinned to the
+  # live physical ID inline (see LambdaSecurityGroup.SecurityGroupEgress and
+  # RDSIngressFromLambda below). The legacy 'mtga-companion-rds' stack exports
+  # are being deleted; the same SG is being adopted into vaultmtg-rds via a
+  # CFN IMPORT changeset, so the literal remains correct across the rename.
   AlarmsStackName:
     Type: String
     Default: vault-mtg-cloudwatch-alarms
@@ -72,8 +74,9 @@ Resources:
         - IpProtocol: tcp
           FromPort: 5432
           ToPort: 5432
-          DestinationSecurityGroupId: !ImportValue
-            Fn::Sub: "${RdsStackName}-RDSSecurityGroupId"
+          # RDS SG pinned to live physical ID (#2592 PR B). Previously imported
+          # via "${RdsStackName}-RDSSecurityGroupId" against 'mtga-companion-rds'.
+          DestinationSecurityGroupId: sg-0290854dc63d3b6e9
           Description: Allow outbound to RDS PostgreSQL
         - IpProtocol: tcp
           FromPort: 443
@@ -88,12 +91,13 @@ Resources:
         - Key: Name
           Value: !Sub "mtga-companion-${Environment}-sync-lambda-sg"
 
-  # Inject ingress rule into RDS security group to allow Lambda access
+  # Inject ingress rule into RDS security group to allow Lambda access.
+  # GroupId pinned to live RDS SG physical ID (#2592 PR B) -- see note on the
+  # removed RdsStackName parameter above.
   RDSIngressFromLambda:
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
-      GroupId: !ImportValue
-        Fn::Sub: "${RdsStackName}-RDSSecurityGroupId"
+      GroupId: sg-0290854dc63d3b6e9
       IpProtocol: tcp
       FromPort: 5432
       ToPort: 5432

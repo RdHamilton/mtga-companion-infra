@@ -63,12 +63,17 @@ Resources:
   # dependency cycle that would otherwise exist if rds.yml imported the EC2
   # SG ID. Mirrors the RDSIngressFromLambda pattern in sync-lambda.yml.
   # Resolves the #2534 false-positive drift on the rds stack.
+  #
+  # GroupId is pinned to the live RDS SG physical ID rather than imported
+  # from the (DRIFTED, about-to-be-deleted) 'mtga-companion-rds' stack. The
+  # same SG will be adopted into the vaultmtg-rds IMPORT stack (#2592 PR C)
+  # so the literal remains correct across the rename. See ADR-022 stack-
+  # rename + #2592 PR B (consumer migration off 'mtga-companion-rds' stack exports).
   RDSIngressFromEC2:
     Type: AWS::EC2::SecurityGroupIngress
     Condition: IsProduction
     Properties:
-      GroupId:
-        Fn::ImportValue: mtga-companion-rds-RDSSecurityGroupId
+      GroupId: sg-0290854dc63d3b6e9
       IpProtocol: tcp
       FromPort: 5432
       ToPort: 5432
