@@ -1,11 +1,11 @@
 # DEPRECATED 2026-05-25 — superseded by rds-vaultmtg.yml (#2592). The legacy
-# stack mtga-companion-rds tracks NOTHING live after the Window A rename in
+# stack 'mtga-companion-rds' tracks NOTHING live after the Window A rename in
 # #1996 §5e — CloudFormation marks the DBInstance as DELETED in the stack
 # because the live rename moved the resource out of the stack's purview. This
 # file remains in-tree as historical reference only; do NOT deploy it. The new
 # stack definition is in rds-vaultmtg.yml and is adopted into a new vaultmtg-rds
 # stack via a ChangeSetType=IMPORT changeset. After consumer migration (PR B
-# for #2592) and the irreversible delete of the empty mtga-companion-rds stack
+# for #2592) and the irreversible delete of the empty 'mtga-companion-rds' stack
 # (PR C), this file will be deleted from the repo.
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
