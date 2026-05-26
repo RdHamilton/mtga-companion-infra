@@ -3,6 +3,6 @@
   { "ParameterKey": "PrivateSubnet1Id", "ParameterValue": "subnet-021e2cc715f426da1" },
   { "ParameterKey": "PrivateSubnet2Id", "ParameterValue": "subnet-0600373b7aab41525" },
   { "ParameterKey": "DBName",           "ParameterValue": "mtga_companion" },
-  { "ParameterKey": "DBUsername",         "ParameterValue": "mtga_admin" },
-  { "ParameterKey": "Environment",        "ParameterValue": "production" }
+  { "ParameterKey": "DBUsername",       "ParameterValue": "mtga_admin" },
+  { "ParameterKey": "Environment",      "ParameterValue": "production" }
 ]
