@@ -1,7 +1,7 @@
 [
   { "ParameterKey": "Environment",        "ParameterValue": "production" },
   { "ParameterKey": "LambdaFunctionName", "ParameterValue": "vault-mtg-sync" },
-  { "ParameterKey": "SubnetIdA",          "ParameterValue": "subnet-021e2cc715f426da1" },
-  { "ParameterKey": "SubnetIdB",          "ParameterValue": "subnet-0600373b7aab41525" },
+  { "ParameterKey": "SubnetIdA",          "ParameterValue": "subnet-05f881623516300b0" },
+  { "ParameterKey": "SubnetIdB",          "ParameterValue": "subnet-06d52651558bfbe7e" },
   { "ParameterKey": "ScheduleCron",       "ParameterValue": "cron(0 2 * * ? *)" }
 ]
