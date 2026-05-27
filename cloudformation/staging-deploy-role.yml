@@ -198,20 +198,28 @@ Resources:
                   StringEquals:
                     kms:ViaService: !Sub "secretsmanager.${AWS::Region}.amazonaws.com"
         # Secrets Manager: staging DB credentials + production app-db credential.
-        # Three distinct secret sources, all required by the staging deploy flow:
+        # Four distinct secret sources, all required by the staging deploy flow:
         #
         #   1. mtga-companion/staging/*  -- user-created staging secrets namespace
         #      (legacy DB credential path, integration secrets).
         #
-        #   2. rds!db-12c647a0-0880-45e5-bf35-d9c1ccb05433-*  -- the RDS-managed
-        #      auto-rotated credential for the staging RDS instance. The trailing
-        #      "-*" suffix is the 6-char random suffix AWS appends to the ARN
-        #      (e.g. -qzBP5e); the unique secret-id prefix is pinned to staging.
-        #      run-staging-migrations.sh reads this secret to obtain the
-        #      postgres password before running migrations (Path 2 mirror of
-        #      vault-mtg#2537 / provision-staging-env.sh refactor).
+        #   2. rds!db-12c647a0-0880-45e5-bf35-d9c1ccb05433-*  -- legacy entry.
+        #      Originally the RDS-managed credential for the shared RDS instance
+        #      (vaultmtg-postgres). After the 2026-05-27 staging separation
+        #      (Phase 1), this instance is production-only -- no staging deploy
+        #      flow should ever read it. RETAINED in the grant list pending a
+        #      follow-on cleanup PR; remove after one full deploy cycle confirms
+        #      no staging script reaches for it.
         #
-        #   3. vaultmtg-production-app-db-*  -- the least-privilege application
+        #   3. rds!db-55ac0968-bcee-48d6-9c43-9679a18cc407-*  -- the RDS-managed
+        #      auto-rotated credential for the NEW staging RDS instance
+        #      (vaultmtg-postgres-staging, stack vaultmtg-rds-staging, created
+        #      2026-05-27). The trailing "-*" covers the 6-char random suffix
+        #      AWS appends. provision-staging-env.sh and run-staging-migrations.sh
+        #      read this secret to obtain the postgres master credential for
+        #      env-file rendering and migration execution.
+        #
+        #   4. vaultmtg-production-app-db-*  -- the least-privilege application
         #      DB credential created by Bob in vault-mtg#2576 per ADR-024.
         #      provision-db-url.sh fetches this secret at deploy time to render
         #      DATABASE_URL for the BFF using the vaultmtg_app role (not the
@@ -219,10 +227,9 @@ Resources:
         #      suffix AWS appends to the ARN. Required for vault-mtg#2579 to
         #      unblock the Phase 4 BFF cutover (#2223 follow-up).
         #
-        # Scope: there is currently no production RDS instance in this account
-        # (staging is the only RDS), but the explicit secret-id prefix is used
-        # rather than the broad rds!db-* wildcard so that a future production
-        # RDS creation does not silently widen this role's blast radius.
+        # Scope: explicit secret-id prefixes -- NOT the broad rds!db-* wildcard --
+        # so the provisioner role cannot silently read unrelated RDS-managed
+        # secrets that may exist or be created in this account in the future.
         - PolicyName: StagingProvisioningDBSecretRead
           PolicyDocument:
             Version: "2012-10-17"
@@ -233,10 +240,12 @@ Resources:
                 Resource:
                   # Staging user-created secrets namespace (legacy + integration)
                   - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:mtga-companion/staging/*"
-                  # Staging RDS-managed credential (auto-rotated by RDS).
-                  # Explicit secret-id prefix -- NOT the broad rds!db-* wildcard --
-                  # so a future prod RDS does not silently inherit this grant.
+                  # Legacy: shared-RDS credential, now production-only. Pending
+                  # cleanup -- see comment block above (item 2).
                   - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:rds!db-12c647a0-0880-45e5-bf35-d9c1ccb05433-*"
+                  # NEW staging RDS-managed credential (vaultmtg-postgres-staging).
+                  # Added 2026-05-27 as part of Phase 1 staging separation.
+                  - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:rds!db-55ac0968-bcee-48d6-9c43-9679a18cc407-*"
                   # vaultmtg-production-app-db -- least-privilege app DB credential
                   # (ADR-024). Created by Bob in vault-mtg#2576. The "-*" suffix
                   # covers the 6-char random suffix AWS appends to the secret ARN.
