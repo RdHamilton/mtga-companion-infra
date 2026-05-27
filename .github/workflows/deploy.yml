@@ -48,7 +48,12 @@ on:
         default: false
 
 concurrency:
-  group: cloudformation-deploy
+  # Per-stack group: prevents parallel deploys against the SAME stack (which would
+  # race the changeset) but allows parallel deploys against DIFFERENT stacks (e.g.
+  # prod + staging dispatched together by deploy-on-merge.yml — previously the
+  # global group cancelled whichever dispatched first; see vault-mtg#2544 incident
+  # 2026-05-27 where staging deploy got cancelled because prod dispatched ~2s after).
+  group: cloudformation-deploy-${{ inputs.stack }}
   cancel-in-progress: false  # never cancel an in-flight deploy
 
 jobs:
