@@ -1,0 +1,131 @@
+# missed-cousin-auditor.yml
+#
+# PURPOSE
+# -------
+# Detects "missed cousin" policy gaps on infra PRs.
+#
+# When a new resource is added to a CFN template (new RDS instance, new SG,
+# new GHA environment), other IAM/policy/SG configs that should reference the
+# new resource are checked and flagged via a PR comment.
+#
+# This is a WARN-ONLY gate -- it emits findings and posts a PR comment but
+# never blocks merge. Engineers may have intentional reasons not to update a
+# cousin resource in the same PR (e.g., the secret ARN is only known post-deploy).
+#
+# Runbook: vault-mtg-docs/engineering/runbooks/missed-cousin-auditor.md
+# Ticket:  vault-mtg-tickets#52
+#
+# TRIGGER MODE
+# ------------
+# Runs on every PR to main. The script exits quickly on non-triggering PRs
+# (no matching resource types in the diff) -- no label or manual opt-in required.
+# Requiring a label would mean the check only fires when someone remembers to
+# add it, defeating the purpose of proactive detection.
+#
+# RULE-INFRA-01 NOTE
+# ------------------
+# This is a new CI job (warn-only, continue-on-error: true). It is not a
+# hard-fail gate and does not block merge. The script itself always exits 0.
+
+name: Missed-Cousin Auditor
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [main]
+
+concurrency:
+  group: missed-cousin-auditor-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    name: Missed-cousin audit
+    runs-on: ubuntu-latest
+    continue-on-error: true  # RULE-INFRA-01: warn-only; never blocks merge
+    permissions:
+      contents: read
+      pull-requests: write  # required to post PR comment
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6 -- SHA pinned
+        with:
+          fetch-depth: 0  # needed for git diff against base branch
+
+      - name: Detect changed files
+        id: changed
+        run: |
+          set -euo pipefail
+
+          # Collect all changed CFN templates and deploy.yml
+          CHANGED=$(git diff --name-only --diff-filter=AM \
+            "origin/${{ github.base_ref }}...HEAD" \
+            -- 'cloudformation/*.yml' '.github/workflows/deploy.yml' \
+            | grep -v 'cloudformation/parameters/' || true)
+
+          if [ -z "$CHANGED" ]; then
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+            CHANGED_ONELINE=$(echo "$CHANGED" | tr '\n' ' ' | sed 's/ $//')
+            echo "changed_templates=${CHANGED_ONELINE}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: No triggering changes
+        if: steps.changed.outputs.has_changes == 'false'
+        run: |
+          echo "No CFN templates or deploy.yml changed. Missed-cousin auditor: nothing to check."
+
+      - name: Run missed-cousin auditor
+        if: steps.changed.outputs.has_changes == 'true'
+        id: audit
+        env:
+          CHANGED_TEMPLATES: ${{ steps.changed.outputs.changed_templates }}
+          GITHUB_BASE_REF: ${{ github.base_ref }}
+        run: |
+          set +e  # script exits 0 by design; capture output regardless
+          AUDIT_OUTPUT=$(bash scripts/ci/audit-cousins.sh 2>&1)
+          AUDIT_EXIT=$?
+          echo "audit_output<<AUDIT_EOF" >> "$GITHUB_OUTPUT"
+          echo "$AUDIT_OUTPUT" >> "$GITHUB_OUTPUT"
+          echo "AUDIT_EOF" >> "$GITHUB_OUTPUT"
+          echo "Audit exit code: ${AUDIT_EXIT}"
+          echo "$AUDIT_OUTPUT"
+
+      - name: Post PR comment if gaps found
+        if: steps.changed.outputs.has_changes == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AUDIT_OUTPUT: ${{ steps.audit.outputs.audit_output }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          set +e  # comment post is best-effort; never fail the workflow
+
+          # Only post a comment if the output contains gap markers
+          if echo "$AUDIT_OUTPUT" | grep -q "Missed-Cousin Auditor:"; then
+            COMMENT_BODY="<!-- missed-cousin-auditor -->
+${AUDIT_OUTPUT}"
+
+            # Delete any previous missed-cousin-auditor comment on this PR
+            # to avoid duplicate comment noise on re-runs (best-effort).
+            EXISTING_COMMENT_ID=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
+              --jq '.[] | select(.body | startswith("<!-- missed-cousin-auditor -->")) | .id' \
+              2>/dev/null | head -1 || echo "")
+
+            if [ -n "${EXISTING_COMMENT_ID}" ]; then
+              gh api --method DELETE \
+                "repos/${REPO}/issues/comments/${EXISTING_COMMENT_ID}" \
+                2>/dev/null || true
+            fi
+
+            # Post the new comment
+            gh pr comment "${PR_NUMBER}" \
+              --repo "${REPO}" \
+              --body "${COMMENT_BODY}" 2>/dev/null || true
+
+            echo "Missed-cousin gaps posted as PR comment."
+          else
+            echo "No gaps detected. No PR comment posted."
+          fi
