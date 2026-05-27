@@ -39,9 +39,17 @@ on:
       - 'cloudformation/**.yml'
 
 concurrency:
-  # Serialize against direct manual deploys (deploy.yml uses the same group).
-  # We never want two CFN operations against the same account in parallel.
-  group: cloudformation-deploy
+  # Serialize concurrent runs of THIS workflow only. Two merges to main that
+  # both touch cloudformation/* queue here one at a time — we never want
+  # parallel dispatch loops fighting over the same template set.
+  #
+  # Cross-workflow serialization changed 2026-05-27 in this commit: deploy.yml
+  # now uses a per-stack group (`cloudformation-deploy-${{ inputs.stack }}`),
+  # so a manual `gh workflow run deploy.yml -f stack=X` no longer shares a group
+  # with this orchestrator workflow. The actual CFN-changeset race is per-stack
+  # (managed by deploy.yml's per-stack group), not per-workflow. This wrapper
+  # only needs to serialize against itself.
+  group: cloudformation-deploy-on-merge
   cancel-in-progress: false
 
 permissions:
