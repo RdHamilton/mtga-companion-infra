@@ -1,0 +1,10 @@
+[
+  { "ParameterKey": "VpcId",                     "ParameterValue": "vpc-01d097c495e941d32" },
+  { "ParameterKey": "PrivateSubnet1Id",          "ParameterValue": "subnet-021e2cc715f426da1" },
+  { "ParameterKey": "PrivateSubnet2Id",          "ParameterValue": "subnet-0600373b7aab41525" },
+  { "ParameterKey": "DBName",                    "ParameterValue": "vaultmtg_staging" },
+  { "ParameterKey": "DBUsername",                "ParameterValue": "mtga_admin_staging" },
+  { "ParameterKey": "EC2SecurityGroupId",        "ParameterValue": "sg-09f07e050f807c733" },
+  { "ParameterKey": "SyncLambdaSecurityGroupId", "ParameterValue": "sg-01ed3679b1865eac9" },
+  { "ParameterKey": "Environment",               "ParameterValue": "staging" }
+]

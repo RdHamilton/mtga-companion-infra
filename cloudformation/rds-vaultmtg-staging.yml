@@ -1,0 +1,170 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: VaultMTG staging RDS PostgreSQL (db.t3.micro, Option B per Faye 2026-05-27). Sibling of rds-vaultmtg.yml. Password auth (post PR-2651 pivot), 1-day backups, inline SG ingress from staging EC2 + sync Lambda SGs.
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC the RDS instance lives in (vpc-01d097c495e941d32 in prod account)
+
+  PrivateSubnet1Id:
+    Type: AWS::EC2::Subnet::Id
+    Description: First private subnet (us-east-1a)
+
+  PrivateSubnet2Id:
+    Type: AWS::EC2::Subnet::Id
+    Description: Second private subnet (us-east-1b)
+
+  DBName:
+    Type: String
+    Default: vaultmtg_staging
+    Description: >
+      Initial database name created by RDS at instance launch. Matches the
+      value at SSM /vaultmtg/app/staging/db-name. The BFF and sync Lambda
+      both connect to this database.
+
+  DBUsername:
+    Type: String
+    Default: mtga_admin_staging
+    Description: Master username on the staging RDS instance
+
+  EC2SecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: >
+      Security group of the EC2 instance(s) that need to talk to staging
+      RDS. The staging BFF systemd unit on the shared EC2 connects via the
+      staging EC2 SG (mtga-companion-staging-EC2SecurityGroupId, currently
+      sg-09f07e050f807c733).
+
+  SyncLambdaSecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: >
+      Security group of the sync Lambda's ENIs. The same SG is shared by
+      production and staging sync Lambdas today (sg-01ed3679b1865eac9 per
+      mtga-companion-sync-lambda-LambdaSecurityGroupId export). When/if a
+      dedicated staging sync Lambda gets its own SG, update this param.
+
+  Environment:
+    Type: String
+    Default: staging
+    AllowedValues: [staging]
+    Description: Locked to "staging" — this stack only ever stands up the staging RDS.
+
+Resources:
+
+  RDSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: PostgreSQL ingress to vaultmtg-postgres-staging from staging BFF + sync Lambda
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          SourceSecurityGroupId: !Ref EC2SecurityGroupId
+          Description: Staging BFF on shared EC2
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          SourceSecurityGroupId: !Ref SyncLambdaSecurityGroupId
+          Description: Sync Lambda ENIs (prod + staging share the SG today)
+      Tags:
+        - Key: Name
+          Value: vaultmtg-postgres-staging-sg
+        - Key: Project
+          Value: vaultmtg
+        - Key: Environment
+          Value: !Ref Environment
+
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Private subnets for vaultmtg staging RDS
+      SubnetIds:
+        - !Ref PrivateSubnet1Id
+        - !Ref PrivateSubnet2Id
+      Tags:
+        - Key: Project
+          Value: vaultmtg
+        - Key: Environment
+          Value: !Ref Environment
+
+  DBParameterGroup:
+    Type: AWS::RDS::DBParameterGroup
+    Properties:
+      Description: vaultmtg staging PostgreSQL 15
+      Family: postgres15
+      Parameters:
+        shared_preload_libraries: pg_stat_statements
+        log_connections: "1"
+        log_disconnections: "1"
+        log_min_duration_statement: "1000"
+      Tags:
+        - Key: Project
+          Value: vaultmtg
+        - Key: Environment
+          Value: !Ref Environment
+
+  DBInstance:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      DBInstanceIdentifier: vaultmtg-postgres-staging
+      DBName: !Ref DBName
+      Engine: postgres
+      EngineVersion: "15.7"
+      DBInstanceClass: db.t3.micro
+      AllocatedStorage: "20"
+      StorageType: gp3
+      StorageEncrypted: true
+      MasterUsername: !Ref DBUsername
+      ManageMasterUserPassword: true
+      EnableIAMDatabaseAuthentication: false
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      VPCSecurityGroups:
+        - !Ref RDSSecurityGroup
+      DBParameterGroupName: !Ref DBParameterGroup
+      MultiAZ: false
+      PubliclyAccessible: false
+      BackupRetentionPeriod: 1
+      PreferredBackupWindow: "06:00-07:00"
+      PreferredMaintenanceWindow: "sun:07:00-sun:08:00"
+      EnablePerformanceInsights: false
+      AutoMinorVersionUpgrade: true
+      DeletionProtection: false
+      Tags:
+        - Key: Project
+          Value: vaultmtg
+        - Key: Environment
+          Value: !Ref Environment
+
+Outputs:
+  DBEndpoint:
+    Description: Staging RDS PostgreSQL endpoint hostname
+    Value: !GetAtt DBInstance.Endpoint.Address
+    Export:
+      Name: !Sub "${AWS::StackName}-DBEndpoint"
+
+  DBPort:
+    Description: Staging RDS PostgreSQL port
+    Value: !GetAtt DBInstance.Endpoint.Port
+    Export:
+      Name: !Sub "${AWS::StackName}-DBPort"
+
+  DBName:
+    Description: Staging database name
+    Value: !Ref DBName
+    Export:
+      Name: !Sub "${AWS::StackName}-DBName"
+
+  RDSSecurityGroupId:
+    Description: Staging RDS security group ID
+    Value: !Ref RDSSecurityGroup
+    Export:
+      Name: !Sub "${AWS::StackName}-RDSSecurityGroupId"
+
+  DBSecretArn:
+    Description: ARN of the RDS-managed Secrets Manager secret for staging master credentials
+    Value: !GetAtt DBInstance.MasterUserSecret.SecretArn
+    Export:
+      Name: !Sub "${AWS::StackName}-DBSecretArn"

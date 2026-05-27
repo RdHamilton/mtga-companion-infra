@@ -13,6 +13,7 @@ on:
           - ec2-sg-staging
           - rds
           - rds-vaultmtg
+          - rds-vaultmtg-staging
           - ec2
           - ec2-staging
           - dns-staging
@@ -71,6 +72,7 @@ jobs:
           case "${{ inputs.stack }}" in
             cdn)                        STACK_NAME="vaultmtg-app-cdn" ;                   TEMPLATE_NAME="${{ inputs.stack }}" ;;
             rds-vaultmtg)               STACK_NAME="vaultmtg-rds" ;                       TEMPLATE_NAME="${{ inputs.stack }}" ;;
+            rds-vaultmtg-staging)       STACK_NAME="vaultmtg-rds-staging" ;               TEMPLATE_NAME="${{ inputs.stack }}" ;;
             nat-egress)                 STACK_NAME="vaultmtg-nat-egress" ;                TEMPLATE_NAME="${{ inputs.stack }}" ;;
             rhamiltoneng-dns)           STACK_NAME="rhamiltoneng-dns" ;                   TEMPLATE_NAME="${{ inputs.stack }}" ;;
             iam-gha-roles)              STACK_NAME="mtga-companion-iam-gha-roles" ;       TEMPLATE_NAME="${{ inputs.stack }}" ;;

@@ -103,6 +103,7 @@ jobs:
             [iam-gha-roles.yml]="iam-gha-roles"
             [logs.yml]="logs"
             [rds-vaultmtg.yml]="rds-vaultmtg"
+            [rds-vaultmtg-staging.yml]="rds-vaultmtg-staging"
             [rhamiltoneng-dns.yml]="rhamiltoneng-dns"
             [security-alarms.yml]="security-alarms"
             [staging-deploy-role.yml]="staging-deploy-role"
