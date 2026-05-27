@@ -20,6 +20,7 @@ on:
           - vpc
           - rhamiltoneng-dns
           - sync-lambda
+          - sync-lambda-staging
           - nat-egress
           - cloudwatch-alarms
           - cloudwatch-alarms-staging
@@ -93,6 +94,7 @@ jobs:
             ec2-sg-staging)             STACK_NAME="mtga-companion-ec2-sg-staging" ;      TEMPLATE_NAME="ec2-sg" ;;
             ec2-staging)                STACK_NAME="mtga-companion-ec2-staging" ;         TEMPLATE_NAME="ec2" ;;
             dns-staging)                STACK_NAME="mtga-companion-dns-staging" ;         TEMPLATE_NAME="dns-staging" ;;
+            sync-lambda-staging)        STACK_NAME="vaultmtg-sync-lambda-staging" ;       TEMPLATE_NAME="sync-lambda" ;;
             *)                          STACK_NAME="mtga-companion-${{ inputs.stack }}" ; TEMPLATE_NAME="${{ inputs.stack }}" ;;
           esac
           echo "STACK_NAME=$STACK_NAME" >> $GITHUB_ENV

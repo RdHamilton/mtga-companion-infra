@@ -67,12 +67,15 @@ jobs:
   detect-drift:
     name: Detect drift across production stacks
     runs-on: ubuntu-latest
-    # 45-minute budget: 13 stacks * ~3 min worst-case poll budget per stack
-    # (per-stack cap below) = ~39 min worst case, plus checkout + role assume.
-    # Previously 30 min, which was insufficient when describe-stack-drift-detection-status
-    # silently errored (see polling loop below) and burned the full per-stack
-    # 5-min budget x ~6 stacks before the job hit the timeout.
-    timeout-minutes: 45
+    # 60-minute budget: 18 stacks * ~3 min worst-case poll budget per stack
+    # (per-stack cap below) = ~54 min worst case, plus checkout + role assume.
+    # Bumped from 45m on 2026-05-27 when the list grew from 13 to 18 stacks
+    # (added prod RDS, new staging RDS, NAT egress, and 4 staging-side stacks
+    # surfaced by the pre-Wave-N audit). Previously 30 min, which was
+    # insufficient when describe-stack-drift-detection-status silently errored
+    # (see polling loop below) and burned the full per-stack 5-min budget x
+    # ~6 stacks before the job hit the timeout.
+    timeout-minutes: 60
 
     env:
       AWS_REGION: us-east-1
@@ -87,16 +90,23 @@ jobs:
       # if added here.  Follow-up ticket required to widen IAM scope before adding.
       STACKS: >-
         mtga-companion-cloudwatch-alarms
+        mtga-companion-cloudwatch-alarms-staging
         mtga-companion-deploy-artifacts
+        mtga-companion-dns-staging
         mtga-companion-ec2
         mtga-companion-ec2-sg
+        mtga-companion-ec2-sg-staging
         mtga-companion-iam-gha-roles
         mtga-companion-logs
+        mtga-companion-logs-staging
         mtga-companion-sync-lambda
         mtga-companion-staging-deploy-role
         vaultmtg-app-cdn
         vaultmtg-cloudtrail
         vaultmtg-cloudwatch-dashboards
+        vaultmtg-nat-egress
+        vaultmtg-rds
+        vaultmtg-rds-staging
         vaultmtg-security-services
 
     steps:
