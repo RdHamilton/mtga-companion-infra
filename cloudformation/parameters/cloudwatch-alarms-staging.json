@@ -14,5 +14,5 @@
   { "ParameterKey": "RdsLatencyEvaluationPeriods","ParameterValue": "5" },
   { "ParameterKey": "RdsCpuThreshold",            "ParameterValue": "90" },
   { "ParameterKey": "RdsCpuEvaluationPeriods",    "ParameterValue": "5" },
-  { "ParameterKey": "RdsInstanceIdentifier",      "ParameterValue": "mtga-companion-postgres-staging" }
+  { "ParameterKey": "RdsInstanceIdentifier",      "ParameterValue": "vaultmtg-postgres-staging" }
 ]
