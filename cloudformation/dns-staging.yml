@@ -1,9 +1,9 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
   VaultMTG - Route 53 A record for staging-api.vaultmtg.app.
-  Points the staging API subdomain at the staging EC2 Elastic IP.
-  Deploy after the ec2-sg-staging and ec2-staging stacks are stable.
-  Deploy order: ec2-sg-staging -> ec2-staging -> dns-staging
+  Points the staging API subdomain at the shared EC2 Elastic IP (same instance as
+  production; staging BFF runs on a separate port). The EIP is imported from the
+  mtga-companion-ec2 stack — no dedicated ec2-staging stack exists.
 
 Parameters:
   HostedZoneId:
@@ -11,12 +11,6 @@ Parameters:
     Description: >
       Route 53 hosted zone ID for vaultmtg.app.
       Value: Z0998299Z86TCLNNF1LS
-
-  ElasticIP:
-    Type: String
-    Description: >
-      Staging EC2 Elastic IP address (output ElasticIPAddress from mtga-companion-ec2-staging stack).
-      Update parameters/dns-staging.json with this value before deploying.
 
   TTL:
     Type: Number
@@ -28,7 +22,9 @@ Parameters:
 Resources:
 
   # ---------------------------------------------------------
-  # A record: staging-api.vaultmtg.app -> staging EC2 Elastic IP
+  # A record: staging-api.vaultmtg.app -> shared EC2 Elastic IP
+  # The staging BFF co-exists on the same instance as production (different port).
+  # EIP is cross-stack imported from mtga-companion-ec2 — no separate staging EIP.
   # ---------------------------------------------------------
   StagingApiARecord:
     Type: AWS::Route53::RecordSet
@@ -38,18 +34,18 @@ Resources:
       Type: A
       TTL: !Ref TTL
       ResourceRecords:
-        - !Ref ElasticIP
-      Comment: VaultMTG staging API subdomain - points at dedicated staging EC2 (not production)
+        - !ImportValue mtga-companion-ec2-ElasticIPAddress
+      Comment: VaultMTG staging API subdomain - shared EC2 instance with production BFF
 
 Outputs:
   StagingApiDomain:
-    Description: Staging API domain pointing to staging EC2
+    Description: Staging API domain pointing to shared EC2
     Value: https://staging-api.vaultmtg.app
     Export:
       Name: !Sub "${AWS::StackName}-StagingApiDomain"
 
   StagingApiIP:
-    Description: Staging EC2 EIP for the staging API A record
-    Value: !Ref ElasticIP
+    Description: Shared EC2 EIP used for the staging API A record
+    Value: !ImportValue mtga-companion-ec2-ElasticIPAddress
     Export:
       Name: !Sub "${AWS::StackName}-StagingApiIP"
