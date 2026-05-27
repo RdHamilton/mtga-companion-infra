@@ -107,6 +107,7 @@ jobs:
             [security-alarms.yml]="security-alarms"
             [staging-deploy-role.yml]="staging-deploy-role"
             [sync-lambda.yml]="sync-lambda"
+            [nat-egress.yml]="nat-egress"
             [vaultmtg-security-services.yml]="vaultmtg-security-services"
             [vpc.yml]="vpc"
           )

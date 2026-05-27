@@ -1,0 +1,202 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  NAT egress stack for the VaultMTG default VPC (vpc-01d097c495e941d32, 172.31.0.0/16).
+  Adds a single-AZ NAT gateway + two new private /24 subnets (one per AZ for cross-AZ
+  Lambda durability) + a private route table that sends 0.0.0.0/0 through the NAT.
+  Purpose: give the sync Lambda outbound HTTPS to the public internet (specifically
+  www.17lands.com) without exposing its ENI publicly. Pre-existing BFF EC2 and RDS
+  subnets are untouched. Live VPC was the AWS default VPC (vpc.yml has never been
+  deployed); this stack does not import or manage the default VPC itself, only the
+  net-new NAT, EIP, subnets, and route table.
+
+# ---------------------------------------------------------------------------
+# Parameters
+# ---------------------------------------------------------------------------
+Parameters:
+  Environment:
+    Type: String
+    Default: production
+    AllowedValues: [production, staging]
+    Description: Deployment environment tag for the new resources.
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Default: vpc-01d097c495e941d32
+    Description: The existing default VPC ID (172.31.0.0/16). Live in production.
+
+  PublicSubnetForNatId:
+    Type: AWS::EC2::Subnet::Id
+    Default: subnet-021e2cc715f426da1
+    Description: >
+      Existing public subnet (with a route to the IGW) where the NAT Gateway will
+      be placed. Default is the us-east-1a default subnet that already hosts the
+      BFF EC2; that subnet has MapPublicIpOnLaunch=true and the main route table
+      routes 0.0.0.0/0 to the IGW, which is what the NAT requires.
+
+  PrivateSubnetACidr:
+    Type: String
+    Default: "172.31.96.0/24"
+    Description: >
+      CIDR for the new private subnet in AZ us-east-1a (where the sync Lambda's
+      first ENI will live). Must not overlap any existing default-VPC subnet
+      (default subnets occupy 172.31.0.0/20 through 172.31.80.0/20).
+
+  PrivateSubnetBCidr:
+    Type: String
+    Default: "172.31.97.0/24"
+    Description: >
+      CIDR for the new private subnet in AZ us-east-1b (cross-AZ failover for
+      the sync Lambda's second ENI).
+
+  PrivateSubnetAAz:
+    Type: AWS::EC2::AvailabilityZone::Name
+    Default: us-east-1a
+    Description: Availability Zone for PrivateSubnetA.
+
+  PrivateSubnetBAz:
+    Type: AWS::EC2::AvailabilityZone::Name
+    Default: us-east-1b
+    Description: Availability Zone for PrivateSubnetB.
+
+# ---------------------------------------------------------------------------
+# Resources
+# ---------------------------------------------------------------------------
+Resources:
+
+  # ── Elastic IP for the NAT Gateway ───────────────────────────────────────
+  # Single-AZ NAT: cost-optimised for the sync use case (small JSON fetches
+  # from 17lands.com once per day). A regional 1a outage degrades the entire
+  # us-east-1 stack, including the BFF EC2 in the same AZ; the sync workload
+  # already retries with EventBridge and can wait for the AZ to recover.
+  NatEip:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub "vaultmtg-${Environment}-nat-eip"
+        - Key: Project
+          Value: vaultmtg
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ── NAT Gateway ──────────────────────────────────────────────────────────
+  # Lives in the existing public subnet that already routes to the IGW so
+  # outbound traffic from the private subnets can egress through the NAT.
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatEip.AllocationId
+      SubnetId: !Ref PublicSubnetForNatId
+      Tags:
+        - Key: Name
+          Value: !Sub "vaultmtg-${Environment}-nat"
+        - Key: Project
+          Value: vaultmtg
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ── New private subnet, AZ-a ─────────────────────────────────────────────
+  # Where the sync Lambda's first ENI will be attached after the
+  # sync-lambda.json parameter change lands and the sync-lambda stack is
+  # re-deployed. MapPublicIpOnLaunch is false (Lambda ENIs do not consume
+  # public IPs regardless of this flag, but explicit-is-better).
+  PrivateSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VpcId
+      CidrBlock: !Ref PrivateSubnetACidr
+      AvailabilityZone: !Ref PrivateSubnetAAz
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub "vaultmtg-${Environment}-private-1a"
+        - Key: Project
+          Value: vaultmtg
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ── New private subnet, AZ-b ─────────────────────────────────────────────
+  PrivateSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VpcId
+      CidrBlock: !Ref PrivateSubnetBCidr
+      AvailabilityZone: !Ref PrivateSubnetBAz
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub "vaultmtg-${Environment}-private-1b"
+        - Key: Project
+          Value: vaultmtg
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ── Private Route Table ──────────────────────────────────────────────────
+  # Single route table is shared by both private subnets. The default route
+  # 0.0.0.0/0 is sent to the NAT Gateway; the implicit local route handles
+  # in-VPC traffic (to RDS in the existing default subnets) automatically.
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VpcId
+      Tags:
+        - Key: Name
+          Value: !Sub "vaultmtg-${Environment}-private-rt"
+        - Key: Project
+          Value: vaultmtg
+        - Key: Environment
+          Value: !Ref Environment
+
+  PrivateNatRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: "0.0.0.0/0"
+      NatGatewayId: !Ref NatGateway
+
+  PrivateSubnetARouteTableAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetA
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateSubnetBRouteTableAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetB
+      RouteTableId: !Ref PrivateRouteTable
+
+# ---------------------------------------------------------------------------
+# Outputs -- consumed by sync-lambda.yml via parameters/sync-lambda.json
+# ---------------------------------------------------------------------------
+Outputs:
+  NatGatewayId:
+    Description: NAT Gateway ID
+    Value: !Ref NatGateway
+    Export:
+      Name: !Sub "vaultmtg-${Environment}-NatGatewayId"
+
+  NatEipAllocationId:
+    Description: Elastic IP allocation ID associated with the NAT Gateway
+    Value: !GetAtt NatEip.AllocationId
+    Export:
+      Name: !Sub "vaultmtg-${Environment}-NatEipAllocationId"
+
+  PrivateSubnetAId:
+    Description: New private subnet in AZ-a (sync Lambda first ENI target)
+    Value: !Ref PrivateSubnetA
+    Export:
+      Name: !Sub "vaultmtg-${Environment}-PrivateNatSubnetAId"
+
+  PrivateSubnetBId:
+    Description: New private subnet in AZ-b (sync Lambda second ENI target)
+    Value: !Ref PrivateSubnetB
+    Export:
+      Name: !Sub "vaultmtg-${Environment}-PrivateNatSubnetBId"
+
+  PrivateRouteTableId:
+    Description: Private route table that sends 0.0.0.0/0 to the NAT Gateway
+    Value: !Ref PrivateRouteTable
+    Export:
+      Name: !Sub "vaultmtg-${Environment}-PrivateNatRouteTableId"
