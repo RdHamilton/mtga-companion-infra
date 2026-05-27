@@ -19,8 +19,14 @@ Parameters:
 
   AlarmEmail:
     Type: String
-    Description: E-mail address that receives alarm notifications.
-    Default: ray.hamilton@stablekernel.com
+    Description: |
+      E-mail address that receives alarm notifications. Must be set via the
+      cloudwatch-alarms.json / cloudwatch-alarms-staging.json parameter file
+      -- there is no useful default. SNS will send a one-time confirmation
+      e-mail to this address; the link must be clicked before the topic will
+      deliver alarms to the inbox.
+    AllowedPattern: "^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}$"
+    ConstraintDescription: AlarmEmail must be a valid e-mail address.
 
   AlertWebhookUrl:
     Type: String
@@ -230,24 +236,45 @@ Resources:
   # replacement -- notably the S-06 security alarms (#2333) once the
   # CloudTrail stack exists.
   #
-  # Subscriptions:
-  #   - email : always added (AlarmEmail).
-  #   - https : added only when AlertWebhookUrl is supplied -- delivers
-  #             alarm notifications to a Slack/Discord chat webhook.
+  # Subscriptions are declared OUTSIDE the topic as separate
+  # AWS::SNS::Subscription resources (AlertEmailSubscription,
+  # AlertWebhookSubscription) so an Endpoint change forces CFN to
+  # replace the subscription instead of being silently ignored --
+  # the inline Subscription property on AWS::SNS::Topic has
+  # create-only semantics for email and does not re-evaluate when
+  # the underlying parameter value changes (#2544).
   # ---------------------------------------------------------
   AlertTopic:
     Type: AWS::SNS::Topic
     Properties:
       TopicName: !Sub "vaultmtg-${Environment}-alerts"
       DisplayName: VaultMTG Operational Alerts
-      Subscription:
-        - Protocol: email
-          Endpoint: !Ref AlarmEmail
       Tags:
         - Key: Project
           Value: vault-mtg
         - Key: Environment
           Value: !Ref Environment
+
+  # ---------------------------------------------------------
+  # E-mail subscription (always created)
+  #
+  # Separate AWS::SNS::Subscription resource so that changing the
+  # AlarmEmail parameter forces CFN to replace the subscription
+  # (delete the old endpoint, create a new pending one), instead of
+  # silently keeping the previous Endpoint as it does with an
+  # inline Subscription on the topic (#2544).
+  #
+  # The new endpoint will receive a one-time SNS confirmation email;
+  # the click-through must be completed for the topic to deliver
+  # alarms to the inbox. SubscriptionsConfirmed transitions from
+  # 0 -> 1 once the link is clicked.
+  # ---------------------------------------------------------
+  AlertEmailSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref AlertTopic
+      Protocol: email
+      Endpoint: !Ref AlarmEmail
 
   # ---------------------------------------------------------
   # Explicit topic access control (Sarah #54, ticket #2385 AC1).
