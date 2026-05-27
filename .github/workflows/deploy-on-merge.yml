@@ -107,8 +107,16 @@ jobs:
             [rhamiltoneng-dns.yml]="rhamiltoneng-dns"
             [security-alarms.yml]="security-alarms"
             [staging-deploy-role.yml]="staging-deploy-role"
-            [sync-lambda.yml]="sync-lambda"
+            # sync-lambda.yml backs BOTH the production and staging sync Lambda
+            # stacks via separate parameter files (parameters/sync-lambda.json,
+            # parameters/sync-lambda-staging.json). Both stack inputs are
+            # dispatched on any change to the shared template so the prod and
+            # staging Lambda functions stay in lockstep on template-level changes.
+            [sync-lambda.yml]="sync-lambda sync-lambda-staging"
             [nat-egress.yml]="nat-egress"
+            # dns-staging.yml backs the Route53 record for staging-api.vaultmtg.app.
+            # Wiring gap caught in the 2026-05-27 pre-Wave-N audit.
+            [dns-staging.yml]="dns-staging"
             [vaultmtg-security-services.yml]="vaultmtg-security-services"
             [vpc.yml]="vpc"
           )

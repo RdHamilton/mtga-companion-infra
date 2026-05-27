@@ -118,6 +118,15 @@ jobs:
             'vault-mtg-docs$'                  # docs repo path (EOL)
             'vault-mtg#'                       # ticket cross-ref (e.g., vault-mtg#2351)
             'vault-mtg-tickets#'               # ticket-repo cross-ref (e.g., vault-mtg-tickets#3)
+            # Deployed sync-lambda function names. Production is named
+            # vault-mtg-sync (legacy hyphenated, pre-dates ADR-022). Phase 6
+            # staging sync Lambda inherits the same pattern: vault-mtg-sync-staging.
+            # Both literal forms are allowed in added lines; the proper rename
+            # to vaultmtg-sync / vaultmtg-sync-staging is deferred per ADR-022
+            # §3 (maintenance-window resource recreate). Remove each entry once
+            # its resource is recreated under the vaultmtg-* prefix.
+            'vault-mtg-sync-staging'           # staging sync Lambda function name (sync-lambda.yml deployed twice via parameters/sync-lambda-staging.json, added in this PR)
+            'vault-mtg-sync'                   # production sync Lambda function name (deployed via parameters/sync-lambda.json)
             # Deployed sync-lambda resource name literal restored by PR #217
             # (#2605) — proper rename deferred per ADR-022 §3 maintenance-window
             # plan. Remove when the resource is recreated under the vaultmtg-* prefix.
