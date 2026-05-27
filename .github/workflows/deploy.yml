@@ -54,7 +54,11 @@ jobs:
   deploy:
     name: Deploy ${{ inputs.stack }} (${{ inputs.dry_run && 'dry-run' || 'deploy' }})
     runs-on: ubuntu-latest
-    environment: production   # requires reviewer approval if configured in repo settings
+    # Stacks containing "staging" route to the unprotected `staging` GHA environment;
+    # everything else gates on `production` (requires reviewer approval). This stops
+    # routine staging deploys (rds-vaultmtg-staging, ec2-staging, cloudwatch-alarms-staging,
+    # etc.) from requiring the same approval as prod mutations.
+    environment: ${{ contains(inputs.stack, 'staging') && 'staging' || 'production' }}
     permissions:
       id-token: write   # required for OIDC role assumption
       contents: read
