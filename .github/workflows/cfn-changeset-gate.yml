@@ -196,6 +196,7 @@ jobs:
               cdn)                          echo "vaultmtg-app-cdn" ;;
               iam-gha-roles)                echo "mtga-companion-iam-gha-roles" ;;
               cloudtrail)                   echo "vaultmtg-cloudtrail" ;;
+              nat-egress)                   echo "vaultmtg-nat-egress" ;;
               vaultmtg-security-services)   echo "vaultmtg-security-services" ;;
               # vaultmtg-security-services-import.yml is a one-shot IMPORT stub that
               # adopts the orphan ConfigSnapshotBucket into the same stack. Gate it

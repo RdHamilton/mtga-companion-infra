@@ -1,0 +1,9 @@
+[
+  { "ParameterKey": "Environment",          "ParameterValue": "production" },
+  { "ParameterKey": "VpcId",                "ParameterValue": "vpc-01d097c495e941d32" },
+  { "ParameterKey": "PublicSubnetForNatId", "ParameterValue": "subnet-021e2cc715f426da1" },
+  { "ParameterKey": "PrivateSubnetACidr",   "ParameterValue": "172.31.96.0/24" },
+  { "ParameterKey": "PrivateSubnetBCidr",   "ParameterValue": "172.31.97.0/24" },
+  { "ParameterKey": "PrivateSubnetAAz",     "ParameterValue": "us-east-1a" },
+  { "ParameterKey": "PrivateSubnetBAz",     "ParameterValue": "us-east-1b" }
+]
