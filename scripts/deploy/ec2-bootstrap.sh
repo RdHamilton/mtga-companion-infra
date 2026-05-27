@@ -642,16 +642,34 @@ if [ "$DRY_RUN" = "1" ]; then
     exit 0
 fi
 
-# Staging nginx vhost — HTTP-only block at bootstrap time.
-# certbot --expand adds the HTTPS block once DNS propagates.
-# See scripts/deploy/certbot-expand-staging.sh (or run manually:
-#   certbot --expand -d api.vaultmtg.app -d staging-api.vaultmtg.app --nginx)
+# Staging nginx vhost — full HTTP→HTTPS redirect + HTTPS proxy to 8081.
+#
+# The TLS cert at /etc/letsencrypt/live/api.vaultmtg.app/ is a multi-domain
+# certificate covering BOTH api.vaultmtg.app and staging-api.vaultmtg.app
+# (added via `certbot --expand -d api.vaultmtg.app -d staging-api.vaultmtg.app`
+# at initial provisioning). Re-use the same cert here; do NOT issue a separate
+# cert for staging-api -- one fewer renewal to manage.
+#
+# 2026-05-27 (Phase 1 staging separation): prior to this revision, this block
+# wrote ONLY the port-80 HTTP→HTTPS redirect, on the assumption that a separate
+# certbot-expand-staging.sh would later inject the HTTPS block. That follow-on
+# script never existed in this repo, so HTTPS requests for staging-api fell
+# through to the default 443 server (api.vaultmtg.app's block in
+# mtga-companion.conf), which proxied to the prod BFF on 8080. Net effect:
+# staging-api.vaultmtg.app served the production BFF's responses. Fixed by
+# writing both blocks inline here, idempotent across reruns.
 #
 # Per-vhost access_log: staging traffic ships to a dedicated file
 # (/var/log/nginx/staging-access.log) so the CloudWatch Agent can route
 # it to the /vaultmtg/staging/nginx log group without contaminating the
 # production /vaultmtg/production/nginx stream. See ADR-026.
+#
+# Rate limit zone: per-vhost (staging_api_limit), separate from the prod
+# zone (api_limit) defined in mtga-companion.conf, so staging bursts don't
+# share counters with production.
 cat > /etc/nginx/conf.d/staging-api.vaultmtg.app.conf <<'STAGINGNGINX'
+limit_req_zone $binary_remote_addr zone=staging_api_limit:10m rate=30r/m;
+
 server {
     listen 80;
     server_name staging-api.vaultmtg.app;
@@ -661,6 +679,36 @@ server {
     }
     location / {
         return 301 https://$host$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl;
+    server_name staging-api.vaultmtg.app;
+    ssl_certificate     /etc/letsencrypt/live/api.vaultmtg.app/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/api.vaultmtg.app/privkey.pem;
+    include /etc/letsencrypt/options-ssl-nginx.conf;
+    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
+    access_log /var/log/nginx/staging-access.log;
+
+    location /api/v1/ {
+        limit_req zone=staging_api_limit burst=10 nodelay;
+        proxy_pass         http://127.0.0.1:8081;
+        proxy_http_version 1.1;
+        proxy_set_header   Host              $host;
+        proxy_set_header   X-Real-IP         $remote_addr;
+        proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+        proxy_connect_timeout 10s;
+        proxy_read_timeout    60s;
+        proxy_send_timeout    30s;
+    }
+
+    location /healthz {
+        proxy_pass http://127.0.0.1:8081/healthz;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        access_log off;
     }
 }
 STAGINGNGINX
