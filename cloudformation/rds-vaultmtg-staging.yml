@@ -32,16 +32,16 @@ Parameters:
     Description: >
       Security group of the EC2 instance(s) that need to talk to staging
       RDS. The staging BFF systemd unit on the shared EC2 connects via the
-      staging EC2 SG (mtga-companion-staging-EC2SecurityGroupId, currently
-      sg-09f07e050f807c733).
+      staging EC2 SG (currently sg-09f07e050f807c733; export from the
+      ec2-sg-staging stack).
 
   SyncLambdaSecurityGroupId:
     Type: AWS::EC2::SecurityGroup::Id
     Description: >
-      Security group of the sync Lambda's ENIs. The same SG is shared by
-      production and staging sync Lambdas today (sg-01ed3679b1865eac9 per
-      mtga-companion-sync-lambda-LambdaSecurityGroupId export). When/if a
-      dedicated staging sync Lambda gets its own SG, update this param.
+      Security group of the sync Lambda's ENIs (currently sg-01ed3679b1865eac9;
+      export from the sync-lambda stack). The same SG is shared by production
+      and staging sync Lambdas today. When/if a dedicated staging sync Lambda
+      gets its own SG, update this param.
 
   Environment:
     Type: String
