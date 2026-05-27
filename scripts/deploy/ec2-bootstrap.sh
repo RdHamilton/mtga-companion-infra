@@ -114,8 +114,10 @@ log() { echo "[setup] $(date '+%Y-%m-%dT%H:%M:%S') $*"; }
 # Mixing them up either (a) needlessly requests KMS decrypt on non-secret data
 # or (b) silently fails to decrypt a SecureString (AWS returns the ciphertext).
 #
-# Production parameter inventory (verified against SSM 2026-05-23):
+# Production parameter inventory (verified against SSM 2026-05-23; updated 2026-05-27):
 #   SecureString : /vaultmtg/app/production/daemon-jwt-secret
+#                  /vaultmtg/app/production/CLERK_SECRET_KEY   (§3b overlay)
+#                  /vaultmtg/app/production/bff-admin-token    (§3b overlay — #2559)
 #   String       : /vaultmtg/app/production/ALLOWED_ORIGINS
 #                  /vaultmtg/app/production/db-secret-arn
 #                  /vaultmtg/app/production/db-endpoint
@@ -375,6 +377,16 @@ fi
 # secret required by config.go:144 in production. Failure here means
 # BFF crash-loops at config.Load() — bootstrap MUST abort.
 "${PROV_TMP}/provision-env.sh" CLERK_SECRET_KEY /vaultmtg/app/production/CLERK_SECRET_KEY --with-decryption
+
+# provision-env.sh BFF_ADMIN_TOKEN: CRITICAL. Writes the static high-entropy
+# Bearer token that protects GET /api/v1/admin/daemons/fleet-health (#2559).
+# Stored as a SecureString in SSM at /vaultmtg/app/production/bff-admin-token
+# (KMS alias/aws/ssm). The EC2 instance role already covers this path via the
+# VaultmtgAppProd SSM grant in ec2.yml (lines 236-280).
+# Failure here means the admin endpoint rejects ALL requests (fail-closed) —
+# not a crash-loop risk, but the endpoint is unusable. Bootstrap MUST abort so
+# the operator knows the token is missing rather than silently running without it.
+"${PROV_TMP}/provision-env.sh" BFF_ADMIN_TOKEN /vaultmtg/app/production/bff-admin-token --with-decryption
 
 # Restore the strict mode/ownership that provision-*.sh may have
 # relaxed (provision-env.sh chmods 600 itself; provision-db-url.sh
