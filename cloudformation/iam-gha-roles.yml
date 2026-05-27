@@ -652,6 +652,19 @@ Resources:
                 # is still scoped to the staging alerts topic ARN only via the
                 # SNSPublishStagingAlerts Sid below.
                 #
+                # `environment:staging` (2026-05-27, Phase 1 staging separation):
+                # deploy.yml now routes any stack matching `*staging*` to
+                # `environment: staging` (no approval gate) instead of
+                # `environment: production`. This trust entry is required so
+                # the deploy.yml job assuming this role for staging-only stacks
+                # (rds-vaultmtg-staging, sync-lambda-staging, etc.) does not get
+                # AssumeRoleWithWebIdentity denials. The role's actual AWS
+                # permissions are unchanged -- the boundary still enforces the
+                # full CFN-deploy permission cap. The staging GHA environment
+                # has no protection rules (this is intentional; production
+                # gating should not require human approval for staging-only
+                # deploys).
+                #
                 # #1759 PR-B dual-trust: legacy repo slug literals coexist
                 # with the parameterized form so the GitHub Settings repo
                 # rename can be executed without an OIDC lockout (#2485
@@ -663,10 +676,12 @@ Resources:
                   - !Sub repo:${GitHubOrg}/${InfraRepo}:ref:refs/heads/main
                   - !Sub repo:${GitHubOrg}/${InfraRepo}:pull_request
                   - !Sub repo:${GitHubOrg}/${InfraRepo}:environment:production
+                  - !Sub repo:${GitHubOrg}/${InfraRepo}:environment:staging
                   - !Sub repo:${GitHubOrg}/${InfraRepo}:environment:staging-alerts
                   - repo:RdHamilton/mtga-companion-infra:ref:refs/heads/main
                   - repo:RdHamilton/mtga-companion-infra:pull_request
                   - repo:RdHamilton/mtga-companion-infra:environment:production
+                  - repo:RdHamilton/mtga-companion-infra:environment:staging
                   - repo:RdHamilton/mtga-companion-infra:environment:staging-alerts
       Policies:
         - PolicyName: cfn-stack-deploy
