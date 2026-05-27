@@ -376,6 +376,16 @@ fi
 # BFF crash-loops at config.Load() — bootstrap MUST abort.
 "${PROV_TMP}/provision-env.sh" CLERK_SECRET_KEY /vaultmtg/app/production/CLERK_SECRET_KEY --with-decryption
 
+# provision-env.sh BFF_ADMIN_TOKEN: CRITICAL. Writes the static high-entropy
+# Bearer token that protects GET /api/v1/admin/daemons/fleet-health (#2559).
+# Stored as a SecureString in SSM at /vaultmtg/app/production/bff-admin-token
+# (KMS alias/aws/ssm). The EC2 instance role already covers this path via the
+# VaultmtgAppProd SSM grant in ec2.yml (lines 236-280).
+# Failure here means the admin endpoint rejects ALL requests (fail-closed) —
+# not a crash-loop risk, but the endpoint is unusable. Bootstrap MUST abort so
+# the operator knows the token is missing rather than silently running without it.
+"${PROV_TMP}/provision-env.sh" BFF_ADMIN_TOKEN /vaultmtg/app/production/bff-admin-token --with-decryption
+
 # Restore the strict mode/ownership that provision-*.sh may have
 # relaxed (provision-env.sh chmods 600 itself; provision-db-url.sh
 # does the same; we re-apply for paranoia in case any sed -i backup
