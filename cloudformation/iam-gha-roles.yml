@@ -557,6 +557,20 @@ Resources:
                 # sub -- both must be allowed or AssumeRoleWithWebIdentity is
                 # denied. See P1 incident 2026-05-22 (post-PR #87 #2332).
                 #
+                # `environment:staging` (2026-05-27, Phase 1 staging separation
+                # follow-on): when Phase 6 deploys the dedicated staging sync
+                # Lambda (vault-mtg-sync-staging, stack vaultmtg-sync-lambda-
+                # staging), deploy.yml's conditional routes any *staging* stack
+                # name through environment:staging instead of environment:
+                # production. The OIDC token sub becomes
+                # repo:<org>/<repo>:environment:staging, so this sub must be
+                # listed here or AssumeRoleWithWebIdentity is denied. Same fix
+                # pattern applied to GhaInfraCfnDeployRole in PR #239. The
+                # role's actual AWS permissions are unchanged -- only the set
+                # of GHA workflow sub claims allowed to assume it is widened
+                # by one entry. The staging GHA environment has no protection
+                # rules by design (see #239 PR body for the design rationale).
+                #
                 # #1759 PR-B dual-trust: the legacy repo slug literals coexist
                 # with the parameterized form so the GitHub Settings repo
                 # rename can be executed without an OIDC lockout (#2485
@@ -569,8 +583,10 @@ Resources:
                 token.actions.githubusercontent.com:sub:
                   - !Sub repo:${GitHubOrg}/${InfraRepo}:ref:refs/heads/main
                   - !Sub repo:${GitHubOrg}/${InfraRepo}:environment:production
+                  - !Sub repo:${GitHubOrg}/${InfraRepo}:environment:staging
                   - repo:RdHamilton/mtga-companion-infra:ref:refs/heads/main
                   - repo:RdHamilton/mtga-companion-infra:environment:production
+                  - repo:RdHamilton/mtga-companion-infra:environment:staging
       Policies:
         - PolicyName: sync-lambda-deploy
           PolicyDocument:
