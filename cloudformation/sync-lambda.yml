@@ -91,9 +91,7 @@ Parameters:
   DbPasswordSsmPath:
     Type: String
     Default: /vaultmtg/app/production/sync-db-password
-    Description: |
-      SSM Parameter Store path that holds the sync Lambda's PostgreSQL password (resolved at stack-update time into DB_PASSWORD).
-      Type: String (NOT SecureString) -- per AWS docs, the '{{resolve:ssm-secure:...}}' dynamic reference is not supported for Lambda environment variables. The sync DB credential is M2M-only with no user PII path; SSM String type is acceptable per the VaultMTG security model. See ADR-035 + the #37 pivot PR body for the full security trade-off.
+    Description: SSM Parameter Store path that holds the sync Lambda PostgreSQL password (resolved at stack-update time into DB_PASSWORD). Stored as SSM Type=String (not SecureString) because the ssm-secure dynamic reference is not supported in Lambda env vars; the credential is M2M-only with no user PII path. See ADR-035 and the #37 pivot PR body for the full security trade-off.
 
 Resources:
 
