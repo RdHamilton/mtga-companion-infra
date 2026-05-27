@@ -31,9 +31,12 @@ Parameters:
     Type: AWS::EC2::SecurityGroup::Id
     Description: >
       Security group of the EC2 instance(s) that need to talk to staging
-      RDS. The staging BFF systemd unit on the shared EC2 connects via the
-      staging EC2 SG (currently sg-09f07e050f807c733; export from the
-      ec2-sg-staging stack).
+      RDS. After PR #240 (2026-05-27 SG ingress correction), this is the
+      actual shared EC2 instance SG (sg-020b7705a72e9f246) -- the live
+      instance i-0226bf51fcf09b506 hosts both production (port 8080) and
+      staging (port 8081) BFF processes under that single SG. The legacy
+      ec2-sg-staging stack defines sg-09f07e050f807c733 but it is attached
+      to zero network interfaces; do NOT use that one.
 
   SyncLambdaSecurityGroupId:
     Type: AWS::EC2::SecurityGroup::Id

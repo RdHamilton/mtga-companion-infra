@@ -1,7 +1,12 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
-  VaultMTG RDS PostgreSQL instance (vaultmtg-rds stack).
+  VaultMTG PRODUCTION RDS PostgreSQL instance (vaultmtg-rds stack).
   Private subnet only, encrypted at rest, RDS-managed master password.
+  Production-only as of 2026-05-27 -- prior to the staging separation
+  (Phase 1, infra PR #238) this same instance also hosted the staging
+  vaultmtg_staging database via logical-only separation. Staging now lives
+  on its own dedicated instance (rds-vaultmtg-staging stack); this one
+  serves production traffic exclusively.
   This template is the import target for the 'mtga-companion-rds' -> vaultmtg-rds
   stack rename (ticket #2592). The live RDS instance and its supporting
   resources were created by the legacy 'mtga-companion-rds' stack and are being
