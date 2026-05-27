@@ -126,9 +126,10 @@ KEY="$1"
 PARAM_NAME="$2"
 # Lookup table — keyed off the SSM parameter name the real provisioner reads.
 case "$PARAM_NAME" in
-    "/vaultmtg/app/production/ALLOWED_ORIGINS")  VAL="https://app.vaultmtg.app" ;;
-    "/vaultmtg/app/production/CLERK_SECRET_KEY") VAL="sk_test_STUB_CLERK_SECRET" ;;
-    *)                                            VAL="STUB_VALUE_FOR_${KEY}" ;;
+    "/vaultmtg/app/production/ALLOWED_ORIGINS")   VAL="https://app.vaultmtg.app" ;;
+    "/vaultmtg/app/production/CLERK_SECRET_KEY")  VAL="sk_test_STUB_CLERK_SECRET" ;;
+    "/vaultmtg/app/production/bff-admin-token")   VAL="STUB_BFF_ADMIN_TOKEN_VALUE" ;;
+    *)                                             VAL="STUB_VALUE_FOR_${KEY}" ;;
 esac
 ENV_FILE="${BOOTSTRAP_PREFIX}/etc/mtga-companion/env"
 # Upsert: drop existing line for KEY then append.
@@ -324,6 +325,25 @@ if grep -q "listen 443 ssl" "${F6}/etc/nginx/conf.d/mtga-companion.conf"; then
     KEEP_TMPDIRS=1; exit 1
 fi
 echo "ASSERTION 6 PASS (fresh port-80 template written)"
+echo ""
+
+# ---------------------------------------------------------------------
+# ASSERTION 7 — section 3b overlays BFF_ADMIN_TOKEN into env file
+# (#2559: provision-env.sh BFF_ADMIN_TOKEN /vaultmtg/app/production/bff-admin-token)
+# ---------------------------------------------------------------------
+echo "===================================================================="
+echo "ASSERTION 7 — section 3b: env file contains BFF_ADMIN_TOKEN after overlay"
+echo "===================================================================="
+F7="$(make_fixture sec3b-bff-admin-token)"
+OUT7="$(run_bootstrap "$F7" 2>&1)" || { echo "BOOTSTRAP EXIT NONZERO"; echo "$OUT7"; KEEP_TMPDIRS=1; exit 1; }
+
+if ! grep -q "^BFF_ADMIN_TOKEN=STUB_BFF_ADMIN_TOKEN_VALUE$" "${F7}/etc/vaultmtg/env"; then
+    echo "FAIL: BFF_ADMIN_TOKEN missing from /etc/vaultmtg/env after section-3b overlay"
+    echo "--- env file contents:"
+    cat "${F7}/etc/vaultmtg/env" 2>/dev/null || echo "(no file)"
+    KEEP_TMPDIRS=1; exit 1
+fi
+echo "ASSERTION 7 PASS (BFF_ADMIN_TOKEN present in canonical env file)"
 echo ""
 
 echo "===================================================================="

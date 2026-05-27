@@ -114,8 +114,10 @@ log() { echo "[setup] $(date '+%Y-%m-%dT%H:%M:%S') $*"; }
 # Mixing them up either (a) needlessly requests KMS decrypt on non-secret data
 # or (b) silently fails to decrypt a SecureString (AWS returns the ciphertext).
 #
-# Production parameter inventory (verified against SSM 2026-05-23):
+# Production parameter inventory (verified against SSM 2026-05-23; updated 2026-05-27):
 #   SecureString : /vaultmtg/app/production/daemon-jwt-secret
+#                  /vaultmtg/app/production/CLERK_SECRET_KEY   (§3b overlay)
+#                  /vaultmtg/app/production/bff-admin-token    (§3b overlay — #2559)
 #   String       : /vaultmtg/app/production/ALLOWED_ORIGINS
 #                  /vaultmtg/app/production/db-secret-arn
 #                  /vaultmtg/app/production/db-endpoint
