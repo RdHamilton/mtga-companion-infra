@@ -25,16 +25,16 @@ Parameters:
       The stack must export vaultmtg-${Environment}-AlertTopicArn.
   SubnetIdA:
     Type: AWS::EC2::Subnet::Id
-    Default: subnet-021e2cc715f426da1
-    Description: VPC subnet in AZ-a for Lambda
+    Default: subnet-05f881623516300b0
+    Description: VPC subnet in AZ-a for Lambda (private subnet vaultmtg-production-private-1a, NAT-routed via nat-07dd75f2da096369f; provisioned in #236)
   SubnetIdB:
     Type: AWS::EC2::Subnet::Id
-    Default: subnet-0600373b7aab41525
-    Description: VPC subnet in AZ-b for Lambda
+    Default: subnet-06d52651558bfbe7e
+    Description: VPC subnet in AZ-b for Lambda (private subnet vaultmtg-production-private-1b, NAT-routed via nat-07dd75f2da096369f; provisioned in #236)
   LambdaTimeout:
     Type: Number
-    Default: 300
-    Description: Lambda function timeout in seconds (sync runs exceed the 3s AWS default)
+    Default: 900
+    Description: Lambda function timeout in seconds (Lambda max = 900s / 15 min; sized for the 22 fetch combinations of 11 sets x 2 formats per run, each making an external HTTPS call + DB write)
   LambdaMemorySize:
     Type: Number
     Default: 256
