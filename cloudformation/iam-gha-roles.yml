@@ -559,10 +559,10 @@ Resources:
                 #
                 # `environment:staging` (2026-05-27, Phase 1 staging separation
                 # follow-on): when Phase 6 deploys the dedicated staging sync
-                # Lambda (vault-mtg-sync-staging, stack vaultmtg-sync-lambda-
-                # staging), deploy.yml's conditional routes any *staging* stack
-                # name through environment:staging instead of environment:
-                # production. The OIDC token sub becomes
+                # Lambda stack (vaultmtg-sync-lambda-staging), deploy.yml's
+                # conditional routes any *staging* stack name through
+                # environment:staging instead of environment:production.
+                # The OIDC token sub becomes
                 # repo:<org>/<repo>:environment:staging, so this sub must be
                 # listed here or AssumeRoleWithWebIdentity is denied. Same fix
                 # pattern applied to GhaInfraCfnDeployRole in PR #239. The
