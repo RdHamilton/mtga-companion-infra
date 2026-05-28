@@ -182,6 +182,62 @@ jobs:
             --query '{Runtime:Runtime,Arch:Architectures,Timeout:Timeout,MemorySize:MemorySize,State:State,LastModified:LastModified}' \
             --output table
 
+      - name: Post-deploy smoke invocation
+        # Verify the freshly-deployed Lambda function is reachable and in Active state
+        # by performing a DryRun invocation.
+        #
+        # WHY DryRun and not RequestResponse:
+        #   The sync Lambda performs a full external sync (17Lands API calls + RDS writes)
+        #   on every RequestResponse invocation -- typical run time is 60-300s. A
+        #   synchronous RequestResponse invocation would block the workflow well beyond
+        #   the 30s smoke budget and trigger a redundant production sync on every deploy.
+        #   DryRun validates (a) the caller has lambda:InvokeFunction permission, (b) the
+        #   function exists, and (c) the function is in Active state (not Pending/Failed
+        #   after the code or config update). StatusCode 204 confirms all three.
+        #   A full RequestResponse correctness smoke (against a test event + staging
+        #   function) is tracked as a follow-on ticket: RdHamilton/vault-mtg-tickets#38.
+        #
+        # SKIP: dry_run -- no binary was deployed; nothing to smoke.
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.dry_run) }}
+        run: |
+          set -euo pipefail
+
+          FN="${{ env.LAMBDA_FUNCTION_NAME }}"
+          echo "Post-deploy smoke: DryRun invocation on ${FN}..."
+
+          INVOKE_OUT=$(aws lambda invoke \
+            --function-name "${FN}" \
+            --invocation-type DryRun \
+            --region ${{ env.AWS_REGION }} \
+            /dev/null \
+            --output json 2>&1) || {
+            echo "ERROR: aws lambda invoke failed (non-zero exit)."
+            echo "${INVOKE_OUT}"
+            exit 1
+          }
+
+          echo "Invoke response: ${INVOKE_OUT}"
+
+          STATUS_CODE=$(echo "${INVOKE_OUT}" | jq -r '.StatusCode // empty')
+          FUNCTION_ERROR=$(echo "${INVOKE_OUT}" | jq -r '.FunctionError // empty')
+
+          if [ -z "${STATUS_CODE}" ]; then
+            echo "ERROR: Could not parse StatusCode from invoke response."
+            exit 1
+          fi
+
+          if [ -n "${FUNCTION_ERROR}" ]; then
+            echo "ERROR: Lambda invoke returned FunctionError: ${FUNCTION_ERROR}"
+            exit 1
+          fi
+
+          if [ "${STATUS_CODE}" != "204" ]; then
+            echo "ERROR: Expected StatusCode 204 from DryRun invocation, got ${STATUS_CODE}."
+            exit 1
+          fi
+
+          echo "Post-deploy smoke PASS: DryRun StatusCode=${STATUS_CODE}, no FunctionError."
+
       - name: Dry run summary
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
         run: |
