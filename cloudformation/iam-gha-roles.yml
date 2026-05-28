@@ -601,6 +601,7 @@ Resources:
                   - lambda:GetFunctionConfiguration
                   - lambda:CreateFunction
                   - lambda:WaitForFunctionUpdated
+                  - lambda:InvokeFunction  # required by post-deploy smoke (DryRun invocation)
                 Resource: !Ref SyncLambdaFunctionArn
               - Sid: CloudFormationSyncStack
                 Effect: Allow
