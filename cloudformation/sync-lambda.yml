@@ -642,7 +642,7 @@ Resources:
     Type: AWS::Scheduler::Schedule
     DependsOn: SyncDLQ
     Properties:
-      Name: !Sub "mtga-companion-${Environment}-sync-smoke"
+      Name: !Sub "vaultmtg-${Environment}-sync-smoke"
       Description: !Sub "Data-plane smoke: invokes ${LambdaFunctionName} every 30 min to assert RDS + code path health (vault-mtg-tickets#93)"
       ScheduleExpression: !Ref SmokeCronExpression
       ScheduleExpressionTimezone: UTC
@@ -688,7 +688,7 @@ Resources:
   SyncLambdaSmokeErrorAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmName: !Sub "mtga-companion-${Environment}-sync-lambda-smoke-errors"
+      AlarmName: !Sub "vaultmtg-${Environment}-sync-lambda-smoke-errors"
       AlarmDescription: !Sub |
         Data-plane smoke invocation of ${LambdaFunctionName} reported an error.
         The smoke schedule (every 30 min) detected a full code-path failure:
