@@ -69,6 +69,13 @@ Parameters:
       invocations before the SyncLambdaNeverSucceededAlarm fires. Default 2
       allows a one-day scheduling slip before paging (fires after 48h of silence).
       Set to 1 to alarm on the very first missed daily window.
+  SmokeCronExpression:
+    Type: String
+    Default: 'rate(30 minutes)'
+    Description: |
+      EventBridge Scheduler rate/cron expression for the data-plane smoke schedule.
+      Default runs every 30 minutes (AC1). Set to 'rate(1 day)' or DISABLED state
+      to reduce invocation frequency outside of active testing periods.
   # ---------------------------------------------------------
   # Sync Lambda runtime environment variables (ADR-035)
   #
@@ -614,6 +621,105 @@ Resources:
         - Key: Environment
           Value: !Ref Environment
 
+  # ---------------------------------------------------------
+  # Data-plane smoke: scheduled every 30 min (AC1, vault-mtg-tickets#93)
+  #
+  # Runs a real Lambda invocation (not DryRun) on a short cadence to exercise
+  # the full code path: RDS connectivity, env-var resolution, external API calls,
+  # and upsert logic. Complements the deploy-gate DryRun (which validates IAM +
+  # Active state only) and the SyncLambdaNeverSucceededAlarm (which detects
+  # scheduler silence over 24-48h windows).
+  #
+  # The Lambda handler ignores the event payload and runs a full sync — this IS
+  # the data-plane exercise. Any code regression, RDS unreachability, or missing
+  # env var surfaces as a Lambda Error, which fires SyncLambdaSmokeErrorAlarm.
+  #
+  # RetryPolicy.MaximumRetryAttempts: 0 — the smoke schedule fires every 30 min;
+  # a single failure is enough signal. No retries avoids compounding the test
+  # load if the Lambda is transiently slow.
+  # ---------------------------------------------------------
+  SmokeSchedule:
+    Type: AWS::Scheduler::Schedule
+    DependsOn: SyncDLQ
+    Properties:
+      Name: !Sub "vaultmtg-${Environment}-sync-smoke"
+      Description: !Sub "Data-plane smoke: invokes ${LambdaFunctionName} every 30 min to assert RDS + code path health (vault-mtg-tickets#93)"
+      ScheduleExpression: !Ref SmokeCronExpression
+      ScheduleExpressionTimezone: UTC
+      FlexibleTimeWindow:
+        Mode: 'OFF'
+      State: ENABLED
+      Target:
+        Arn: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${LambdaFunctionName}"
+        RoleArn: !GetAtt SchedulerExecutionRole.Arn
+        DeadLetterConfig:
+          Arn: !GetAtt SyncDLQ.Arn
+        RetryPolicy:
+          MaximumRetryAttempts: 0
+
+  # Allow the smoke schedule to invoke the sync Lambda
+  LambdaPermissionSchedulerSmoke:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref LambdaFunctionName
+      Action: lambda:InvokeFunction
+      Principal: scheduler.amazonaws.com
+      SourceArn: !GetAtt SmokeSchedule.Arn
+
+  # ---------------------------------------------------------
+  # CloudWatch alarm: smoke invocation errors (vault-mtg-tickets#93)
+  #
+  # Fires when any smoke-triggered Lambda invocation records an error in the
+  # AWS/Lambda Errors metric. Because the smoke schedule fires every 30 min
+  # and the alarm evaluates over a 5-min period, a single invocation failure
+  # surfaces within one evaluation window (Period: 300s, EvaluationPeriods: 1).
+  #
+  # Covers AC3: FunctionError in response, StatusCode != 200, RDS connection
+  # failure (which surfaces as an unhandled error), missing env var (log.Fatal).
+  #
+  # TreatMissingData=notBreaching: most 5-min periods have no Lambda activity.
+  # The smoke fires every 30 min, so roughly 5 of every 6 evaluation windows
+  # have no data — treating missing as breaching would cause near-permanent alarm.
+  #
+  # NOTE: AWS/Lambda Errors is function-scoped, not per-trigger-source. This
+  # alarm catches errors from ALL invocations of the function (smoke + daily
+  # schedule + manual). This is intentional — any error source is actionable.
+  # ---------------------------------------------------------
+  SyncLambdaSmokeErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "vaultmtg-${Environment}-sync-lambda-smoke-errors"
+      AlarmDescription: !Sub |
+        Data-plane smoke invocation of ${LambdaFunctionName} reported an error.
+        The smoke schedule (every 30 min) detected a full code-path failure:
+        RDS unreachable, missing env var, code regression, or external API failure.
+        Check CloudWatch Logs for the Lambda function:
+          aws logs tail /aws/lambda/${LambdaFunctionName} --since 1h --profile personal
+        And inspect the DLQ for any failed async invocations:
+          aws sqs receive-message --queue-url ${SyncDLQ} --profile personal
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref LambdaFunctionName
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !ImportValue
+          Fn::Sub: "vaultmtg-${Environment}-AlertTopicArn"
+      OKActions:
+        - !ImportValue
+          Fn::Sub: "vaultmtg-${Environment}-AlertTopicArn"
+      Tags:
+        - Key: Project
+          Value: vaultmtg
+        - Key: Environment
+          Value: !Ref Environment
+
 Outputs:
   LambdaSecurityGroupId:
     Description: Security group ID for the sync Lambda
@@ -668,3 +774,15 @@ Outputs:
     Value: !GetAtt SyncLambdaNeverSucceededAlarm.Arn
     Export:
       Name: !Sub "${AWS::StackName}-SyncLambdaNeverSucceededAlarmArn"
+
+  SmokeScheduleArn:
+    Description: ARN of the EventBridge data-plane smoke schedule (vault-mtg-tickets#93)
+    Value: !GetAtt SmokeSchedule.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-SmokeScheduleArn"
+
+  SyncLambdaSmokeErrorAlarmArn:
+    Description: ARN of the CloudWatch alarm for data-plane smoke invocation errors
+    Value: !GetAtt SyncLambdaSmokeErrorAlarm.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-SyncLambdaSmokeErrorAlarmArn"
