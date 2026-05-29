@@ -233,10 +233,12 @@ fi
 # ---------------------------------------------------------
 log "Configuring nginx..."
 cat > /etc/nginx/conf.d/staging-api.vaultmtg.app.conf <<'NGINX'
-# Rate limit zone — 30 req/min per client IP, burst 10 nodelay.
-# Mirrors the production rate (mtga-companion-ssl.conf). Applied to /api/v1/.
+# Rate limit zone — raised from 30r/m burst=10 to 60r/m burst=50 (2026-05-29
+# incident fix): the SPA fires 10+ parallel requests per page load; burst=10
+# saturated immediately causing 503s. Live patch applied during incident;
+# codified here so re-provision does not revert it. Applied to /api/v1/.
 # /healthz and the SSE stream /api/v1/events are exempt.
-limit_req_zone $binary_remote_addr zone=stg_api_limit:10m rate=30r/m;
+limit_req_zone $binary_remote_addr zone=stg_api_limit:10m rate=60r/m;
 
 server {
     listen 80 default_server;
@@ -247,7 +249,12 @@ server {
     }
 
     location /api/v1/ {
-        limit_req zone=stg_api_limit burst=10 nodelay;
+        limit_req zone=stg_api_limit burst=50 nodelay;
+        # CORS on nginx-generated error responses (2026-05-29 post-mortem).
+        add_header Access-Control-Allow-Origin "https://stg-app.vaultmtg.app" always;
+        add_header Access-Control-Allow-Methods "GET, POST, PUT, PATCH, DELETE, OPTIONS" always;
+        add_header Access-Control-Allow-Headers "Authorization, Content-Type, X-Requested-With" always;
+        add_header Access-Control-Allow-Credentials "true" always;
         proxy_pass         http://127.0.0.1:8080;
         proxy_http_version 1.1;
         proxy_set_header   Host              $host;
