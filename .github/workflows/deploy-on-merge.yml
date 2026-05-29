@@ -277,14 +277,104 @@ jobs:
             echo "  Drift status:     $DRIFT_STATUS"
 
             if [ "$DRIFT_STATUS" = "DRIFTED" ]; then
-              # Pull drifted-resource detail for the annotation.
-              DRIFT_DETAIL=$(aws cloudformation describe-stack-resource-drifts \
+              # Pull drifted-resource detail as JSON so we can inspect
+              # PropertyDifferences paths and ResourceType before deciding
+              # whether to block. We include UNKNOWN here so CloudWatch Alarm
+              # resources (which CFN always marks UNKNOWN) are visible.
+              #
+              # FAIL-CLOSED: capture the CLI exit code before any jq work.
+              # If the API call fails on an already-DRIFTED stack we must NOT
+              # synthesise an empty payload (that would make REAL_DRIFT_COUNT=0
+              # and let the deploy proceed — fail-open). Block immediately.
+              DRIFT_JSON=$(aws cloudformation describe-stack-resource-drifts \
                 --stack-name "$STACK" \
-                --stack-resource-drift-status-filters MODIFIED DELETED NOT_CHECKED \
-                --query 'StackResourceDrifts[*].[LogicalResourceId,ResourceType,StackResourceDriftStatus]' \
-                --output text 2>/dev/null || echo "(could not retrieve drift detail)")
+                --stack-resource-drift-status-filters MODIFIED DELETED NOT_CHECKED UNKNOWN \
+                --output json 2>/tmp/drift_err_"$STACK".txt)
+              DRIFT_API_RC=$?
+              if [ "$DRIFT_API_RC" -ne 0 ]; then
+                echo "::error::Stack $STACK is DRIFTED but describe-stack-resource-drifts failed (exit $DRIFT_API_RC) — cannot assess benign patterns. Blocking deploy (fail-closed)."
+                cat /tmp/drift_err_"$STACK".txt || true
+                rm -f /tmp/drift_err_"$STACK".txt
+                DRIFTED_STACKS+=("$STACK")
+                continue
+              fi
+              rm -f /tmp/drift_err_"$STACK".txt
 
-              # Check allow-list before blocking.
+              # ----------------------------------------------------------------
+              # Benign-drift filter (ticket #156).
+              #
+              # CFN has two known false-positive patterns that can never be
+              # resolved by a template deploy:
+              #
+              # 1. AWS::CloudWatch::Alarm with StackResourceDriftStatus=UNKNOWN
+              #    CFN's drift checker cannot inspect alarm tags via
+              #    describe-alarms, so it marks every tagged alarm UNKNOWN.
+              #    This is a CFN limitation, not real configuration drift.
+              #
+              # 2. AWS::SQS::Queue MODIFIED where the ONLY PropertyDifferences
+              #    path is "/Tags".  CFN reads SQS tags via GetQueueAttributes,
+              #    which never returns tags; the actual tags are present per
+              #    ListQueueTags.  The "/Tags" diff is always a false positive.
+              #
+              # Any resource that does NOT match one of these two patterns is
+              # considered real drift and still blocks the auto-deploy.
+              # ----------------------------------------------------------------
+
+              # Count resources that are genuine (non-benign) drift.
+              REAL_DRIFT_COUNT=$(echo "$DRIFT_JSON" | jq '
+                [.StackResourceDrifts[] |
+                  select(
+                    # Keep it (real drift) unless it matches a benign pattern.
+                    # Benign pattern 1: CloudWatch::Alarm with UNKNOWN status
+                    (
+                      .ResourceType == "AWS::CloudWatch::Alarm" and
+                      .StackResourceDriftStatus == "UNKNOWN"
+                    ) or
+                    # Benign pattern 2: SQS::Queue MODIFIED with only /Tags diff
+                    (
+                      .ResourceType == "AWS::SQS::Queue" and
+                      .StackResourceDriftStatus == "MODIFIED" and
+                      (.PropertyDifferences | length) > 0 and
+                      ([.PropertyDifferences[].PropertyPath] | all(. == "/Tags"))
+                    )
+                    | not   # invert: select resources that are NOT benign
+                  )
+                ] | length
+              ' 2>/dev/null || echo "1")
+
+              # Also collect a human-readable summary of all drifted resources
+              # (benign + real) for the log.
+              DRIFT_SUMMARY=$(echo "$DRIFT_JSON" | jq -r '
+                .StackResourceDrifts[] |
+                  "\(.LogicalResourceId)  \(.ResourceType)  \(.StackResourceDriftStatus)"
+              ' 2>/dev/null || echo "(could not parse drift detail)")
+
+              # Count benign resources for the log message.
+              BENIGN_COUNT=$(echo "$DRIFT_JSON" | jq '
+                [.StackResourceDrifts[] |
+                  select(
+                    (
+                      .ResourceType == "AWS::CloudWatch::Alarm" and
+                      .StackResourceDriftStatus == "UNKNOWN"
+                    ) or
+                    (
+                      .ResourceType == "AWS::SQS::Queue" and
+                      .StackResourceDriftStatus == "MODIFIED" and
+                      (.PropertyDifferences | length) > 0 and
+                      ([.PropertyDifferences[].PropertyPath] | all(. == "/Tags"))
+                    )
+                  )
+                ] | length
+              ' 2>/dev/null || echo "0")
+
+              echo "  Drifted resources (all):"
+              while IFS= read -r line; do echo "    $line"; done <<< "$DRIFT_SUMMARY"
+              echo "  Benign (filtered) resources: $BENIGN_COUNT"
+              echo "  Real drift resources:        $REAL_DRIFT_COUNT"
+
+              # Check allow-list before blocking (covers any remaining cases
+              # where an operator has explicitly accepted known-benign drift on
+              # a specific stack — kept for backward compatibility).
               allowed=0
               for allowed_input in $ALLOW_DRIFT_STACKS; do
                 [ "$input" = "$allowed_input" ] && allowed=1 && break
@@ -292,16 +382,14 @@ jobs:
 
               if [ "$allowed" -eq 1 ]; then
                 echo "::warning::Stack $STACK is DRIFTED but is on ALLOW_DRIFT_STACKS — proceeding with deploy."
-                echo "  Drifted resources:"
-                while IFS= read -r line; do echo "    $line"; done <<< "$DRIFT_DETAIL"
+              elif [ "$REAL_DRIFT_COUNT" -eq 0 ]; then
+                echo "::warning::Stack $STACK reported DRIFTED but all $BENIGN_COUNT resource(s) match known-benign CFN false-positive patterns (ticket #156) — proceeding with deploy."
               else
-                echo "::error::Stack $STACK is DRIFTED. Auto-deploy blocked to prevent #58-class UPDATE_ROLLBACK_COMPLETE."
-                echo "  Drifted resources:"
-                while IFS= read -r line; do echo "    $line"; done <<< "$DRIFT_DETAIL"
+                echo "::error::Stack $STACK has $REAL_DRIFT_COUNT real drifted resource(s). Auto-deploy blocked to prevent #58-class UPDATE_ROLLBACK_COMPLETE."
                 echo "  Resolution options:"
                 echo "    1. Run 'Deploy CloudFormation Stack' (deploy.yml) manually after investigating the drift."
                 echo "    2. Re-run detect-drift.yml to confirm current drift state."
-                echo "    3. Add the stack input to ALLOW_DRIFT_STACKS in deploy-on-merge.yml if drift is known-benign."
+                echo "    3. If the drift is genuinely benign, add it to the filter in the preflight-drift-check step."
                 DRIFTED_STACKS+=("$STACK")
               fi
             else
