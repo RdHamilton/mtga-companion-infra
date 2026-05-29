@@ -10,9 +10,10 @@
 # Differences from ec2-bootstrap.sh (production):
 #   - Reads SSM params from /vaultmtg/app/staging/* (canonical namespace, post R-13).
 #     The legacy /vaultmtg/staging/* SSM namespace is retired; do not reintroduce it.
-#   - Primary BFF service name: vault-mtg-bff-staging (port 8080).
+#   - Primary BFF service name: vault-mtg-bff-staging (port 8081).
 #   - Does NOT install the collocated staging secondary unit (staging IS the primary).
 #   - nginx configured for staging-api.vaultmtg.app only (no api.vaultmtg.app vhost).
+#     TLS via certbot (idempotency guard preserves expanded config on re-run).
 #   - CloudWatch log group names: /vaultmtg/staging/bff and /vaultmtg/staging/nginx
 #     (these are CloudWatch Logs group names, not SSM Parameter Store paths).
 #   - Deploy bucket: mtga-companion-deploy-artifacts-staging.
@@ -119,7 +120,7 @@ chmod 750 "$ENV_DIR"
 # ---------------------------------------------------------
 log "Fetching config from SSM (/vaultmtg/app/staging/*)..."
 
-# Port is controlled exclusively by the systemd unit's Environment=BFF_PORT=8080
+# Port is controlled exclusively by the systemd unit's Environment=BFF_PORT=8081
 # directive below. The BFF binary reads BFF_PORT only (services/bff/cmd/main.go);
 # any PORT= entry in the env file would be silently ignored, so we do not fetch
 # or write one here.
@@ -185,7 +186,8 @@ fi
 # 5. systemd service (vault-mtg-bff-staging)
 #
 # On the dedicated staging EC2, the staging BFF IS the primary
-# service -- it runs on port 8080 (same as prod BFF on prod EC2).
+# service -- it runs on port 8081 (matches live i-0226bf51fcf09b506
+# config reconciled 2026-05-29; nginx proxy_pass also points to 8081).
 # No secondary collocated unit is installed here.
 # ---------------------------------------------------------
 log "Installing systemd service (vault-mtg-bff-staging)..."
@@ -205,7 +207,7 @@ RestartSec=5
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=vault-mtg-bff-staging
-Environment=BFF_PORT=8080
+Environment=BFF_PORT=8081
 Environment=MTGA_ENV=staging
 EnvironmentFile=/etc/mtga-companion-staging/env
 NoNewPrivileges=true
@@ -230,15 +232,58 @@ fi
 
 # ---------------------------------------------------------
 # 6. nginx configuration (staging-api.vaultmtg.app only)
+#
+# TLS provisioning flow (idempotent across re-runs):
+#
+#   Fresh instance:
+#     - This block writes an HTTP-only server block (port 80).
+#     - Section 8 (certbot) runs: `certbot --nginx --redirect` clones the
+#       port-80 server block into a port-443 HTTPS block and rewrites port 80
+#       to return a 301 redirect. Certbot stores certs at
+#       /etc/letsencrypt/live/<DOMAIN>/ and injects ssl_certificate /
+#       ssl_certificate_key / options-ssl-nginx.conf directives automatically.
+#     - After certbot: config has both port-80 (redirect) and port-443
+#       (HTTPS proxy) server blocks -- matching live i-0226bf51fcf09b506.
+#
+#   Re-run after certbot has already run (e.g., cloud-init retry, AMI bake):
+#     - The idempotency guard below detects `listen 443 ssl` in the deployed
+#       file and preserves it verbatim. No overwrite, no TLS wipe.
+#     - This matches the production bootstrap pattern (ec2-bootstrap.sh §6,
+#       Bug 1 fix from vault-mtg-tickets#3).
+#
+# Cert path: /etc/letsencrypt/live/<domain>/ (domain from SSM in section 8).
+#   - On the dedicated staging EC2, the cert covers staging-api.vaultmtg.app.
+#   - On the shared prod EC2 (ec2-bootstrap.sh), the cert is multi-domain
+#     (api.vaultmtg.app + staging-api.vaultmtg.app). This staging script is
+#     for the dedicated staging instance only -- it does NOT reuse the prod cert.
+#
+# Rate limit zone name: `staging_api_limit` (matches live config on
+#   i-0226bf51fcf09b506 post 2026-05-29 reconciliation). The previous name
+#   `stg_api_limit` was a drift introduced in PR #264; corrected here.
+#
+# Proxy upstream: port 8081 (matches live config and systemd unit BFF_PORT=8081).
+#   The previous value 8080 was incorrect; corrected here.
 # ---------------------------------------------------------
+STAGING_NGINX_CONF="/etc/nginx/conf.d/staging-api.vaultmtg.app.conf"
+
 log "Configuring nginx..."
-cat > /etc/nginx/conf.d/staging-api.vaultmtg.app.conf <<'NGINX'
+
+# Idempotence guard: if the deployed config already contains a certbot-
+# expanded `listen 443 ssl` server block, preserve it verbatim. Overwriting
+# with the port-80-only template would wipe the TLS server block (same bug
+# pattern as vault-mtg-tickets#3 Bug 1 in ec2-bootstrap.sh).
+if [ -f "${STAGING_NGINX_CONF}" ] && grep -q "listen 443 ssl" "${STAGING_NGINX_CONF}"; then
+    log "nginx staging config already has TLS (listen 443 ssl) -- preserving deployed file."
+else
+    log "Writing fresh nginx staging config (no existing TLS block) -- certbot will expand."
+    cat > "${STAGING_NGINX_CONF}" <<'NGINX'
 # Rate limit zone — raised from 30r/m burst=10 to 60r/m burst=50 (2026-05-29
 # incident fix): the SPA fires 10+ parallel requests per page load; burst=10
 # saturated immediately causing 503s. Live patch applied during incident;
 # codified here so re-provision does not revert it. Applied to /api/v1/.
 # /healthz and the SSE stream /api/v1/events are exempt.
-limit_req_zone $binary_remote_addr zone=stg_api_limit:10m rate=60r/m;
+# Zone name: staging_api_limit (reconciled 2026-05-29 to match live config).
+limit_req_zone $binary_remote_addr zone=staging_api_limit:10m rate=60r/m;
 
 server {
     listen 80 default_server;
@@ -249,13 +294,16 @@ server {
     }
 
     location /api/v1/ {
-        limit_req zone=stg_api_limit burst=50 nodelay;
+        limit_req zone=staging_api_limit burst=50 nodelay;
         # CORS on nginx-generated error responses (2026-05-29 post-mortem).
+        # Without `always`, 4xx/5xx nginx error responses omit CORS headers --
+        # the browser reports a CORS violation masking the real upstream error.
+        # Certbot carries these through to the HTTPS server block on expansion.
         add_header Access-Control-Allow-Origin "https://stg-app.vaultmtg.app" always;
         add_header Access-Control-Allow-Methods "GET, POST, PUT, PATCH, DELETE, OPTIONS" always;
         add_header Access-Control-Allow-Headers "Authorization, Content-Type, X-Requested-With" always;
         add_header Access-Control-Allow-Credentials "true" always;
-        proxy_pass         http://127.0.0.1:8080;
+        proxy_pass         http://127.0.0.1:8081;
         proxy_http_version 1.1;
         proxy_set_header   Host              $host;
         proxy_set_header   X-Real-IP         $remote_addr;
@@ -267,14 +315,14 @@ server {
     }
 
     location /health {
-        proxy_pass       http://127.0.0.1:8080/health;
+        proxy_pass       http://127.0.0.1:8081/health;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         access_log off;
     }
 
     location /healthz {
-        proxy_pass       http://127.0.0.1:8080/healthz;
+        proxy_pass       http://127.0.0.1:8081/healthz;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         access_log off;
@@ -292,6 +340,7 @@ server {
     }
 }
 NGINX
+fi
 
 rm -f /etc/nginx/conf.d/default.conf
 mkdir -p /var/www/mtga-companion /var/www/certbot
