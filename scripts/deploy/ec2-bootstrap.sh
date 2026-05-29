@@ -601,6 +601,12 @@ server {
 
     location /api/v1/ {
         limit_req zone=api_limit burst=10 nodelay;
+        # CORS on nginx-generated error responses (2026-05-29 post-mortem).
+        # Certbot will carry these through to the HTTPS server block on expansion.
+        add_header Access-Control-Allow-Origin "https://app.vaultmtg.app" always;
+        add_header Access-Control-Allow-Methods "GET, POST, PUT, PATCH, DELETE, OPTIONS" always;
+        add_header Access-Control-Allow-Headers "Authorization, Content-Type, X-Requested-With" always;
+        add_header Access-Control-Allow-Credentials "true" always;
         proxy_pass         http://127.0.0.1:8080;
         proxy_http_version 1.1;
         proxy_set_header   Host              $host;
@@ -680,7 +686,10 @@ fi
 # zone (api_limit) defined in mtga-companion.conf, so staging bursts don't
 # share counters with production.
 cat > /etc/nginx/conf.d/staging-api.vaultmtg.app.conf <<'STAGINGNGINX'
-limit_req_zone $binary_remote_addr zone=staging_api_limit:10m rate=30r/m;
+# Rate limit zone — raised from 30r/m burst=10 to 60r/m burst=50
+# (2026-05-29 incident fix): the SPA fires 10+ parallel requests per page
+# load; burst=10 saturated immediately causing 503s. Codified from live patch.
+limit_req_zone $binary_remote_addr zone=staging_api_limit:10m rate=60r/m;
 
 server {
     listen 80;
@@ -703,8 +712,16 @@ server {
     ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
     access_log /var/log/nginx/staging-access.log;
 
+    # CORS on ALL responses including nginx-generated errors (2026-05-29 post-mortem).
+    # Without `always`, 4xx/5xx nginx responses omit CORS headers — the browser
+    # reports a CORS violation masking the real upstream error.
+    add_header Access-Control-Allow-Origin "https://stg-app.vaultmtg.app" always;
+    add_header Access-Control-Allow-Methods "GET, POST, PUT, PATCH, DELETE, OPTIONS" always;
+    add_header Access-Control-Allow-Headers "Authorization, Content-Type, X-Requested-With" always;
+    add_header Access-Control-Allow-Credentials "true" always;
+
     location /api/v1/ {
-        limit_req zone=staging_api_limit burst=10 nodelay;
+        limit_req zone=staging_api_limit burst=50 nodelay;
         proxy_pass         http://127.0.0.1:8081;
         proxy_http_version 1.1;
         proxy_set_header   Host              $host;
