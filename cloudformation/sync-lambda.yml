@@ -61,6 +61,14 @@ Parameters:
     Description: |
       Number of visible messages in the DLQ that triggers the SyncDLQDepthAlarm.
       Default 1 means any message landing in the DLQ fires the alarm.
+  ZeroInvocationEvaluationPeriods:
+    Type: Number
+    Default: 2
+    Description: |
+      Number of consecutive 24-hour periods (Period: 86400s) with zero Lambda
+      invocations before the SyncLambdaNeverSucceededAlarm fires. Default 2
+      allows a one-day scheduling slip before paging (fires after 48h of silence).
+      Set to 1 to alarm on the very first missed daily window.
   # ---------------------------------------------------------
   # Sync Lambda runtime environment variables (ADR-035)
   #
@@ -546,6 +554,66 @@ Resources:
         - Key: Environment
           Value: !Ref Environment
 
+  # ---------------------------------------------------------
+  # CloudWatch alarm: zero Lambda invocations (silently-dead scheduler)
+  #
+  # Guards the blind spot that neither SyncLambdaErrorAlarm nor
+  # SyncDLQDepthAlarm can detect: the scheduler fires but the Lambda is
+  # never invoked (e.g. scheduler disabled, IAM permission revoked, or the
+  # Lambda deleted). In that state: Errors=0 (no run, no error), DLQ depth=0
+  # (no failed invocation to route), so both existing alarms stay green while
+  # sync is silently broken.
+  #
+  # Metric: AWS/Lambda Invocations (Sum) for the function.
+  # Period: 86400s (24 hours, CloudWatch max for standard resolution).
+  # EvaluationPeriods: ZeroInvocationEvaluationPeriods (default 2 = 48h).
+  # Threshold: <1 (i.e., 0) -- fires when the sum of invocations is zero
+  #   across all evaluation periods.
+  #
+  # TreatMissingData=breaching: CloudWatch only emits the Invocations metric
+  #   when the Lambda is actually invoked. A period with no invocations produces
+  #   NO data point -- not a zero. Setting breaching ensures a missing data
+  #   point is treated as a violation rather than skipped, which is the exact
+  #   behaviour needed to detect a silently-dead scheduler.
+  # ---------------------------------------------------------
+  SyncLambdaNeverSucceededAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "mtga-companion-${Environment}-sync-lambda-zero-invocations"
+      AlarmDescription: !Sub |
+        Sync Lambda (${LambdaFunctionName}) has had zero invocations for
+        ${ZeroInvocationEvaluationPeriods} consecutive 24-hour window(s).
+        The EventBridge scheduler may be disabled, the Lambda deleted, or the
+        IAM invoke permission revoked. This alarm fires even when Errors=0 and
+        the DLQ is empty -- the scheduler is silently not running sync at all.
+        Check the EventBridge schedule state:
+          aws scheduler get-schedule --name mtga-companion-${Environment}-sync-daily --profile personal
+        And verify the Lambda exists:
+          aws lambda get-function --function-name ${LambdaFunctionName} --profile personal
+      Namespace: AWS/Lambda
+      MetricName: Invocations
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref LambdaFunctionName
+      Statistic: Sum
+      Period: 86400
+      EvaluationPeriods: !Ref ZeroInvocationEvaluationPeriods
+      DatapointsToAlarm: !Ref ZeroInvocationEvaluationPeriods
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+      AlarmActions:
+        - !ImportValue
+          Fn::Sub: "vaultmtg-${Environment}-AlertTopicArn"
+      OKActions:
+        - !ImportValue
+          Fn::Sub: "vaultmtg-${Environment}-AlertTopicArn"
+      Tags:
+        - Key: Project
+          Value: vaultmtg
+        - Key: Environment
+          Value: !Ref Environment
+
 Outputs:
   LambdaSecurityGroupId:
     Description: Security group ID for the sync Lambda
@@ -594,3 +662,9 @@ Outputs:
     Value: !GetAtt SyncDLQDepthAlarm.Arn
     Export:
       Name: !Sub "${AWS::StackName}-SyncDLQDepthAlarmArn"
+
+  SyncLambdaNeverSucceededAlarmArn:
+    Description: ARN of the CloudWatch alarm for zero sync Lambda invocations
+    Value: !GetAtt SyncLambdaNeverSucceededAlarm.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-SyncLambdaNeverSucceededAlarmArn"
