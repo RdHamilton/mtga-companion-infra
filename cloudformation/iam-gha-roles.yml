@@ -529,14 +529,19 @@ Resources:
   # ---------------------------------------------------------------------------
   GhaInfraSyncDeployRole:
     Type: AWS::IAM::Role
-    # DependsOn forces CloudFormation to apply any GhaCfnDeployPermissionsBoundary
-    # update BEFORE updating this role -- see GhaAppDeployRole rationale.
-    DependsOn: GhaCfnDeployPermissionsBoundary
+    # No explicit DependsOn needed: the PermissionsBoundary: !Ref below already
+    # creates a dependency edge on GhaCfnDeployPermissionsBoundary, so CFN
+    # applies the boundary update before this role's update. (An explicit
+    # DependsOn here would be flagged redundant by cfn-lint W3005.) Mirrors the
+    # GhaInfraCfnDeployRole reference pattern -- the boundary is now attached as
+    # a Properties entry rather than merely declared as a DependsOn ordering
+    # constraint (vault-mtg-tickets#92).
     DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
     Properties:
       RoleName: gha-infra-sync-deploy
       Description: GitHub Actions OIDC role for VaultMTG infra repo sync Lambda deploy workflow (main branch only)
+      PermissionsBoundary: !Ref GhaCfnDeployPermissionsBoundary
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
