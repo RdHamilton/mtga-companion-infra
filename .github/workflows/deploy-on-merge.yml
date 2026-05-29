@@ -55,12 +55,14 @@ concurrency:
 permissions:
   actions: write    # required to dispatch deploy.yml via gh workflow run
   contents: read
-  id-token: write   # required for OIDC role assumption in preflight-drift-check
 
 jobs:
   preflight-drift-check:
     name: Pre-flight drift check for affected stacks
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # required for OIDC role assumption (configure-aws-credentials)
+      contents: read
     # Timeout: drift detection per stack is 5-30s observed; 5 stacks in the
     # worst realistic merge + 5s poll cap + AWS credential headroom = well
     # under 10 min. Set 15 min to match detect-drift.yml per-stack budget.
