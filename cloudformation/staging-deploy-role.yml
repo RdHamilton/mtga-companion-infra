@@ -203,13 +203,18 @@ Resources:
         #   1. mtga-companion/staging/*  -- user-created staging secrets namespace
         #      (legacy DB credential path, integration secrets).
         #
-        #   2. rds!db-12c647a0-0880-45e5-bf35-d9c1ccb05433-*  -- legacy entry.
-        #      Originally the RDS-managed credential for the shared RDS instance
-        #      (vaultmtg-postgres). After the 2026-05-27 staging separation
-        #      (Phase 1), this instance is production-only -- no staging deploy
-        #      flow should ever read it. RETAINED in the grant list pending a
-        #      follow-on cleanup PR; remove after one full deploy cycle confirms
-        #      no staging script reaches for it.
+        #   2. rds!db-12c647a0-0880-45e5-bf35-d9c1ccb05433-*  -- LOAD-BEARING.
+        #      This is the production RDS-managed master credential
+        #      (/vaultmtg/app/production/db-secret-arn), i.e. the DDL-privileged
+        #      master user (mtga_admin) required by golang-migrate and the
+        #      post-migration GRANT step. run-migrations.sh (per ADR-024) assumes
+        #      into this provisioner role and calls GetSecretValue on this secret
+        #      to obtain master credentials for schema operations. The EC2
+        #      instance role is deliberately NOT granted GetSecretValue on this
+        #      secret (S-03 least-privilege); this role is the only path to it.
+        #      DO NOT REMOVE -- removing this grant breaks production DDL
+        #      migrations. See vault-mtg-tickets#49 (verify-before-remove
+        #      confirmed load-bearing 2026-05-28) and ADR-024.
         #
         #   3. rds!db-55ac0968-bcee-48d6-9c43-9679a18cc407-*  -- the RDS-managed
         #      auto-rotated credential for the NEW staging RDS instance
@@ -240,8 +245,8 @@ Resources:
                 Resource:
                   # Staging user-created secrets namespace (legacy + integration)
                   - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:mtga-companion/staging/*"
-                  # Legacy: shared-RDS credential, now production-only. Pending
-                  # cleanup -- see comment block above (item 2).
+                  # Production master/DDL credential (load-bearing -- see item 2
+                  # in the comment block above; do NOT remove).
                   - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:rds!db-12c647a0-0880-45e5-bf35-d9c1ccb05433-*"
                   # NEW staging RDS-managed credential (vaultmtg-postgres-staging).
                   # Added 2026-05-27 as part of Phase 1 staging separation.
