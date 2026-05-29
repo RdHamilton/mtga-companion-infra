@@ -55,10 +55,271 @@ concurrency:
 permissions:
   actions: write    # required to dispatch deploy.yml via gh workflow run
   contents: read
+  id-token: write   # required for OIDC role assumption in preflight-drift-check
 
 jobs:
+  preflight-drift-check:
+    name: Pre-flight drift check for affected stacks
+    runs-on: ubuntu-latest
+    # Timeout: drift detection per stack is 5-30s observed; 5 stacks in the
+    # worst realistic merge + 5s poll cap + AWS credential headroom = well
+    # under 10 min. Set 15 min to match detect-drift.yml per-stack budget.
+    timeout-minutes: 15
+
+    env:
+      AWS_REGION: us-east-1
+      # Space-separated list of deploy.yml stack inputs whose drift should be
+      # WARNED about but NOT block the deploy. Empty by default — add entries
+      # here only after a conscious decision to tolerate known-benign drift.
+      # Example: ALLOW_DRIFT_STACKS: "rhamiltoneng-dns vaultmtg-security-services"
+      ALLOW_DRIFT_STACKS: ""
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6 — SHA pinned (ticket #2385 AC3)
+        with:
+          fetch-depth: 2
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@796449b3e38e3c256861227399e58b780e0e5538  # v6 — SHA pinned (ticket #2385 AC3)
+        with:
+          role-to-assume: ${{ secrets.AWS_CFN_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Detect drift on affected stacks
+        # Resolves which stacks the push would deploy (same STACK_MAP as the
+        # dispatch job), then runs aws cloudformation detect-stack-drift on
+        # each resolved AWS stack name. Stacks that do not yet exist are
+        # skipped. If any non-allow-listed stack is DRIFTED, the job fails
+        # and the dispatch job is blocked (via `needs:`), preventing a
+        # #58-class UPDATE_ROLLBACK_COMPLETE from the auto-deploy path.
+        #
+        # IAM: DetectStackDrift and DescribeStackResourceDrifts are already
+        # granted by the CloudFormationStackOperations Sid (cloudformation:*
+        # on stack/mtga-companion-*/*, stack/vaultmtg-*/*, etc.).
+        # DescribeStackDriftDetectionStatus is granted by CloudFormationGlobal
+        # on Resource:"*". No IAM change required for this step.
+        run: |
+          set -euo pipefail
+
+          # ----------------------------------------------------------------
+          # Template → deploy.yml stack input mapping (mirrors dispatch job).
+          # ----------------------------------------------------------------
+          declare -A STACK_MAP=(
+            [cdn.yml]="cdn"
+            [cloudtrail.yml]="cloudtrail"
+            [cloudwatch-alarms.yml]="cloudwatch-alarms cloudwatch-alarms-staging"
+            [cloudwatch-dashboards.yml]="cloudwatch-dashboards"
+            [deploy-artifacts.yml]="deploy-artifacts"
+            [ec2-sg.yml]="ec2-sg ec2-sg-staging"
+            [ec2.yml]="ec2"
+            [iam-break-glass.yml]="iam-break-glass"
+            [iam-gha-roles.yml]="iam-gha-roles"
+            [logs.yml]="logs"
+            [rds-vaultmtg.yml]="rds-vaultmtg"
+            [rds-vaultmtg-staging.yml]="rds-vaultmtg-staging"
+            [rhamiltoneng-dns.yml]="rhamiltoneng-dns"
+            [security-alarms.yml]="security-alarms"
+            [staging-deploy-role.yml]="staging-deploy-role"
+            [sync-lambda.yml]="sync-lambda sync-lambda-staging"
+            [nat-egress.yml]="nat-egress"
+            [dns-staging.yml]="dns-staging"
+            [vaultmtg-security-services.yml]="vaultmtg-security-services"
+            [vpc.yml]="vpc"
+          )
+
+          IGNORE_TEMPLATES=(
+            vaultmtg-security-services-import.yml
+          )
+
+          # ----------------------------------------------------------------
+          # Deploy-input → AWS CloudFormation stack name mapping.
+          # Keep in sync with deploy.yml "Resolve stack name" step.
+          # ----------------------------------------------------------------
+          declare -A AWS_STACK_NAME=(
+            [cdn]="vaultmtg-app-cdn"
+            [cloudtrail]="vaultmtg-cloudtrail"
+            [cloudwatch-alarms]="mtga-companion-cloudwatch-alarms"
+            [cloudwatch-alarms-staging]="mtga-companion-cloudwatch-alarms-staging"
+            [cloudwatch-dashboards]="vaultmtg-cloudwatch-dashboards"
+            [deploy-artifacts]="mtga-companion-deploy-artifacts"
+            [dns-staging]="mtga-companion-dns-staging"
+            [ec2]="mtga-companion-ec2"
+            [ec2-sg]="mtga-companion-ec2-sg"
+            [ec2-sg-staging]="mtga-companion-ec2-sg-staging"
+            [iam-break-glass]="vaultmtg-iam-break-glass"
+            [iam-gha-roles]="mtga-companion-iam-gha-roles"
+            [logs]="mtga-companion-logs"
+            [nat-egress]="vaultmtg-nat-egress"
+            [rds-vaultmtg]="vaultmtg-rds"
+            [rds-vaultmtg-staging]="vaultmtg-rds-staging"
+            [rhamiltoneng-dns]="rhamiltoneng-dns"
+            [security-alarms]="vaultmtg-security-alarms"
+            [staging-deploy-role]="mtga-companion-staging-deploy-role"
+            [sync-lambda]="mtga-companion-sync-lambda"
+            [sync-lambda-staging]="vaultmtg-sync-lambda-staging"
+            [vaultmtg-security-services]="vaultmtg-security-services"
+            [vpc]="mtga-companion-vpc"
+          )
+
+          # ----------------------------------------------------------------
+          # Resolve which deploy inputs are affected by this push.
+          # ----------------------------------------------------------------
+          CHANGED=$(git diff --name-only HEAD~1 HEAD -- 'cloudformation/*.yml' | xargs -r -n1 basename)
+
+          if [ -z "$CHANGED" ]; then
+            echo "No CloudFormation templates changed. Nothing to drift-check."
+            exit 0
+          fi
+
+          declare -A AFFECTED_INPUTS=()
+
+          while IFS= read -r file; do
+            [ -z "$file" ] && continue
+            skip=0
+            for ig in "${IGNORE_TEMPLATES[@]}"; do
+              [ "$file" = "$ig" ] && skip=1 && break
+            done
+            [ "$skip" -eq 1 ] && continue
+
+            if [ -z "${STACK_MAP[$file]:-}" ]; then
+              # Unknown template — the dispatch job will error on this too;
+              # skip here so we don't mask that error with a drift-check abort.
+              echo "::warning::No STACK_MAP entry for $file — skipping drift check."
+              continue
+            fi
+
+            for input in ${STACK_MAP[$file]}; do
+              AFFECTED_INPUTS[$input]=1
+            done
+          done <<< "$CHANGED"
+
+          if [ ${#AFFECTED_INPUTS[@]} -eq 0 ]; then
+            echo "No deployable stacks resolved. Nothing to drift-check."
+            exit 0
+          fi
+
+          echo "Stacks to drift-check:"
+          for input in "${!AFFECTED_INPUTS[@]}"; do
+            echo "  - $input -> ${AWS_STACK_NAME[$input]:-mtga-companion-$input}"
+          done
+
+          # ----------------------------------------------------------------
+          # Drift-check loop — one stack at a time (no matrix needed here;
+          # the set is small and we want a single blocking step output).
+          # ----------------------------------------------------------------
+          DRIFTED_STACKS=()
+          POLL_MAX=36   # 36 * 5s = 3 min cap per stack
+
+          for input in "${!AFFECTED_INPUTS[@]}"; do
+            STACK="${AWS_STACK_NAME[$input]:-mtga-companion-$input}"
+            echo "=========================================="
+            echo "Checking drift: $STACK (input: $input)"
+            echo "=========================================="
+
+            STACK_STATUS=$(aws cloudformation describe-stacks \
+              --stack-name "$STACK" \
+              --query 'Stacks[0].StackStatus' \
+              --output text 2>/dev/null || echo "DOES_NOT_EXIST")
+
+            if [ "$STACK_STATUS" = "DOES_NOT_EXIST" ]; then
+              echo "  SKIP — stack not yet deployed."
+              continue
+            fi
+            echo "  Stack status: $STACK_STATUS"
+
+            DETECTION_ID=$(aws cloudformation detect-stack-drift \
+              --stack-name "$STACK" \
+              --query 'StackDriftDetectionId' \
+              --output text 2>/dev/null || echo "")
+
+            if [ -z "$DETECTION_ID" ]; then
+              echo "  WARN — could not start drift detection for $STACK. Skipping."
+              continue
+            fi
+            echo "  Detection ID: $DETECTION_ID"
+
+            DETECTION_STATUS="DETECTION_IN_PROGRESS"
+            DRIFT_STATUS="UNKNOWN"
+            CONSECUTIVE_ERRORS=0
+            ERR_FILE="$(mktemp)"
+
+            for _poll in $(seq 1 $POLL_MAX); do
+              RESULT=$(aws cloudformation describe-stack-drift-detection-status \
+                --stack-drift-detection-id "$DETECTION_ID" \
+                --query '[DetectionStatus,StackDriftStatus]' \
+                --output text 2>"$ERR_FILE" || echo "ERROR ERROR")
+              DETECTION_STATUS=$(echo "$RESULT" | awk '{print $1}')
+              DRIFT_STATUS=$(echo "$RESULT" | awk '{print $2}')
+
+              if [ "$DETECTION_STATUS" = "DETECTION_COMPLETE" ] || \
+                 [ "$DETECTION_STATUS" = "DETECTION_FAILED" ]; then
+                break
+              fi
+
+              if [ "$DETECTION_STATUS" = "ERROR" ]; then
+                CONSECUTIVE_ERRORS=$((CONSECUTIVE_ERRORS + 1))
+                if [ "$CONSECUTIVE_ERRORS" -ge 3 ]; then
+                  echo "  Aborting poll after 3 consecutive errors:"
+                  while IFS= read -r line; do echo "    $line"; done < "$ERR_FILE"
+                  break
+                fi
+              else
+                CONSECUTIVE_ERRORS=0
+              fi
+              sleep 5
+            done
+            rm -f "$ERR_FILE"
+
+            echo "  Detection status: $DETECTION_STATUS"
+            echo "  Drift status:     $DRIFT_STATUS"
+
+            if [ "$DRIFT_STATUS" = "DRIFTED" ]; then
+              # Pull drifted-resource detail for the annotation.
+              DRIFT_DETAIL=$(aws cloudformation describe-stack-resource-drifts \
+                --stack-name "$STACK" \
+                --stack-resource-drift-status-filters MODIFIED DELETED NOT_CHECKED \
+                --query 'StackResourceDrifts[*].[LogicalResourceId,ResourceType,StackResourceDriftStatus]' \
+                --output text 2>/dev/null || echo "(could not retrieve drift detail)")
+
+              # Check allow-list before blocking.
+              allowed=0
+              for allowed_input in $ALLOW_DRIFT_STACKS; do
+                [ "$input" = "$allowed_input" ] && allowed=1 && break
+              done
+
+              if [ "$allowed" -eq 1 ]; then
+                echo "::warning::Stack $STACK is DRIFTED but is on ALLOW_DRIFT_STACKS — proceeding with deploy."
+                echo "  Drifted resources:"
+                while IFS= read -r line; do echo "    $line"; done <<< "$DRIFT_DETAIL"
+              else
+                echo "::error::Stack $STACK is DRIFTED. Auto-deploy blocked to prevent #58-class UPDATE_ROLLBACK_COMPLETE."
+                echo "  Drifted resources:"
+                while IFS= read -r line; do echo "    $line"; done <<< "$DRIFT_DETAIL"
+                echo "  Resolution options:"
+                echo "    1. Run 'Deploy CloudFormation Stack' (deploy.yml) manually after investigating the drift."
+                echo "    2. Re-run detect-drift.yml to confirm current drift state."
+                echo "    3. Add the stack input to ALLOW_DRIFT_STACKS in deploy-on-merge.yml if drift is known-benign."
+                DRIFTED_STACKS+=("$STACK")
+              fi
+            else
+              echo "  IN_SYNC (or detection inconclusive) — OK to deploy."
+            fi
+          done
+
+          if [ ${#DRIFTED_STACKS[@]} -gt 0 ]; then
+            echo ""
+            echo "::error::Pre-flight drift check FAILED. Blocked stacks: ${DRIFTED_STACKS[*]}"
+            echo "Resolve the drift before the auto-deploy chain resumes."
+            exit 1
+          fi
+
+          echo ""
+          echo "Pre-flight drift check PASSED — all affected stacks are IN_SYNC."
+
   detect-and-dispatch:
     name: Detect changed templates and dispatch deploy.yml per stack
+    needs: preflight-drift-check
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
