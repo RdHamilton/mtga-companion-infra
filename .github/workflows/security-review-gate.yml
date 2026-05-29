@@ -199,7 +199,8 @@ jobs:
 
           # jq selects comments that:
           #   1. Contain the S-07 SOP header string
-          #   2. Have a line that is exactly "VERDICT: APPROVED" (stripped of CR/spaces)
+          #   2. Have a line that is exactly "VERDICT: APPROVED" (stripped of CR/spaces
+          #      and optional leading/trailing ** markdown-emphasis markers)
           # Output format: "<comment_id> <author_login>"
           MATCH=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
             --paginate \
@@ -207,7 +208,8 @@ jobs:
               select(
                 (.body | contains("## S-07 Security Review")) and
                 (.body | split("\n") |
-                  map(ltrimstr("\r") | ltrimstr(" ") | rtrimstr(" ")) |
+                  map(ltrimstr("\r") | ltrimstr(" ") | rtrimstr(" ") |
+                      ltrimstr("**") | rtrimstr("**")) |
                   any(. == "VERDICT: APPROVED"))
               ) |
               "\(.id) \(.user.login)"' \
