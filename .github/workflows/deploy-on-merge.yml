@@ -281,10 +281,24 @@ jobs:
               # PropertyDifferences paths and ResourceType before deciding
               # whether to block. We include UNKNOWN here so CloudWatch Alarm
               # resources (which CFN always marks UNKNOWN) are visible.
+              #
+              # FAIL-CLOSED: capture the CLI exit code before any jq work.
+              # If the API call fails on an already-DRIFTED stack we must NOT
+              # synthesise an empty payload (that would make REAL_DRIFT_COUNT=0
+              # and let the deploy proceed — fail-open). Block immediately.
               DRIFT_JSON=$(aws cloudformation describe-stack-resource-drifts \
                 --stack-name "$STACK" \
                 --stack-resource-drift-status-filters MODIFIED DELETED NOT_CHECKED UNKNOWN \
-                --output json 2>/dev/null || echo '{"StackResourceDrifts":[]}')
+                --output json 2>/tmp/drift_err_"$STACK".txt)
+              DRIFT_API_RC=$?
+              if [ "$DRIFT_API_RC" -ne 0 ]; then
+                echo "::error::Stack $STACK is DRIFTED but describe-stack-resource-drifts failed (exit $DRIFT_API_RC) — cannot assess benign patterns. Blocking deploy (fail-closed)."
+                cat /tmp/drift_err_"$STACK".txt || true
+                rm -f /tmp/drift_err_"$STACK".txt
+                DRIFTED_STACKS+=("$STACK")
+                continue
+              fi
+              rm -f /tmp/drift_err_"$STACK".txt
 
               # ----------------------------------------------------------------
               # Benign-drift filter (ticket #156).
