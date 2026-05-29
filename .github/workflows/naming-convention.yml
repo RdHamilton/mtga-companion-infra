@@ -127,6 +127,11 @@ jobs:
             # its resource is recreated under the vaultmtg-* prefix.
             'vault-mtg-sync-staging'           # staging sync Lambda function name (sync-lambda.yml deployed twice via parameters/sync-lambda-staging.json, added in this PR)
             'vault-mtg-sync'                   # production sync Lambda function name (deployed via parameters/sync-lambda.json)
+            # Physical systemd service name on the staging EC2 (i-0226bf51fcf09b506).
+            # Named vault-mtg-bff-staging pre-ADR-022; rename to vaultmtg-bff-staging
+            # requires a maintenance-window unit-file replace + systemctl daemon-reload.
+            # Remove this entry when the unit is renamed and redeployed.
+            'vault-mtg-bff-staging'            # staging BFF systemd service unit name (ec2-bootstrap-staging.sh; pre-ADR-022 physical resource)
             # Deployed sync-lambda resource name literal restored by PR #217
             # (#2605) — proper rename deferred per ADR-022 §3 maintenance-window
             # plan. Remove when the resource is recreated under the vaultmtg-* prefix.
