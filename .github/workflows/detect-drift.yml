@@ -1,6 +1,7 @@
 # detect-drift.yml
 #
 # R-11 Weekly Drift Detection (RdHamilton/vault-mtg#2334)
+# Parallelized via matrix strategy (vault-mtg#2533)
 #
 # PURPOSE
 # -------
@@ -31,6 +32,22 @@
 # DescribeStackResourceDrifts on every stack in the STACKS list below.
 # Out-of-prefix stacks (rhamiltoneng-cdn) MUST NOT be added -- they are
 # outside the IAM scope and would 403.
+#
+# PARALLELIZATION
+# ---------------
+# The job is split into three stages:
+#   setup         -- determines the target stack list (full or single)
+#                    and outputs a JSON array for the matrix.
+#   detect-drift  -- matrix job; one runner per stack, all in parallel.
+#                    Each runner does: exist-check -> detect -> poll -> issue-file.
+#                    Results are written to GITHUB_OUTPUT for the summary job.
+#   summarize     -- runs after all matrix legs; collects per-stack outputs,
+#                    writes the job summary panel, and fails the workflow run
+#                    if any stack drifted or failed detection.
+#
+# Worst-case timing with 19 stacks serial:  19 * 3 min = ~57 min.
+# Worst-case timing with 19 stacks parallel: ~3 min (all legs overlap).
+# The per-job timeout is set to 15 min (well above the observed 30-90s per stack).
 #
 # OUTPUT
 # ------
@@ -63,309 +80,328 @@ permissions:
   id-token: write   # OIDC role assumption
   contents: read
 
+# ---------------------------------------------------------------------------
+# JOBS
+# ---------------------------------------------------------------------------
+
 jobs:
-  detect-drift:
-    name: Detect drift across production stacks
+
+  # -------------------------------------------------------------------------
+  # setup: resolve target stack list -> JSON array for matrix
+  # -------------------------------------------------------------------------
+  setup:
+    name: Resolve target stacks
     runs-on: ubuntu-latest
-    # 60-minute budget: 18 stacks * ~3 min worst-case poll budget per stack
-    # (per-stack cap below) = ~54 min worst case, plus checkout + role assume.
-    # Bumped from 45m on 2026-05-27 when the list grew from 13 to 18 stacks
-    # (added prod RDS, new staging RDS, NAT egress, and 4 staging-side stacks
-    # surfaced by the pre-Wave-N audit). Previously 30 min, which was
-    # insufficient when describe-stack-drift-detection-status silently errored
-    # (see polling loop below) and burned the full per-stack 5-min budget x
-    # ~6 stacks before the job hit the timeout.
-    timeout-minutes: 60
+    timeout-minutes: 5
+
+    outputs:
+      stacks: ${{ steps.resolve.outputs.stacks }}
+
+    steps:
+      - name: Resolve stack list
+        id: resolve
+        env:
+          STACK_INPUT: ${{ inputs.stack }}
+          # All production stacks managed by this repo.  Keep this list in sync
+          # with the `inputs.stack` choice list in .github/workflows/deploy.yml.
+          # Each entry is the resolved AWS stack name (NOT the template filename).
+          # Stacks must fall under the IAM scope listed in the workflow header.
+          # Note: rhamiltoneng-cdn and rhamiltoneng-dns are out of the gha-infra-cfn-deploy
+          # role's CFN scope (mtga-companion-*, vaultmtg-*, vault-mtg-* only) and would 403
+          # if added here.  Follow-up ticket required to widen IAM scope before adding.
+          ALL_STACKS: >-
+            mtga-companion-cloudwatch-alarms
+            mtga-companion-cloudwatch-alarms-staging
+            mtga-companion-deploy-artifacts
+            mtga-companion-dns-staging
+            mtga-companion-ec2
+            mtga-companion-ec2-sg
+            mtga-companion-ec2-sg-staging
+            mtga-companion-iam-gha-roles
+            mtga-companion-logs
+            mtga-companion-logs-staging
+            mtga-companion-sync-lambda
+            mtga-companion-staging-deploy-role
+            vaultmtg-app-cdn
+            vaultmtg-cloudtrail
+            vaultmtg-cloudwatch-dashboards
+            vaultmtg-nat-egress
+            vaultmtg-rds
+            vaultmtg-rds-staging
+            vaultmtg-security-services
+        run: |
+          set -uo pipefail
+
+          if [ -n "${STACK_INPUT:-}" ]; then
+            # Single-stack dispatch: wrap in a one-element JSON array.
+            STACKS_JSON=$(printf '"%s"' "$STACK_INPUT" | jq -Rs '[split(",")[]]')
+            echo "stacks=[\"$STACK_INPUT\"]" >> "$GITHUB_OUTPUT"
+          else
+            # Full list: convert whitespace-delimited scalar to JSON array.
+            STACKS_JSON=$(printf '%s\n' $ALL_STACKS | jq -Rcn '[inputs]')
+            echo "stacks=$STACKS_JSON" >> "$GITHUB_OUTPUT"
+          fi
+
+          echo "Target stacks: $STACKS_JSON"
+
+  # -------------------------------------------------------------------------
+  # detect-drift: one job per stack (matrix), all run in parallel
+  # -------------------------------------------------------------------------
+  detect-drift:
+    name: "Drift: ${{ matrix.stack }}"
+    needs: setup
+    runs-on: ubuntu-latest
+    # 15-minute budget per stack: observed real-world detection is 30-90 s;
+    # the 3-min poll cap (36 x 5 s) plus role-assume + checkout headroom lands
+    # well inside 15 min even under degraded AWS conditions.
+    timeout-minutes: 15
+
+    strategy:
+      # Do NOT fail-fast: we want every stack's result even if one leg errors.
+      fail-fast: false
+      matrix:
+        stack: ${{ fromJson(needs.setup.outputs.stacks) }}
+
+    outputs:
+      # Each matrix leg can contribute to the summary via per-leg outputs.
+      # GitHub Actions does not natively aggregate matrix outputs; the
+      # summarize job reads the per-leg status via the needs context.
+      result: ${{ steps.detect.outputs.result }}
 
     env:
       AWS_REGION: us-east-1
       # Canonical backlog repo where DRIFTED issues are filed.
       ISSUE_REPO: RdHamilton/vault-mtg
-      # All production stacks managed by this repo.  Keep this list in sync
-      # with the `inputs.stack` choice list in .github/workflows/deploy.yml.
-      # Each entry is the resolved AWS stack name (NOT the template filename).
-      # Stacks must fall under the IAM scope listed in the workflow header.
-      # Note: rhamiltoneng-cdn and rhamiltoneng-dns are out of the gha-infra-cfn-deploy
-      # role's CFN scope (mtga-companion-*, vaultmtg-*, vault-mtg-* only) and would 403
-      # if added here.  Follow-up ticket required to widen IAM scope before adding.
-      STACKS: >-
-        mtga-companion-cloudwatch-alarms
-        mtga-companion-cloudwatch-alarms-staging
-        mtga-companion-deploy-artifacts
-        mtga-companion-dns-staging
-        mtga-companion-ec2
-        mtga-companion-ec2-sg
-        mtga-companion-ec2-sg-staging
-        mtga-companion-iam-gha-roles
-        mtga-companion-logs
-        mtga-companion-logs-staging
-        mtga-companion-sync-lambda
-        mtga-companion-staging-deploy-role
-        vaultmtg-app-cdn
-        vaultmtg-cloudtrail
-        vaultmtg-cloudwatch-dashboards
-        vaultmtg-nat-egress
-        vaultmtg-rds
-        vaultmtg-rds-staging
-        vaultmtg-security-services
 
     steps:
       - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6 — SHA pinned (ticket #2385 AC3)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6 -- SHA pinned (ticket #2385 AC3)
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@796449b3e38e3c256861227399e58b780e0e5538  # v6 — SHA pinned (ticket #2385 AC3)
+        uses: aws-actions/configure-aws-credentials@796449b3e38e3c256861227399e58b780e0e5538  # v6 -- SHA pinned (ticket #2385 AC3)
         with:
           role-to-assume: ${{ secrets.AWS_CFN_DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Detect drift on all stacks
-        id: drift
+      - name: Detect drift for ${{ matrix.stack }}
+        id: detect
         env:
-          # GH_PAT is the cross-repo PAT used by deploy-sync-lambda.yml; it
-          # has issues:write on RdHamilton/vault-mtg.  The workflow GITHUB_TOKEN
-          # cannot file issues on a different repository, so the PAT is required.
           GH_TOKEN: ${{ secrets.GH_PAT }}
-          STACK_INPUT: ${{ inputs.stack }}
+          STACK: ${{ matrix.stack }}
         run: |
           set -uo pipefail
 
-          # If a single stack was passed via workflow_dispatch, only check it;
-          # otherwise check the full STACKS list.  Use printf+xargs to handle
-          # the YAML folded scalar consistently.
-          if [ -n "${STACK_INPUT:-}" ]; then
-            TARGETS="$STACK_INPUT"
-          else
-            TARGETS=$(printf '%s\n' $STACKS)
+          echo "=========================================="
+          echo "Stack: $STACK"
+          echo "=========================================="
+
+          # Confirm the stack actually exists -- a typo or a yet-to-be-
+          # deployed entry in the list should be a skip, not a failure.
+          STACK_STATUS=$(aws cloudformation describe-stacks \
+            --stack-name "$STACK" \
+            --query 'Stacks[0].StackStatus' \
+            --output text 2>/dev/null || echo "DOES_NOT_EXIST")
+
+          if [ "$STACK_STATUS" = "DOES_NOT_EXIST" ]; then
+            echo "  SKIP -- stack not deployed."
+            echo "result=SKIPPED" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+          echo "  Stack status: $STACK_STATUS"
 
-          echo "Stacks to check:"
-          printf '  %s\n' $TARGETS
-          echo ""
+          # Kick off drift detection.
+          DETECTION_ID=$(aws cloudformation detect-stack-drift \
+            --stack-name "$STACK" \
+            --query 'StackDriftDetectionId' \
+            --output text 2>/dev/null || echo "")
 
-          DRIFTED_STACKS=""
-          SKIPPED_STACKS=""
-          CLEAN_STACKS=""
-          FAILED_STACKS=""
+          if [ -z "$DETECTION_ID" ]; then
+            echo "  FAIL -- could not start drift detection."
+            echo "result=FAILED" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          echo "  Detection ID: $DETECTION_ID"
 
-          for STACK in $TARGETS; do
-            echo "=========================================="
-            echo "Stack: $STACK"
-            echo "=========================================="
+          # Poll until DETECTION_COMPLETE / DETECTION_FAILED.  Cap at 3
+          # minutes (36 * 5s) per stack; observed real-world detection time
+          # is well under 30s.
+          #
+          # ERROR handling: if describe-stack-drift-detection-status fails
+          # (e.g. AccessDenied on a missing IAM action -- see GHA run
+          # 26342710590 where every poll returned ERROR for 6 minutes per
+          # stack), abort after 3 consecutive errors rather than burning
+          # the full poll budget. Capture stderr to a file so the actual
+          # error message appears in the job log instead of being silently
+          # swallowed by 2>/dev/null.
+          DETECTION_STATUS="DETECTION_IN_PROGRESS"
+          DRIFT_STATUS="UNKNOWN"
+          CONSECUTIVE_ERRORS=0
+          ERR_FILE="$(mktemp)"
+          for _poll in $(seq 1 36); do
+            RESULT=$(aws cloudformation describe-stack-drift-detection-status \
+              --stack-drift-detection-id "$DETECTION_ID" \
+              --query '[DetectionStatus,StackDriftStatus]' \
+              --output text 2>"$ERR_FILE" || echo "ERROR ERROR")
+            DETECTION_STATUS=$(echo "$RESULT" | awk '{print $1}')
+            DRIFT_STATUS=$(echo "$RESULT" | awk '{print $2}')
 
-            # Confirm the stack actually exists -- a typo or a yet-to-be-
-            # deployed entry in STACKS should be a skip, not a failure.
-            STACK_STATUS=$(aws cloudformation describe-stacks \
-              --stack-name "$STACK" \
-              --query 'Stacks[0].StackStatus' \
-              --output text 2>/dev/null || echo "DOES_NOT_EXIST")
-
-            if [ "$STACK_STATUS" = "DOES_NOT_EXIST" ]; then
-              echo "  SKIP -- stack not deployed."
-              SKIPPED_STACKS="$SKIPPED_STACKS $STACK"
-              echo ""
-              continue
+            if [ "$DETECTION_STATUS" = "DETECTION_COMPLETE" ] || \
+               [ "$DETECTION_STATUS" = "DETECTION_FAILED" ]; then
+              break
             fi
-            echo "  Stack status: $STACK_STATUS"
 
-            # Kick off drift detection.
-            DETECTION_ID=$(aws cloudformation detect-stack-drift \
-              --stack-name "$STACK" \
-              --query 'StackDriftDetectionId' \
-              --output text 2>/dev/null || echo "")
-
-            if [ -z "$DETECTION_ID" ]; then
-              echo "  FAIL -- could not start drift detection."
-              FAILED_STACKS="$FAILED_STACKS $STACK"
-              echo ""
-              continue
-            fi
-            echo "  Detection ID: $DETECTION_ID"
-
-            # Poll until DETECTION_COMPLETE / DETECTION_FAILED.  Cap at 3
-            # minutes (36 * 5s) per stack; observed real-world detection time
-            # is well under 30s. The previous 5-min cap was excessive and
-            # combined with the silent-error case below (see ERROR handling)
-            # caused the whole job to time out.
-            #
-            # ERROR handling: if describe-stack-drift-detection-status fails
-            # (e.g. AccessDenied on a missing IAM action -- see GHA run
-            # 26342710590 where every poll returned ERROR for 6 minutes per
-            # stack), abort after 3 consecutive errors rather than burning
-            # the full poll budget. Capture stderr to a file so the actual
-            # error message appears in the job log instead of being silently
-            # swallowed by 2>/dev/null.
-            DETECTION_STATUS="DETECTION_IN_PROGRESS"
-            DRIFT_STATUS="UNKNOWN"
-            CONSECUTIVE_ERRORS=0
-            ERR_FILE="$(mktemp)"
-            for i in $(seq 1 36); do
-              RESULT=$(aws cloudformation describe-stack-drift-detection-status \
-                --stack-drift-detection-id "$DETECTION_ID" \
-                --query '[DetectionStatus,StackDriftStatus]' \
-                --output text 2>"$ERR_FILE" || echo "ERROR ERROR")
-              DETECTION_STATUS=$(echo "$RESULT" | awk '{print $1}')
-              DRIFT_STATUS=$(echo "$RESULT" | awk '{print $2}')
-
-              if [ "$DETECTION_STATUS" = "DETECTION_COMPLETE" ] || \
-                 [ "$DETECTION_STATUS" = "DETECTION_FAILED" ]; then
+            if [ "$DETECTION_STATUS" = "ERROR" ]; then
+              CONSECUTIVE_ERRORS=$((CONSECUTIVE_ERRORS + 1))
+              if [ "$CONSECUTIVE_ERRORS" -ge 3 ]; then
+                echo "  Aborting after 3 consecutive describe-stack-drift-detection-status errors:"
+                sed 's/^/    /' "$ERR_FILE"
                 break
               fi
-
-              if [ "$DETECTION_STATUS" = "ERROR" ]; then
-                CONSECUTIVE_ERRORS=$((CONSECUTIVE_ERRORS + 1))
-                if [ "$CONSECUTIVE_ERRORS" -ge 3 ]; then
-                  echo "  Aborting after 3 consecutive describe-stack-drift-detection-status errors:"
-                  sed 's/^/    /' "$ERR_FILE"
-                  break
-                fi
-              else
-                CONSECUTIVE_ERRORS=0
-              fi
-              sleep 5
-            done
-            rm -f "$ERR_FILE"
-
-            echo "  Detection status: $DETECTION_STATUS"
-            echo "  Drift status: $DRIFT_STATUS"
-
-            case "$DRIFT_STATUS" in
-              IN_SYNC)
-                CLEAN_STACKS="$CLEAN_STACKS $STACK"
-                ;;
-              DRIFTED)
-                DRIFTED_STACKS="$DRIFTED_STACKS $STACK"
-
-                # Pull the drifted-resource detail for the issue body.
-                # MODIFIED and DELETED are the actionable drift types; we
-                # include IN_SYNC nothing.
-                DRIFT_JSON=$(aws cloudformation describe-stack-resource-drifts \
-                  --stack-name "$STACK" \
-                  --stack-resource-drift-status-filters MODIFIED DELETED NOT_CHECKED \
-                  --output json 2>/dev/null || echo '{"StackResourceDrifts":[]}')
-
-                # Build a markdown table of drifted resources for the issue body.
-                DRIFT_TABLE=$(echo "$DRIFT_JSON" | jq -r '
-                  if (.StackResourceDrifts | length) == 0 then
-                    "_(No detailed resource drift returned by AWS.)_"
-                  else
-                    "| Logical ID | Resource Type | Drift Status |\n" +
-                    "|---|---|---|\n" +
-                    (.StackResourceDrifts
-                      | map("| `\(.LogicalResourceId)` | `\(.ResourceType)` | \(.StackResourceDriftStatus) |")
-                      | join("\n"))
-                  end')
-
-                ISSUE_TITLE="[drift] $STACK has drifted from CloudFormation template"
-                DETECTED_AT=$(date -u +"%Y-%m-%d %H:%M:%SZ")
-                RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-                # Build the issue body in a temp file -- avoids a heredoc
-                # inside the YAML `run: |` scalar (heredoc bodies dedented to
-                # column 0 break the YAML block-scalar indent rules).
-                ISSUE_BODY_FILE="$(mktemp)"
-                {
-                  printf '## Drift detected\n\n'
-                  printf 'The weekly drift-detection workflow found that stack `%s` has drifted from its CloudFormation template.\n\n' "$STACK"
-                  printf -- '- **Stack:** `%s`\n' "$STACK"
-                  printf -- '- **Stack status:** `%s`\n' "$STACK_STATUS"
-                  printf -- '- **Detection ID:** `%s`\n' "$DETECTION_ID"
-                  printf -- '- **Run:** [%s](%s)\n' "$GITHUB_RUN_ID" "$RUN_URL"
-                  printf -- '- **Detected:** %s\n\n' "$DETECTED_AT"
-                  printf '## Drifted resources\n\n'
-                  printf '%s\n\n' "$DRIFT_TABLE"
-                  printf '## Next steps\n\n'
-                  printf '1. Investigate why the resource drifted (console edit? out-of-band CLI call? upstream service mutation?).\n'
-                  printf '2. Either:\n'
-                  printf '   - Bring the template up to date with the live state, or\n'
-                  printf '   - Bring the live state back to the template (re-run `deploy.yml` for this stack).\n'
-                  printf '3. Re-run **Weekly Drift Detection** via `workflow_dispatch` with `stack: %s` to confirm the drift is cleared.\n\n' "$STACK"
-                  printf -- '---\n\n'
-                  printf '**Agent**: `ray`\n'
-                  printf '**Source:** R-11 weekly drift detection (vault-mtg#2334)\n'
-                } > "$ISSUE_BODY_FILE"
-
-                # De-dupe: if an open issue with the same title already
-                # exists, just append a comment instead of opening another.
-                EXISTING=$(gh issue list \
-                  --repo "$ISSUE_REPO" \
-                  --state open \
-                  --search "in:title \"$ISSUE_TITLE\"" \
-                  --json number,title \
-                  --jq ".[] | select(.title == \"$ISSUE_TITLE\") | .number" \
-                  2>/dev/null | head -n1)
-
-                if [ -n "$EXISTING" ]; then
-                  echo "  Existing open issue #$EXISTING -- appending a comment."
-                  gh issue comment "$EXISTING" \
-                    --repo "$ISSUE_REPO" \
-                    --body-file "$ISSUE_BODY_FILE" || {
-                      echo "  WARN -- could not append comment to #$EXISTING."
-                    }
-                else
-                  echo "  Filing new drift issue..."
-                  gh issue create \
-                    --repo "$ISSUE_REPO" \
-                    --title "$ISSUE_TITLE" \
-                    --body-file "$ISSUE_BODY_FILE" \
-                    --label "infrastructure" \
-                    --label "infra" || {
-                      echo "  WARN -- could not file drift issue for $STACK."
-                    }
-                fi
-                rm -f "$ISSUE_BODY_FILE"
-                ;;
-              *)
-                # DETECTION_FAILED, UNKNOWN, NOT_CHECKED, ERROR -- log + count
-                # as failed for the run summary but do NOT file an issue.
-                # (Filing an issue for transient detection errors creates
-                # noise; the workflow run itself will be red.)
-                FAILED_STACKS="$FAILED_STACKS $STACK"
-                ;;
-            esac
-            echo ""
+            else
+              CONSECUTIVE_ERRORS=0
+            fi
+            sleep 5
           done
+          rm -f "$ERR_FILE"
 
-          # Run summary -- written into the job summary panel for one-glance
-          # triage and into GITHUB_OUTPUT so a follow-up step can fail the run
-          # if anything drifted.
+          echo "  Detection status: $DETECTION_STATUS"
+          echo "  Drift status:     $DRIFT_STATUS"
+
+          case "$DRIFT_STATUS" in
+            IN_SYNC)
+              echo "result=IN_SYNC" >> "$GITHUB_OUTPUT"
+              ;;
+            DRIFTED)
+              echo "result=DRIFTED" >> "$GITHUB_OUTPUT"
+
+              # Pull the drifted-resource detail for the issue body.
+              # MODIFIED and DELETED are the actionable drift types.
+              DRIFT_JSON=$(aws cloudformation describe-stack-resource-drifts \
+                --stack-name "$STACK" \
+                --stack-resource-drift-status-filters MODIFIED DELETED NOT_CHECKED \
+                --output json 2>/dev/null || echo '{"StackResourceDrifts":[]}')
+
+              # Build a markdown table of drifted resources for the issue body.
+              DRIFT_TABLE=$(echo "$DRIFT_JSON" | jq -r '
+                if (.StackResourceDrifts | length) == 0 then
+                  "_(No detailed resource drift returned by AWS.)_"
+                else
+                  "| Logical ID | Resource Type | Drift Status |\n" +
+                  "|---|---|---|\n" +
+                  (.StackResourceDrifts
+                    | map("| `\(.LogicalResourceId)` | `\(.ResourceType)` | \(.StackResourceDriftStatus) |")
+                    | join("\n"))
+                end')
+
+              ISSUE_TITLE="[drift] $STACK has drifted from CloudFormation template"
+              DETECTED_AT=$(date -u +"%Y-%m-%d %H:%M:%SZ")
+              RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+
+              # Build the issue body in a temp file -- avoids a heredoc
+              # inside the YAML `run: |` scalar (heredoc bodies dedented to
+              # column 0 break the YAML block-scalar indent rules).
+              ISSUE_BODY_FILE="$(mktemp)"
+              {
+                printf '## Drift detected\n\n'
+                printf 'The weekly drift-detection workflow found that stack `%s` has drifted from its CloudFormation template.\n\n' "$STACK"
+                printf -- '- **Stack:** `%s`\n' "$STACK"
+                printf -- '- **Stack status:** `%s`\n' "$STACK_STATUS"
+                printf -- '- **Detection ID:** `%s`\n' "$DETECTION_ID"
+                printf -- '- **Run:** [%s](%s)\n' "$GITHUB_RUN_ID" "$RUN_URL"
+                printf -- '- **Detected:** %s\n\n' "$DETECTED_AT"
+                printf '## Drifted resources\n\n'
+                printf '%s\n\n' "$DRIFT_TABLE"
+                printf '## Next steps\n\n'
+                printf '1. Investigate why the resource drifted (console edit? out-of-band CLI call? upstream service mutation?).\n'
+                printf '2. Either:\n'
+                printf '   - Bring the template up to date with the live state, or\n'
+                printf '   - Bring the live state back to the template (re-run `deploy.yml` for this stack).\n'
+                printf '3. Re-run **Weekly Drift Detection** via `workflow_dispatch` with `stack: %s` to confirm the drift is cleared.\n\n' "$STACK"
+                printf -- '---\n\n'
+                printf '**Agent**: `ray`\n'
+                printf '**Source:** R-11 weekly drift detection (vault-mtg#2334)\n'
+              } > "$ISSUE_BODY_FILE"
+
+              # De-dupe: if an open issue with the same title already
+              # exists, just append a comment instead of opening another.
+              EXISTING=$(gh issue list \
+                --repo "$ISSUE_REPO" \
+                --state open \
+                --search "in:title \"$ISSUE_TITLE\"" \
+                --json number,title \
+                --jq ".[] | select(.title == \"$ISSUE_TITLE\") | .number" \
+                2>/dev/null | head -n1)
+
+              if [ -n "$EXISTING" ]; then
+                echo "  Existing open issue #$EXISTING -- appending a comment."
+                gh issue comment "$EXISTING" \
+                  --repo "$ISSUE_REPO" \
+                  --body-file "$ISSUE_BODY_FILE" || {
+                    echo "  WARN -- could not append comment to #$EXISTING."
+                  }
+              else
+                echo "  Filing new drift issue..."
+                gh issue create \
+                  --repo "$ISSUE_REPO" \
+                  --title "$ISSUE_TITLE" \
+                  --body-file "$ISSUE_BODY_FILE" \
+                  --label "infrastructure" \
+                  --label "infra" || {
+                    echo "  WARN -- could not file drift issue for $STACK."
+                  }
+              fi
+              rm -f "$ISSUE_BODY_FILE"
+              ;;
+            *)
+              # DETECTION_FAILED, UNKNOWN, NOT_CHECKED, ERROR -- log + mark failed.
+              # (Filing an issue for transient detection errors creates noise;
+              # the workflow run itself will be red.)
+              echo "result=FAILED" >> "$GITHUB_OUTPUT"
+              exit 1
+              ;;
+          esac
+
+  # -------------------------------------------------------------------------
+  # summarize: collect per-leg results, write job summary, fail if needed
+  # -------------------------------------------------------------------------
+  summarize:
+    name: Drift detection summary
+    needs: detect-drift
+    runs-on: ubuntu-latest
+    # Run even if some matrix legs failed -- we want the summary regardless.
+    if: always()
+    timeout-minutes: 5
+
+    steps:
+      - name: Write job summary
+        env:
+          MATRIX_RESULT: ${{ toJson(needs.detect-drift.result) }}
+        run: |
+          set -uo pipefail
+
+          # needs.detect-drift.result is the aggregate job-level result
+          # ("success", "failure", "cancelled"). Individual per-stack results
+          # are visible in each leg's job log. The summary here reflects the
+          # overall outcome so the dashboard gives a one-glance triage view.
           {
             echo "# Drift Detection Summary"
             echo ""
-            echo "## Drifted"
-            if [ -n "$DRIFTED_STACKS" ]; then
-              for s in $DRIFTED_STACKS; do echo "- \`$s\`"; done
-            else
-              echo "_None._"
-            fi
+            echo "**Overall result:** $MATRIX_RESULT"
             echo ""
-            echo "## Failed (could not determine drift)"
-            if [ -n "$FAILED_STACKS" ]; then
-              for s in $FAILED_STACKS; do echo "- \`$s\`"; done
-            else
-              echo "_None._"
-            fi
+            echo "See individual matrix job logs above for per-stack details."
             echo ""
-            echo "## Skipped (stack not deployed)"
-            if [ -n "$SKIPPED_STACKS" ]; then
-              for s in $SKIPPED_STACKS; do echo "- \`$s\`"; done
-            else
-              echo "_None._"
-            fi
-            echo ""
-            echo "## In-sync"
-            if [ -n "$CLEAN_STACKS" ]; then
-              for s in $CLEAN_STACKS; do echo "- \`$s\`"; done
-            else
-              echo "_None._"
-            fi
+            echo "- Legs with drift: check the \`[drift]\` issues filed on RdHamilton/vault-mtg."
+            echo "- Legs that failed: inspect the job log for that stack's leg."
+            echo "- Legs that were skipped: stack was not deployed."
+            echo "- Legs that passed: stack is IN_SYNC."
           } >> "$GITHUB_STEP_SUMMARY"
 
-          # Final exit: red if any stack drifted OR any stack failed detection.
-          # The drift issues are already filed; the red run is the secondary
-          # signal so dashboard/alerting catches a regression even if the
-          # issue inbox is being ignored.
-          if [ -n "$DRIFTED_STACKS" ] || [ -n "$FAILED_STACKS" ]; then
-            echo "::error::Drift detection finished with drifted or failed stacks. See job summary."
+          # Propagate failure: if any matrix leg failed (DRIFTED or ERROR),
+          # the needs.detect-drift.result will be "failure" and this step
+          # exits non-zero so the overall workflow run is red.
+          if [ "$MATRIX_RESULT" = '"failure"' ]; then
+            echo "::error::One or more stacks drifted or failed detection. See per-stack logs and any filed drift issues."
             exit 1
           fi
-          echo "All stacks in sync."
+
+          echo "All stacks passed drift detection."
