@@ -277,7 +277,7 @@ if [ -f "${STAGING_NGINX_CONF}" ] && grep -q "listen 443 ssl" "${STAGING_NGINX_C
 else
     log "Writing fresh nginx staging config (no existing TLS block) -- certbot will expand."
     cat > "${STAGING_NGINX_CONF}" <<'NGINX'
-# Rate limit zone — raised from 30r/m burst=10 to 60r/m burst=50 (2026-05-29
+# Rate limit zone -- raised from 30r/m burst=10 to 60r/m burst=50 (2026-05-29
 # incident fix): the SPA fires 10+ parallel requests per page load; burst=10
 # saturated immediately causing 503s. Live patch applied during incident;
 # codified here so re-provision does not revert it. Applied to /api/v1/.
@@ -293,16 +293,24 @@ server {
         root /var/www/certbot;
     }
 
+    # CORS headers are NOT set at the server-block level.
+    #
+    # Rationale (2026-05-29 post-mortem, tickets#187):
+    # The BFF go-chi/cors middleware adds Access-Control-Allow-Origin on every
+    # proxied response. Setting CORS add_header at the server block or inside
+    # location /api/v1/ causes a DUPLICATE ACAO on every proxied response.
+    # Chromium rejects any response with a duplicate ACAO as a CORS violation
+    # (status 0) -- breaking the SPA entirely.
+    #
+    # CORS headers for nginx-generated error responses (502/503/504) that bypass
+    # go-chi/cors are handled by the @upstream_error named location below.
+    # Certbot carries error_page and the named location through to the expanded
+    # HTTPS server block on first provision.
+    error_page 502 503 504 @upstream_error;
+
     location /api/v1/ {
         limit_req zone=staging_api_limit burst=50 nodelay;
-        # CORS on nginx-generated error responses (2026-05-29 post-mortem).
-        # Without `always`, 4xx/5xx nginx error responses omit CORS headers --
-        # the browser reports a CORS violation masking the real upstream error.
-        # Certbot carries these through to the HTTPS server block on expansion.
-        add_header Access-Control-Allow-Origin "https://stg-app.vaultmtg.app" always;
-        add_header Access-Control-Allow-Methods "GET, POST, PUT, PATCH, DELETE, OPTIONS" always;
-        add_header Access-Control-Allow-Headers "Authorization, Content-Type, X-Requested-With" always;
-        add_header Access-Control-Allow-Credentials "true" always;
+        # No CORS add_header here -- the BFF go-chi/cors middleware handles it.
         proxy_pass         http://127.0.0.1:8081;
         proxy_http_version 1.1;
         proxy_set_header   Host              $host;
@@ -337,6 +345,19 @@ server {
 
     location ~ /\. {
         deny all;
+    }
+
+    # Named location for nginx-generated upstream errors (502/503/504).
+    # The BFF never processed these requests so go-chi/cors never ran.
+    # internal prevents direct client access (only reachable via error_page).
+    location @upstream_error {
+        internal;
+        default_type application/json;
+        add_header Access-Control-Allow-Origin "https://stg-app.vaultmtg.app" always;
+        add_header Access-Control-Allow-Methods "GET, POST, PUT, PATCH, DELETE, OPTIONS" always;
+        add_header Access-Control-Allow-Headers "Authorization, Content-Type, X-Requested-With" always;
+        add_header Access-Control-Allow-Credentials "true" always;
+        return 502 '{"error":"upstream_unavailable"}';
     }
 }
 NGINX
