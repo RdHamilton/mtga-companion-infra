@@ -40,13 +40,9 @@ name: Board Status Automation
 #
 # S-07 REVIEW STATUS
 # ------------------
-# This file is NOT in the S-07 §1A trigger path list for mtga-companion-infra.
-# The §1A CFN triggers are cloudformation/iam-gha-roles.yml, ec2.yml, ec2-sg.yml,
-# deploy-artifacts.yml, sync-lambda.yml, parameters/, and the cloudformation/
-# catch-all. This file does not touch IAM, trust policies, security groups,
-# SSM, Secrets Manager, KMS, or OIDC. No Sarah security review gate required.
-# Content-based catch-all strings (iam:, secretsmanager:, AssumeRolePolicyDocument,
-# SecurityGroupIngress, etc.) are absent from this file.
+# Not in the S-07 §1A trigger path list for mtga-companion-infra.
+# This file is a pure GitHub Actions workflow — no AWS resource definitions,
+# no credential references, and no network policy changes. S-07 does not apply.
 #
 # CONTEXT
 # -------
