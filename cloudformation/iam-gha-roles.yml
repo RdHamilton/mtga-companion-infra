@@ -922,6 +922,24 @@ Resources:
                 Action: sns:Publish
                 Resource:
                   - !Sub "arn:aws:sns:${AWS::Region}:${AWS::AccountId}:vaultmtg-staging-alerts"
+              # sns:Publish scoped to the production alerts topic only.
+              # #268: the scheduled-prod-canary.yml workflow runs every 5 minutes
+              # against production endpoints (healthz, Clerk auth, CORS, account,
+              # daemon/register) and publishes a failure notification to this
+              # topic when any check fails. The email subscriber is
+              # ramone.d.hamilton@gmail.com (AlarmEmail in cloudwatch-alarms.json).
+              # BOUNDARY NOTE: The boundary's SNS Sid already grants sns:* on "*",
+              # so the intersection with this inline Sid correctly yields
+              # sns:Publish on vaultmtg-production-alerts. No boundary edit is
+              # needed (documented here to satisfy the boundary-mirrors-inline
+              # audit invariant). The existing SSM Sid grants ssm:GetParameter on
+              # "*", covering the canary-clerk-api-token path -- no new SSM Sid
+              # is required.
+              - Sid: SNSPublishProdAlerts
+                Effect: Allow
+                Action: sns:Publish
+                Resource:
+                  - !Sub "arn:aws:sns:${AWS::Region}:${AWS::AccountId}:vaultmtg-production-alerts"
               - Sid: SSM
                 Effect: Allow
                 Action:
