@@ -4,20 +4,27 @@ name: Scheduled Prod Canary
 #
 # WHY THIS EXISTS
 #   The 2026-05-29 prod config-drift incident (Clerk allowed-subdomains empty,
-#   BFF stale CLERK_FRONTEND_API, nginx rate-limit 503, /api/v1/account 404)
-#   was invisible to Sentry, CloudWatch, PostHog, and the Route 53 health check
-#   until a human manually tested. Every one of those faults would have tripped
-#   at least one check in this canary within 5 minutes of the breakage.
+#   BFF stale CLERK_FRONTEND_API, nginx rate-limit 503, /api/v1/system/account
+#   404) was invisible to Sentry, CloudWatch, PostHog, and the Route 53 health
+#   check until a human manually tested. Every one of those faults would have
+#   tripped at least one check in this canary within 5 minutes of the breakage.
 #
 # WHAT IT CHECKS (5 probes, ordered by incident coverage)
 #   1. GET /healthz — BFF/nginx liveness.
 #   2. POST clerk.vaultmtg.app/v1/sign_in_tokens — Clerk subdomain reachability
-#      and allowed-subdomains configuration (the root cause of the May incident).
+#      and allowed-subdomains configuration (root cause of the May incident).
+#      Requires the canary user_id in the POST body (Clerk mandates it — 422
+#      without it). user_id is a non-secret SSM String param; see below.
 #   3. OPTIONS /api/v1/health w/ Origin: https://app.vaultmtg.app — CORS
 #      preflight. Asserts the exact string "https://app.vaultmtg.app" in
-#      Access-Control-Allow-Origin (a wildcard * or wrong origin fails).
-#   4. GET /api/v1/account w/ Bearer token — authenticated data fetch.
-#      Validates ClerkAuthMiddleware, JWKS reachability, and the /account route.
+#      Access-Control-Allow-Origin (wildcard * or wrong origin fails).
+#   4. GET /api/v1/system/account w/ Bearer session JWT — authenticated data
+#      fetch. Validates ClerkAuthMiddleware, JWKS reachability, and the
+#      /system/account route.
+#      Auth chain: sign_in_token (ticket) is exchanged via FAPI
+#      POST /v1/client/sign_ins?strategy=ticket to mint a session, then
+#      FAPI GET /v1/client/sessions/{id}/tokens returns a short-lived (~60s)
+#      session JWT acceptable to ClerkAuthMiddleware (JWKS-verified).
 #   5. POST /api/v1/daemon/register (unauthenticated) — expects HTTP 401, not
 #      404. A 404 indicates the route is missing or CLERK_FRONTEND_API is stale.
 #
@@ -26,34 +33,74 @@ name: Scheduled Prod Canary
 #   PostHog middleware gates on this header server-side. No BFF deploy required;
 #   this is the zero-dependency PostHog synthetic-traffic suppression pattern.
 #
-# ACTIVATION PREREQUISITE (Ramone-gated — does NOT block this PR)
-#   Before the canary can function, Ramone must:
-#     1. Create a Clerk machine account (canary@vaultmtg.app) with standard
-#        user role in the production Clerk dashboard.
-#     2. Generate a Clerk Backend API secret key for that account.
-#     3. Store the key in SSM:
-#          aws ssm put-parameter \
-#            --profile personal \
-#            --name /vaultmtg/app/production/canary-clerk-api-token \
-#            --type SecureString \
-#            --value "<clerk-backend-api-key>" \
-#            --description "Clerk backend API key for prod canary machine account (canary@vaultmtg.app)" \
-#            --region us-east-1
-#   Until the SSM parameter exists the canary will fail on step 2 and produce
-#   alerts — this is intentional (fail-open). Do NOT run workflow_dispatch until
-#   the parameter is provisioned. Use dry_run:true for pre-activation testing.
+# AUTH CHAIN — CHECK 2 + CHECK 4 (end-to-end token flow)
+#
+#   Boundary 1: canary → Clerk Backend API
+#     POST clerk.vaultmtg.app/v1/sign_in_tokens
+#     Authorization: Bearer sk_live_... (CANARY_TOKEN, from SSM SecureString)
+#     Body: { "user_id": "user_xxx" }  ← required; from SSM String param
+#     Produces: { "token": "sit_xxx" } — a one-time sign-in TICKET, NOT a JWT
+#
+#   Boundary 2: canary → Clerk Frontend API (FAPI ticket exchange)
+#     POST clerk.vaultmtg.app/v1/client/sign_ins
+#     Content-Type: application/x-www-form-urlencoded
+#     Body: strategy=ticket&ticket=sit_xxx
+#     Uses a curl cookie jar so FAPI can set/return the __client session cookie.
+#     Produces: JSON with status=complete and created_session_id (a Clerk session ID).
+#
+#   Boundary 3: canary → Clerk Frontend API (session token mint)
+#     GET clerk.vaultmtg.app/v1/client/sessions/{session_id}/tokens
+#     Uses the same cookie jar (sends __client cookie for auth).
+#     Produces: { "jwt": "eyJ..." } — a short-lived (~60s) Clerk session JWT.
+#     This IS a JWKS-signed JWT that BFF ClerkAuthMiddleware accepts.
+#
+#   Boundary 4: canary → BFF (authenticated probe)
+#     GET api.vaultmtg.app/api/v1/system/account
+#     Authorization: Bearer eyJ... (the session JWT from boundary 3)
+#     BFF validates via clerkhttp.RequireHeaderAuthorization → JWKS fetch →
+#     JWT signature + expiry check → 200 if valid.
+#
+# ACTIVATION PREREQUISITES (Ramone-gated — do NOT run workflow_dispatch until
+# ALL four parameters are provisioned)
+#
+#   Step 1: Create a Clerk machine account in the production Clerk dashboard.
+#           Suggested email: canary@vaultmtg.app, role: standard user.
+#           Copy the user's Clerk user ID from the user detail page
+#           (format: user_2abc...).
+#
+#   Step 2: Store the Clerk Backend API secret key:
+#     aws ssm put-parameter \
+#       --profile personal \
+#       --name /vaultmtg/app/production/canary-clerk-api-token \
+#       --type SecureString \
+#       --value "<sk_live_...>" \
+#       --description "Clerk backend API secret key for prod canary machine account" \
+#       --region us-east-1
+#
+#   Step 3: Store the canary user's Clerk user ID (non-secret — plain String):
+#     aws ssm put-parameter \
+#       --profile personal \
+#       --name /vaultmtg/app/production/canary-clerk-user-id \
+#       --type String \
+#       --value "<user_2abc...>" \
+#       --description "Clerk user ID for prod canary machine account (canary@vaultmtg.app). Non-secret; used as the user_id body param in POST /v1/sign_in_tokens." \
+#       --region us-east-1
+#
+#   Until BOTH SSM parameters exist the canary will fail on CHECK 2 and produce
+#   alerts — this is intentional (fail-open). Use dry_run:true for pre-activation
+#   testing.
 #
 # CADENCE
 #   Every 5 minutes (approved by Ray, 2026-05-30 issue #268 comment). At
 #   ~8,640 runs/month this is well within GitHub Actions free-tier limits for
-#   a private repo. Each run executes 5 HTTP calls + 1 SSM read.
+#   a private repo. Each run executes ~7 HTTP calls + 2 SSM reads.
 #
 # IAM
 #   Uses gha-infra-cfn-deploy OIDC role. Trust policy already covers
 #   environment:production and environment:staging-alerts for mtga-companion-infra.
 #   One new Sid added (SNSPublishProdAlerts): sns:Publish scoped to
 #   vaultmtg-production-alerts. The existing SSM Sid already grants
-#   ssm:GetParameter on "*" — no new SSM Sid required.
+#   ssm:GetParameter on "*" — no new SSM Sid required for the new user-id param.
 #   The boundary SNS Sid grants sns:* on "*", so the intersection with
 #   SNSPublishProdAlerts is correct; no boundary edit is needed.
 #
@@ -94,6 +141,9 @@ env:
   # SSM path for the canary Clerk backend API key (SecureString).
   # RAMONE-GATED: must be created before the canary functions. See header.
   CANARY_TOKEN_SSM_PATH: /vaultmtg/app/production/canary-clerk-api-token
+  # SSM path for the canary Clerk user ID (String — not secret).
+  # RAMONE-GATED: must be created before CHECK 2 can pass. See header.
+  CANARY_USER_ID_SSM_PATH: /vaultmtg/app/production/canary-clerk-user-id
   # SNS topic for failure notifications (→ ramone.d.hamilton@gmail.com).
   # Topic created by cloudwatch-alarms.yml (Environment=production).
   PROD_ALERTS_TOPIC_ARN: arn:aws:sns:us-east-1:901347789205:vaultmtg-production-alerts
@@ -156,6 +206,35 @@ jobs:
           echo "Canary Clerk API token read from SSM: [MASKED]"
 
       # ------------------------------------------------------------------
+      # STEP 0c: Fetch canary Clerk user ID from SSM String.
+      # This is a non-secret parameter — the canary user ID is not a
+      # credential. It is stored in SSM (not a repo variable) because it
+      # belongs with the other canary activation parameters, making
+      # Ramone's provisioning checklist a single SSM namespace.
+      # ------------------------------------------------------------------
+      - name: STEP 0c -- Read canary Clerk user ID from SSM
+        id: fetch_user_id
+        run: |
+          set -euo pipefail
+          if ! CANARY_USER_ID=$(aws ssm get-parameter \
+              --name "${{ env.CANARY_USER_ID_SSM_PATH }}" \
+              --query 'Parameter.Value' \
+              --output text \
+              --region "$AWS_REGION" 2>/tmp/ssm-uid.err); then
+            echo "::error::Failed to read canary Clerk user ID from SSM path ${{ env.CANARY_USER_ID_SSM_PATH }}"
+            echo "::error::Is the parameter provisioned? See workflow header for Ramone activation steps."
+            cat /tmp/ssm-uid.err >&2
+            echo "step_failed=ssm-user-id-read" >> "$GITHUB_OUTPUT"
+            echo "failure_reason=ssm:GetParameter failed on ${{ env.CANARY_USER_ID_SSM_PATH }} -- parameter not provisioned. See workflow header for Ramone activation steps." >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          # User IDs are not secret but we avoid echoing the raw value
+          # in the log to keep the ID out of public log archives.
+          echo "::add-mask::${CANARY_USER_ID}"
+          printf '%s' "${CANARY_USER_ID}" > /tmp/canary-clerk-user-id.txt
+          echo "Canary Clerk user ID read from SSM: [MASKED]"
+
+      # ------------------------------------------------------------------
       # CHECK 1: GET /healthz — BFF/nginx liveness.
       # ------------------------------------------------------------------
       - name: CHECK 1 -- GET /healthz (BFF liveness)
@@ -180,16 +259,24 @@ jobs:
       # ------------------------------------------------------------------
       # CHECK 2: POST clerk.vaultmtg.app/v1/sign_in_tokens — Clerk subdomain
       # reachability and allowed-subdomains configuration.
-      # Catches: Clerk allowed-subdomains empty/misconfigured.
-      # The canary token IS the Clerk backend API secret key; it is passed
-      # as the Authorization bearer to the Clerk backend API (not the BFF).
+      #
+      # The canary token IS the Clerk backend API secret key, passed as the
+      # Authorization bearer to the Clerk backend API (not the BFF).
+      # user_id is REQUIRED by Clerk's /v1/sign_in_tokens — omitting it
+      # returns HTTP 422. The value is read from the SSM String param above.
+      #
+      # The sign_in_token "ticket" produced here is NOT a session JWT.
+      # It is a one-time token that must be exchanged via the FAPI in
+      # CHECK 4 before it can be used as a Bearer credential to the BFF.
       # ------------------------------------------------------------------
       - name: CHECK 2 -- Clerk sign-in-token (subdomain auth reachability)
         id: check_clerk
         run: |
           set -euo pipefail
           CANARY_TOKEN=$(cat /tmp/canary-clerk-token.txt)
+          CANARY_USER_ID=$(cat /tmp/canary-clerk-user-id.txt)
           echo "::add-mask::${CANARY_TOKEN}"
+          echo "::add-mask::${CANARY_USER_ID}"
 
           HTTP_CODE=$(curl -s -o /tmp/check2.body -w '%{http_code}' \
             --max-time 10 \
@@ -198,15 +285,16 @@ jobs:
             -H "Authorization: Bearer ${CANARY_TOKEN}" \
             -H "Content-Type: application/json" \
             -H "${{ env.SYNTHETIC_HEADER }}" \
+            --data "{\"user_id\":\"${CANARY_USER_ID}\"}" \
             "${{ env.CLERK_API_BASE }}/v1/sign_in_tokens" || echo "000")
 
           echo "POST ${{ env.CLERK_API_BASE }}/v1/sign_in_tokens -> HTTP $HTTP_CODE"
 
           if [ "$HTTP_CODE" != "200" ]; then
             # Redact the body in case Clerk echoes auth details.
-            echo "::error::CHECK 2 FAILED: Clerk sign-in-token returned HTTP $HTTP_CODE (expected 200). Clerk subdomain may be misconfigured or allowed-subdomains is empty."
+            echo "::error::CHECK 2 FAILED: Clerk sign-in-token returned HTTP $HTTP_CODE (expected 200). Possible causes: Clerk subdomain misconfigured, allowed-subdomains empty, or canary user_id does not exist in this Clerk instance."
             echo "step_failed=check2-clerk-auth" >> "$GITHUB_OUTPUT"
-            echo "failure_reason=CHECK 2: POST ${{ env.CLERK_API_BASE }}/v1/sign_in_tokens returned HTTP $HTTP_CODE (expected 200). Clerk subdomain misconfigured or allowed-subdomains empty." >> "$GITHUB_OUTPUT"
+            echo "failure_reason=CHECK 2: POST ${{ env.CLERK_API_BASE }}/v1/sign_in_tokens returned HTTP $HTTP_CODE (expected 200). Clerk subdomain misconfigured, allowed-subdomains empty, or invalid user_id." >> "$GITHUB_OUTPUT"
             exit 1
           fi
 
@@ -218,17 +306,19 @@ jobs:
             exit 1
           fi
 
-          # Extract the session token and mask it. Used by CHECK 4.
-          SESSION_TOKEN=$(grep -o '"token":"[^"]*"' /tmp/check2.body | head -1 | cut -d'"' -f4 || echo "")
-          if [ -z "$SESSION_TOKEN" ]; then
+          # Extract the sign-in ticket and mask it.
+          # NOTE: this is a one-time TICKET (sit_xxx), NOT a session JWT.
+          # CHECK 4 exchanges it via the FAPI to obtain a real session JWT.
+          SIGNIN_TICKET=$(grep -o '"token":"[^"]*"' /tmp/check2.body | head -1 | cut -d'"' -f4 || echo "")
+          if [ -z "$SIGNIN_TICKET" ]; then
             echo "::error::CHECK 2 FAILED: Could not parse token from Clerk response."
             echo "step_failed=check2-clerk-parse" >> "$GITHUB_OUTPUT"
             echo "failure_reason=CHECK 2: Clerk response was HTTP 200 with token field but token value could not be parsed." >> "$GITHUB_OUTPUT"
             exit 1
           fi
-          echo "::add-mask::${SESSION_TOKEN}"
-          printf '%s' "${SESSION_TOKEN}" > /tmp/canary-session-token.txt
-          echo "CHECK 2 PASSED: Clerk sign-in-token issued."
+          echo "::add-mask::${SIGNIN_TICKET}"
+          printf '%s' "${SIGNIN_TICKET}" > /tmp/canary-signin-ticket.txt
+          echo "CHECK 2 PASSED: Clerk sign-in ticket issued."
 
       # ------------------------------------------------------------------
       # CHECK 3: OPTIONS CORS preflight with Origin: https://app.vaultmtg.app
@@ -283,41 +373,144 @@ jobs:
           echo "CHECK 3 PASSED: CORS preflight returned correct Access-Control-Allow-Origin."
 
       # ------------------------------------------------------------------
-      # CHECK 4: GET /api/v1/account w/ Bearer session token.
-      # Validates ClerkAuthMiddleware, JWKS reachability, account route.
+      # CHECK 4: Authenticated GET /api/v1/system/account
+      # Validates ClerkAuthMiddleware, JWKS reachability, and the
+      # /system/account route (the correct BFF route — NOT /api/v1/account).
+      #
+      # AUTH CHAIN (three sub-steps):
+      #
+      # 4a. Exchange the sign-in ticket from CHECK 2 via the Clerk Frontend
+      #     API (FAPI). The FAPI POST /v1/client/sign_ins endpoint accepts the
+      #     one-time sign-in ticket and, when status=complete, produces a
+      #     Clerk session (session_id + __client cookie).
+      #     A curl cookie jar is used so the FAPI can set and return the
+      #     __client session cookie required by subsequent FAPI calls.
+      #
+      # 4b. Retrieve a short-lived session JWT from the FAPI using the
+      #     session_id and the established __client cookie.
+      #     GET /v1/client/sessions/{session_id}/tokens returns a JWKS-signed
+      #     JWT (~60s TTL) that BFF ClerkAuthMiddleware accepts.
+      #
+      # 4c. Call GET /api/v1/system/account with the session JWT as Bearer.
+      #     A 200 response confirms ClerkAuthMiddleware + JWKS are healthy.
       # ------------------------------------------------------------------
-      - name: CHECK 4 -- Authenticated GET /api/v1/account
+      - name: CHECK 4 -- FAPI ticket exchange + authenticated GET /api/v1/system/account
         id: check_account
         run: |
           set -euo pipefail
-          SESSION_TOKEN=$(cat /tmp/canary-session-token.txt)
-          echo "::add-mask::${SESSION_TOKEN}"
+          SIGNIN_TICKET=$(cat /tmp/canary-signin-ticket.txt)
+          echo "::add-mask::${SIGNIN_TICKET}"
 
-          HTTP_CODE=$(curl -s -o /tmp/check4.body -w '%{http_code}' \
-            --max-time 10 \
+          # ---- 4a: Exchange sign-in ticket via FAPI ---------------------------
+          # POST /v1/client/sign_ins with strategy=ticket.
+          # Uses form-encoding (FAPI requirement for sign-in initiation).
+          # The cookie jar captures the __client cookie that FAPI sets on the
+          # response, which is required by the subsequent token-fetch call.
+          EXCHANGE_CODE=$(curl -s -o /tmp/check4a.body -c /tmp/canary-fapi-cookies.txt -w '%{http_code}' \
+            --max-time 15 \
             --connect-timeout 5 \
-            -H "Authorization: Bearer ${SESSION_TOKEN}" \
+            -X POST \
+            -H "Content-Type: application/x-www-form-urlencoded" \
             -H "${{ env.SYNTHETIC_HEADER }}" \
-            "${{ env.PROD_BFF_BASE }}/api/v1/account" || echo "000")
+            --data-urlencode "strategy=ticket" \
+            --data-urlencode "ticket=${SIGNIN_TICKET}" \
+            "${{ env.CLERK_API_BASE }}/v1/client/sign_ins" || echo "000")
 
-          echo "GET /api/v1/account -> HTTP $HTTP_CODE"
+          echo "POST ${{ env.CLERK_API_BASE }}/v1/client/sign_ins (ticket exchange) -> HTTP $EXCHANGE_CODE"
 
-          if [ "$HTTP_CODE" != "200" ]; then
-            # Truncate body to avoid leaking account data.
-            BODY=$(head -c 200 /tmp/check4.body 2>/dev/null | sed 's/[a-zA-Z0-9+/=]\{20,\}/[REDACTED]/g' || true)
-            echo "::error::CHECK 4 FAILED: GET /api/v1/account returned HTTP $HTTP_CODE (expected 200). ClerkAuthMiddleware or JWKS reachability issue. Body (truncated+redacted): ${BODY:-<empty>}"
-            echo "step_failed=check4-account" >> "$GITHUB_OUTPUT"
-            echo "failure_reason=CHECK 4: GET ${{ env.PROD_BFF_BASE }}/api/v1/account returned HTTP $HTTP_CODE (expected 200). ClerkAuthMiddleware or JWKS issue." >> "$GITHUB_OUTPUT"
+          if [ "$EXCHANGE_CODE" != "200" ]; then
+            BODY=$(head -c 300 /tmp/check4a.body 2>/dev/null | sed 's/[A-Za-z0-9_-]\{20,\}/[REDACTED]/g' || true)
+            echo "::error::CHECK 4 FAILED (4a): FAPI ticket exchange returned HTTP $EXCHANGE_CODE (expected 200). Body (redacted): ${BODY:-<empty>}"
+            echo "step_failed=check4a-fapi-exchange" >> "$GITHUB_OUTPUT"
+            echo "failure_reason=CHECK 4 (4a): FAPI POST /v1/client/sign_ins returned HTTP $EXCHANGE_CODE. Clerk FAPI unreachable or ticket already consumed." >> "$GITHUB_OUTPUT"
             exit 1
           fi
 
-          echo "CHECK 4 PASSED: authenticated /api/v1/account returned HTTP 200."
+          # Confirm sign-in status is complete and extract the session ID.
+          SIGNIN_STATUS=$(grep -o '"status":"[^"]*"' /tmp/check4a.body | head -1 | cut -d'"' -f4 || echo "")
+          echo "FAPI sign-in status: ${SIGNIN_STATUS}"
+          if [ "$SIGNIN_STATUS" != "complete" ]; then
+            echo "::error::CHECK 4 FAILED (4a): FAPI sign-in status is '${SIGNIN_STATUS}' (expected 'complete'). Canary user may require additional verification factors."
+            echo "step_failed=check4a-signin-incomplete" >> "$GITHUB_OUTPUT"
+            echo "failure_reason=CHECK 4 (4a): FAPI sign-in status='${SIGNIN_STATUS}' (expected 'complete'). Ensure canary user has no MFA or password requirement." >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          SESSION_ID=$(grep -o '"created_session_id":"[^"]*"' /tmp/check4a.body | head -1 | cut -d'"' -f4 || echo "")
+          if [ -z "$SESSION_ID" ]; then
+            echo "::error::CHECK 4 FAILED (4a): Could not parse created_session_id from FAPI response."
+            echo "step_failed=check4a-session-id-parse" >> "$GITHUB_OUTPUT"
+            echo "failure_reason=CHECK 4 (4a): FAPI returned status=complete but created_session_id not found in response body." >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          echo "::add-mask::${SESSION_ID}"
+          echo "FAPI ticket exchange complete. Session established: [MASKED]"
+
+          # ---- 4b: Fetch short-lived session JWT from FAPI --------------------
+          # GET /v1/client/sessions/{session_id}/tokens uses the __client cookie
+          # set in step 4a. Returns { "jwt": "eyJ..." } — a JWKS-signed session
+          # JWT that BFF ClerkAuthMiddleware accepts via RequireHeaderAuthorization.
+          TOKEN_CODE=$(curl -s -o /tmp/check4b.body -b /tmp/canary-fapi-cookies.txt -w '%{http_code}' \
+            --max-time 10 \
+            --connect-timeout 5 \
+            -H "${{ env.SYNTHETIC_HEADER }}" \
+            "${{ env.CLERK_API_BASE }}/v1/client/sessions/${SESSION_ID}/tokens" || echo "000")
+
+          echo "GET ${{ env.CLERK_API_BASE }}/v1/client/sessions/[SESSION_ID]/tokens -> HTTP $TOKEN_CODE"
+
+          if [ "$TOKEN_CODE" != "200" ]; then
+            echo "::error::CHECK 4 FAILED (4b): FAPI session token fetch returned HTTP $TOKEN_CODE (expected 200)."
+            echo "step_failed=check4b-session-token-fetch" >> "$GITHUB_OUTPUT"
+            echo "failure_reason=CHECK 4 (4b): FAPI GET /v1/client/sessions/{id}/tokens returned HTTP $TOKEN_CODE." >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          SESSION_JWT=$(grep -o '"jwt":"[^"]*"' /tmp/check4b.body | head -1 | cut -d'"' -f4 || echo "")
+          if [ -z "$SESSION_JWT" ]; then
+            echo "::error::CHECK 4 FAILED (4b): Could not parse jwt from FAPI token response."
+            echo "step_failed=check4b-jwt-parse" >> "$GITHUB_OUTPUT"
+            echo "failure_reason=CHECK 4 (4b): FAPI token endpoint returned HTTP 200 but jwt field not found in body." >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          echo "::add-mask::${SESSION_JWT}"
+          # Write to temp file; do NOT export to environment to avoid GHA echo.
+          printf '%s' "${SESSION_JWT}" > /tmp/canary-session-jwt.txt
+          echo "CHECK 4 (4b): session JWT obtained."
+
+          # ---- 4c: Authenticated GET /api/v1/system/account ------------------
+          # Use the JWKS-signed session JWT as Bearer. A 200 response confirms:
+          # - ClerkAuthMiddleware is mounted and active on this route
+          # - The BFF can reach clerk.vaultmtg.app JWKS to verify the JWT
+          # - The /api/v1/system/account route is registered and serving
+          SESSION_JWT=$(cat /tmp/canary-session-jwt.txt)
+          echo "::add-mask::${SESSION_JWT}"
+
+          HTTP_CODE=$(curl -s -o /tmp/check4c.body -w '%{http_code}' \
+            --max-time 10 \
+            --connect-timeout 5 \
+            -H "Authorization: Bearer ${SESSION_JWT}" \
+            -H "${{ env.SYNTHETIC_HEADER }}" \
+            "${{ env.PROD_BFF_BASE }}/api/v1/system/account" || echo "000")
+
+          echo "GET /api/v1/system/account -> HTTP $HTTP_CODE"
+
+          if [ "$HTTP_CODE" != "200" ]; then
+            # Truncate body to avoid leaking account data.
+            BODY=$(head -c 200 /tmp/check4c.body 2>/dev/null | sed 's/[a-zA-Z0-9+/=]\{20,\}/[REDACTED]/g' || true)
+            echo "::error::CHECK 4 FAILED (4c): GET /api/v1/system/account returned HTTP $HTTP_CODE (expected 200). ClerkAuthMiddleware or JWKS reachability issue. Body (truncated+redacted): ${BODY:-<empty>}"
+            echo "step_failed=check4c-account" >> "$GITHUB_OUTPUT"
+            echo "failure_reason=CHECK 4 (4c): GET ${{ env.PROD_BFF_BASE }}/api/v1/system/account returned HTTP $HTTP_CODE (expected 200). ClerkAuthMiddleware or JWKS issue." >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          echo "CHECK 4 PASSED: FAPI ticket exchange complete + authenticated /api/v1/system/account returned HTTP 200."
 
       # ------------------------------------------------------------------
       # CHECK 5: POST /api/v1/daemon/register (unauthenticated) → expect 401.
       # A 404 means the route is missing or CLERK_FRONTEND_API is stale.
       # A 503 means nginx is rate-limiting (durable rate-limit fix from PR #271
       # should prevent this, but the canary catches regressions).
+      # This check is unaffected by the CHECK 2/4 auth chain changes.
       # ------------------------------------------------------------------
       - name: CHECK 5 -- Unauthenticated daemon/register expects 401
         id: check_daemon_register
@@ -358,8 +551,8 @@ jobs:
             # Aggregate: whichever failing step wrote to GITHUB_OUTPUT first
             # is the one we surface. Concatenate all outputs and take the first
             # non-empty segment.
-            STEP_FAILED="${{ steps.fetch_token.outputs.step_failed }}${{ steps.check_healthz.outputs.step_failed }}${{ steps.check_clerk.outputs.step_failed }}${{ steps.check_cors.outputs.step_failed }}${{ steps.check_account.outputs.step_failed }}${{ steps.check_daemon_register.outputs.step_failed }}"
-            REASON="${{ steps.fetch_token.outputs.failure_reason }}${{ steps.check_healthz.outputs.failure_reason }}${{ steps.check_clerk.outputs.failure_reason }}${{ steps.check_cors.outputs.failure_reason }}${{ steps.check_account.outputs.failure_reason }}${{ steps.check_daemon_register.outputs.failure_reason }}"
+            STEP_FAILED="${{ steps.fetch_token.outputs.step_failed }}${{ steps.fetch_user_id.outputs.step_failed }}${{ steps.check_healthz.outputs.step_failed }}${{ steps.check_clerk.outputs.step_failed }}${{ steps.check_cors.outputs.step_failed }}${{ steps.check_account.outputs.step_failed }}${{ steps.check_daemon_register.outputs.step_failed }}"
+            REASON="${{ steps.fetch_token.outputs.failure_reason }}${{ steps.fetch_user_id.outputs.failure_reason }}${{ steps.check_healthz.outputs.failure_reason }}${{ steps.check_clerk.outputs.failure_reason }}${{ steps.check_cors.outputs.failure_reason }}${{ steps.check_account.outputs.failure_reason }}${{ steps.check_daemon_register.outputs.failure_reason }}"
             if [ -z "$STEP_FAILED" ]; then
               STEP_FAILED="unknown"
               REASON="Canary failed but no step captured a failure reason. Inspect the job log."
@@ -428,7 +621,7 @@ jobs:
             printf '  1. GET api.vaultmtg.app/healthz\n'
             printf '  2. POST clerk.vaultmtg.app/v1/sign_in_tokens (Clerk subdomain auth)\n'
             printf '  3. OPTIONS /api/v1/health w/ Origin: https://app.vaultmtg.app (CORS exact-origin)\n'
-            printf '  4. GET /api/v1/account w/ Bearer token (ClerkAuthMiddleware + JWKS)\n'
+            printf '  4. FAPI ticket exchange + GET /api/v1/system/account w/ Bearer JWT (ClerkAuthMiddleware + JWKS)\n'
             printf '  5. POST /api/v1/daemon/register unauthenticated (expect 401 not 404)\n\n'
             printf 'Investigate the run URL above. This canary was introduced in ticket #268\n'
             printf 'after the 2026-05-29 prod config-drift incident.\n'
