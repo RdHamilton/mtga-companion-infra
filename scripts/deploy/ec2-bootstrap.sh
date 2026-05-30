@@ -589,7 +589,12 @@ if [ -f "${NGINX_CONF}" ] && grep -q "listen 443 ssl" "${NGINX_CONF}"; then
 else
     log "Writing fresh nginx config (no existing TLS block detected) -- certbot will expand."
     cat > "${NGINX_CONF}" <<'NGINX'
-limit_req_zone $binary_remote_addr zone=api_limit:10m rate=30r/m;
+# Rate raised from 30r/m burst=10 to 300r/m burst=60 (2026-05-29 incident fix).
+# 300r/m accommodates normal SPA usage (~15-40 req/navigation) while still
+# rate-limiting abuse. limit_req_status 429 so throttle responses are
+# semantically distinct from upstream-down 503s.
+limit_req_zone $binary_remote_addr zone=api_limit:10m rate=300r/m;
+limit_req_status 429;
 
 server {
     listen 80 default_server;
@@ -599,14 +604,21 @@ server {
         root /var/www/certbot;
     }
 
+    location /api/v1/events {
+        proxy_pass         http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header   Host              $host;
+        proxy_set_header   X-Real-IP         $remote_addr;
+        proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+        proxy_set_header   Connection        keep-alive;
+        proxy_buffering        off;
+        add_header             X-Accel-Buffering no;
+        proxy_read_timeout     3600s;
+    }
+
     location /api/v1/ {
-        limit_req zone=api_limit burst=10 nodelay;
-        # CORS on nginx-generated error responses (2026-05-29 post-mortem).
-        # Certbot will carry these through to the HTTPS server block on expansion.
-        add_header Access-Control-Allow-Origin "https://app.vaultmtg.app" always;
-        add_header Access-Control-Allow-Methods "GET, POST, PUT, PATCH, DELETE, OPTIONS" always;
-        add_header Access-Control-Allow-Headers "Authorization, Content-Type, X-Requested-With" always;
-        add_header Access-Control-Allow-Credentials "true" always;
+        limit_req zone=api_limit burst=60 nodelay;
         proxy_pass         http://127.0.0.1:8080;
         proxy_http_version 1.1;
         proxy_set_header   Host              $host;
@@ -686,18 +698,22 @@ fi
 # zone (api_limit) defined in mtga-companion.conf, so staging bursts don't
 # share counters with production.
 cat > /etc/nginx/conf.d/staging-api.vaultmtg.app.conf <<'STAGINGNGINX'
-# Rate limit zone — raised from 30r/m burst=10 to 60r/m burst=50
-# (2026-05-29 incident fix): the SPA fires 10+ parallel requests per page
-# load; burst=10 saturated immediately causing 503s. Codified from live patch.
+# nginx server block for staging-api.vaultmtg.app
+# Must remain in sync with nginx/staging-api.vaultmtg.app.conf in the infra repo.
+#
+# Rate limit zone: 60r/m burst=50 (raised 2026-05-29 incident fix).
+# limit_req_status 429 so throttle responses are semantically distinct from 503s.
 limit_req_zone $binary_remote_addr zone=staging_api_limit:10m rate=60r/m;
+limit_req_status 429;
 
 server {
     listen 80;
     server_name staging-api.vaultmtg.app;
-    access_log /var/log/nginx/staging-access.log;
+
     location /.well-known/acme-challenge/ {
         root /var/www/certbot;
     }
+
     location / {
         return 301 https://$host$request_uri;
     }
@@ -706,19 +722,37 @@ server {
 server {
     listen 443 ssl;
     server_name staging-api.vaultmtg.app;
+
     ssl_certificate     /etc/letsencrypt/live/api.vaultmtg.app/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/api.vaultmtg.app/privkey.pem;
     include /etc/letsencrypt/options-ssl-nginx.conf;
     ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
+
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;
+    add_header X-Frame-Options SAMEORIGIN always;
+    add_header X-Content-Type-Options nosniff always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+
     access_log /var/log/nginx/staging-access.log;
 
-    # CORS on ALL responses including nginx-generated errors (2026-05-29 post-mortem).
-    # Without `always`, 4xx/5xx nginx responses omit CORS headers — the browser
-    # reports a CORS violation masking the real upstream error.
-    add_header Access-Control-Allow-Origin "https://stg-app.vaultmtg.app" always;
-    add_header Access-Control-Allow-Methods "GET, POST, PUT, PATCH, DELETE, OPTIONS" always;
-    add_header Access-Control-Allow-Headers "Authorization, Content-Type, X-Requested-With" always;
-    add_header Access-Control-Allow-Credentials "true" always;
+    # CORS NOT set at server-block level (same rationale as prod): the BFF
+    # go-chi/cors middleware adds ACAO on every proxied response. Server-block
+    # add_header would duplicate it, causing Chromium CORS violation (status 0).
+    # CORS for nginx-generated errors (502/503/504/429) handled by @upstream_error.
+    error_page 502 503 504 429 @upstream_error;
+
+    location /api/v1/events {
+        proxy_pass         http://127.0.0.1:8081;
+        proxy_http_version 1.1;
+        proxy_set_header   Host              $host;
+        proxy_set_header   X-Real-IP         $remote_addr;
+        proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+        proxy_set_header   Connection        keep-alive;
+        proxy_buffering        off;
+        add_header             X-Accel-Buffering no;
+        proxy_read_timeout     3600s;
+    }
 
     location /api/v1/ {
         limit_req zone=staging_api_limit burst=50 nodelay;
@@ -734,10 +768,24 @@ server {
     }
 
     location /healthz {
-        proxy_pass http://127.0.0.1:8081/healthz;
+        proxy_pass       http://127.0.0.1:8081/healthz;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         access_log off;
+    }
+
+    location ~ /\. {
+        deny all;
+    }
+
+    location @upstream_error {
+        internal;
+        default_type application/json;
+        add_header Access-Control-Allow-Origin "https://stg-app.vaultmtg.app" always;
+        add_header Access-Control-Allow-Methods "GET, POST, PUT, PATCH, DELETE, OPTIONS" always;
+        add_header Access-Control-Allow-Headers "Authorization, Content-Type, X-Requested-With" always;
+        add_header Access-Control-Allow-Credentials "true" always;
+        return 502 '{"error":"upstream_unavailable"}';
     }
 }
 STAGINGNGINX
