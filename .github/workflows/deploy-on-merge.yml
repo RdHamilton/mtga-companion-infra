@@ -303,7 +303,7 @@ jobs:
               # ----------------------------------------------------------------
               # Benign-drift filter (ticket #156).
               #
-              # CFN has two known false-positive patterns that can never be
+              # CFN has three known false-positive patterns that can never be
               # resolved by a template deploy:
               #
               # 1. AWS::CloudWatch::Alarm with StackResourceDriftStatus=UNKNOWN
@@ -316,7 +316,14 @@ jobs:
               #    which never returns tags; the actual tags are present per
               #    ListQueueTags.  The "/Tags" diff is always a false positive.
               #
-              # Any resource that does NOT match one of these two patterns is
+              # 3. AWS::SNS::Topic MODIFIED where the ONLY PropertyDifferences
+              #    path is "/Tags".  CFN's drift checker reads SNS topic
+              #    properties but does not consistently return system-managed
+              #    aws:cloudformation:* tags in ActualProperties, causing a
+              #    spurious /Tags mismatch.  Confirmed benign: actual tags are
+              #    present via sns:ListTagsForResource.  (ticket #209 follow-up)
+              #
+              # Any resource that does NOT match one of these three patterns is
               # considered real drift and still blocks the auto-deploy.
               # ----------------------------------------------------------------
 
@@ -333,6 +340,13 @@ jobs:
                     # Benign pattern 2: SQS::Queue MODIFIED with only /Tags diff
                     (
                       .ResourceType == "AWS::SQS::Queue" and
+                      .StackResourceDriftStatus == "MODIFIED" and
+                      (.PropertyDifferences | length) > 0 and
+                      ([.PropertyDifferences[].PropertyPath] | all(. == "/Tags"))
+                    ) or
+                    # Benign pattern 3: SNS::Topic MODIFIED with only /Tags diff
+                    (
+                      .ResourceType == "AWS::SNS::Topic" and
                       .StackResourceDriftStatus == "MODIFIED" and
                       (.PropertyDifferences | length) > 0 and
                       ([.PropertyDifferences[].PropertyPath] | all(. == "/Tags"))
@@ -359,6 +373,12 @@ jobs:
                     ) or
                     (
                       .ResourceType == "AWS::SQS::Queue" and
+                      .StackResourceDriftStatus == "MODIFIED" and
+                      (.PropertyDifferences | length) > 0 and
+                      ([.PropertyDifferences[].PropertyPath] | all(. == "/Tags"))
+                    ) or
+                    (
+                      .ResourceType == "AWS::SNS::Topic" and
                       .StackResourceDriftStatus == "MODIFIED" and
                       (.PropertyDifferences | length) > 0 and
                       ([.PropertyDifferences[].PropertyPath] | all(. == "/Tags"))
