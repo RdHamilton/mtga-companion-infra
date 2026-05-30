@@ -27,9 +27,11 @@ name: Scheduled Prod Canary
 #      fetch. Validates ClerkAuthMiddleware, JWKS reachability, and the
 #      /system/account route.
 #      Auth chain: sign_in_token (ticket) is exchanged via FAPI
-#      POST /v1/client/sign_ins?strategy=ticket to mint a session, then
-#      FAPI GET /v1/client/sessions/{id}/tokens returns a short-lived (~60s)
-#      session JWT acceptable to ClerkAuthMiddleware (JWKS-verified).
+#      POST /v1/client/sign_ins?strategy=ticket to mint a session (4a), then
+#      Backend API POST /v1/sessions/{id}/tokens mints a short-lived (~60s)
+#      session JWT acceptable to ClerkAuthMiddleware (JWKS-verified) (4b).
+#      FAPI token fetch rejected headless curl with 401 bot-protection (PR #268
+#      CHECK 4b fix) — Backend API is the correct server-to-server path.
 #   5. POST /api/v1/daemon/register (unauthenticated) — expects HTTP 401, not
 #      404. A 404 indicates the route is missing or CLERK_FRONTEND_API is stale.
 #
@@ -55,11 +57,15 @@ name: Scheduled Prod Canary
 #     Uses a curl cookie jar so FAPI can set/return the __client session cookie.
 #     Produces: JSON with status=complete and created_session_id (a Clerk session ID).
 #
-#   Boundary 3: canary → Clerk Frontend API (session token mint)
-#     GET clerk.vaultmtg.app/v1/client/sessions/{session_id}/tokens
-#     Uses the same cookie jar (sends __client cookie for auth).
-#     Produces: { "jwt": "eyJ..." } — a short-lived (~60s) Clerk session JWT.
-#     This IS a JWKS-signed JWT that BFF ClerkAuthMiddleware accepts.
+#   Boundary 3: canary → Clerk Backend API (session token mint — NOT FAPI)
+#     POST https://api.clerk.com/v1/sessions/{session_id}/tokens
+#     Authorization: Bearer sk_live_... (CANARY_TOKEN, same key as Boundary 1)
+#     No cookie required. No browser context required.
+#     Produces: { "object": "token", "jwt": "eyJ..." } — a short-lived (~60s)
+#     JWKS-signed Clerk session JWT that BFF ClerkAuthMiddleware accepts.
+#     WHY NOT FAPI: FAPI GET /v1/client/sessions/{id}/tokens rejects headless curl
+#     (no User-Agent / _clerk_js_version / browser Origin) with HTTP 401 bot-
+#     protection. The Backend API endpoint is the correct server-to-server path.
 #
 #   Boundary 4: canary → BFF (authenticated probe)
 #     GET api.vaultmtg.app/api/v1/system/account
@@ -415,14 +421,17 @@ jobs:
       # 4a. Exchange the sign-in ticket from CHECK 2 via the Clerk Frontend
       #     API (FAPI). The FAPI POST /v1/client/sign_ins endpoint accepts the
       #     one-time sign-in ticket and, when status=complete, produces a
-      #     Clerk session (session_id + __client cookie).
-      #     A curl cookie jar is used so the FAPI can set and return the
-      #     __client session cookie required by subsequent FAPI calls.
+      #     Clerk session (created_session_id). A curl cookie jar captures the
+      #     __client cookie for this step.
       #
-      # 4b. Retrieve a short-lived session JWT from the FAPI using the
-      #     session_id and the established __client cookie.
-      #     GET /v1/client/sessions/{session_id}/tokens returns a JWKS-signed
-      #     JWT (~60s TTL) that BFF ClerkAuthMiddleware accepts.
+      # 4b. Mint a short-lived session JWT via the Clerk Backend API
+      #     (api.clerk.com), NOT the FAPI. Root cause of the prior HTTP 401:
+      #     FAPI GET /v1/client/sessions/{id}/tokens rejects headless curl
+      #     as bot traffic (requires browser signals: User-Agent, Origin,
+      #     _clerk_js_version). The Backend API POST /v1/sessions/{id}/tokens
+      #     is a server-to-server endpoint authenticated with Bearer sk_live —
+      #     no cookie, no browser context, no testing token required.
+      #     Returns { "object": "token", "jwt": "eyJ..." } JWKS-signed JWT.
       #
       # 4c. Call GET /api/v1/system/account with the session JWT as Bearer.
       #     A 200 response confirms ClerkAuthMiddleware + JWKS are healthy.
@@ -479,36 +488,53 @@ jobs:
           echo "::add-mask::${SESSION_ID}"
           echo "FAPI ticket exchange complete. Session established: [MASKED]"
 
-          # ---- 4b: Fetch short-lived session JWT from FAPI --------------------
-          # GET /v1/client/sessions/{session_id}/tokens uses the __client cookie
-          # set in step 4a. Returns { "jwt": "eyJ..." } — a JWKS-signed session
-          # JWT that BFF ClerkAuthMiddleware accepts via RequireHeaderAuthorization.
-          TOKEN_CODE=$(curl -s -o /tmp/check4b.body -b /tmp/canary-fapi-cookies.txt -w '%{http_code}' \
+          # ---- 4b: Mint a short-lived session JWT via the Clerk Backend API ------
+          # Root cause of prior 401: the FAPI GET /v1/client/sessions/{id}/tokens
+          # endpoint requires browser-like context (User-Agent, _clerk_js_version,
+          # Origin) or a __clerk_testing_token bypass. A headless curl with only the
+          # __client cookie is rejected as bot traffic with HTTP 401.
+          #
+          # Fix: use the Clerk Backend API (api.clerk.com) instead of the FAPI for
+          # step 4b. POST /v1/sessions/{session_id}/tokens is a server-to-server
+          # endpoint authenticated with Authorization: Bearer <sk_live>. It requires
+          # no browser context, no cookie, and no testing token. It returns the same
+          # JWKS-signed short-lived JWT that BFF ClerkAuthMiddleware accepts.
+          #
+          # The session_id (created_session_id) from the FAPI ticket exchange (4a)
+          # is a valid Clerk session ID that the Backend API recognises. The Backend
+          # API response envelope is: { "object": "token", "jwt": "eyJ..." }.
+          CANARY_TOKEN=$(cat /tmp/canary-clerk-token.txt)
+          echo "::add-mask::${CANARY_TOKEN}"
+          TOKEN_CODE=$(curl -s -o /tmp/check4b.body -w '%{http_code}' \
             --max-time 10 \
             --connect-timeout 5 \
+            -X POST \
+            -H "Authorization: Bearer ${CANARY_TOKEN}" \
+            -H "Content-Type: application/json" \
             -H "${{ env.SYNTHETIC_HEADER }}" \
-            "${{ env.CLERK_API_BASE }}/v1/client/sessions/${SESSION_ID}/tokens" || echo "000")
+            "${{ env.CLERK_BACKEND_API_BASE }}/v1/sessions/${SESSION_ID}/tokens" || echo "000")
 
-          echo "GET ${{ env.CLERK_API_BASE }}/v1/client/sessions/[SESSION_ID]/tokens -> HTTP $TOKEN_CODE"
+          echo "POST ${{ env.CLERK_BACKEND_API_BASE }}/v1/sessions/[SESSION_ID]/tokens -> HTTP $TOKEN_CODE"
 
           if [ "$TOKEN_CODE" != "200" ]; then
-            echo "::error::CHECK 4 FAILED (4b): FAPI session token fetch returned HTTP $TOKEN_CODE (expected 200)."
+            BODY=$(head -c 300 /tmp/check4b.body 2>/dev/null | sed 's/[A-Za-z0-9_-]\{20,\}/[REDACTED]/g' || true)
+            echo "::error::CHECK 4 FAILED (4b): Backend API session token mint returned HTTP $TOKEN_CODE (expected 200). Body (redacted): ${BODY:-<empty>}"
             echo "step_failed=check4b-session-token-fetch" >> "$GITHUB_OUTPUT"
-            echo "failure_reason=CHECK 4 (4b): FAPI GET /v1/client/sessions/{id}/tokens returned HTTP $TOKEN_CODE." >> "$GITHUB_OUTPUT"
+            echo "failure_reason=CHECK 4 (4b): Backend API POST /v1/sessions/{id}/tokens returned HTTP $TOKEN_CODE. Check sk_live key validity and session_id from 4a." >> "$GITHUB_OUTPUT"
             exit 1
           fi
 
           SESSION_JWT=$(grep -o '"jwt":"[^"]*"' /tmp/check4b.body | head -1 | cut -d'"' -f4 || echo "")
           if [ -z "$SESSION_JWT" ]; then
-            echo "::error::CHECK 4 FAILED (4b): Could not parse jwt from FAPI token response."
+            echo "::error::CHECK 4 FAILED (4b): Could not parse jwt from Backend API token response."
             echo "step_failed=check4b-jwt-parse" >> "$GITHUB_OUTPUT"
-            echo "failure_reason=CHECK 4 (4b): FAPI token endpoint returned HTTP 200 but jwt field not found in body." >> "$GITHUB_OUTPUT"
+            echo "failure_reason=CHECK 4 (4b): Backend API token endpoint returned HTTP 200 but jwt field not found in body." >> "$GITHUB_OUTPUT"
             exit 1
           fi
           echo "::add-mask::${SESSION_JWT}"
           # Write to temp file; do NOT export to environment to avoid GHA echo.
           printf '%s' "${SESSION_JWT}" > /tmp/canary-session-jwt.txt
-          echo "CHECK 4 (4b): session JWT obtained."
+          echo "CHECK 4 (4b): session JWT obtained via Backend API."
 
           # ---- 4c: Authenticated GET /api/v1/system/account ------------------
           # Use the JWKS-signed session JWT as Bearer. A 200 response confirms:
@@ -654,7 +680,7 @@ jobs:
             printf '  1. GET api.vaultmtg.app/healthz\n'
             printf '  2. POST api.clerk.com/v1/sign_in_tokens (Clerk Backend API sign-in token)\n'
             printf '  3. OPTIONS /api/v1/health w/ Origin: https://app.vaultmtg.app (CORS exact-origin)\n'
-            printf '  4. FAPI ticket exchange + GET /api/v1/system/account w/ Bearer JWT (ClerkAuthMiddleware + JWKS)\n'
+            printf '  4. FAPI ticket (4a) + Backend API token (4b) + GET /api/v1/system/account w/ Bearer JWT (ClerkAuthMiddleware + JWKS)\n'
             printf '  5. POST /api/v1/daemon/register unauthenticated (expect 401 not 404)\n\n'
             printf 'Investigate the run URL above. This canary was introduced in ticket #268\n'
             printf 'after the 2026-05-29 prod config-drift incident.\n'
