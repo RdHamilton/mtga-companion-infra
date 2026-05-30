@@ -96,13 +96,16 @@ name: Scheduled Prod Canary
 #   a private repo. Each run executes ~7 HTTP calls + 2 SSM reads.
 #
 # IAM
-#   Uses gha-infra-cfn-deploy OIDC role. Trust policy already covers
-#   environment:production and environment:staging-alerts for mtga-companion-infra.
-#   One new Sid added (SNSPublishProdAlerts): sns:Publish scoped to
+#   Uses gha-infra-cfn-deploy OIDC role. Trust policy covers
+#   environment:production-canary (prod-canary job) and environment:staging-alerts
+#   (notify-on-failure job) for mtga-companion-infra. environment:production-canary
+#   was added to the trust sub allow-list in cloudformation/iam-gha-roles.yml in
+#   the same PR that changed the prod-canary job's environment: field. The
+#   production approval gate on deploy.yml (real CFN deploys) is NOT relaxed.
+#   One Sid added (SNSPublishProdAlerts): sns:Publish scoped to
 #   vaultmtg-production-alerts. The existing SSM Sid already grants
-#   ssm:GetParameter on "*" — no new SSM Sid required for the new user-id param.
-#   The boundary SNS Sid grants sns:* on "*", so the intersection with
-#   SNSPublishProdAlerts is correct; no boundary edit is needed.
+#   ssm:GetParameter on "*" -- no new SSM Sid required. The boundary SNS Sid
+#   grants sns:* on "*", so the intersection with SNSPublishProdAlerts is correct.
 #
 # PRIOR ART
 #   Mirrors scheduled-synthetic-staging-deploy.yml (P-12 / vault-mtg#2370).
@@ -156,8 +159,15 @@ jobs:
   prod-canary:
     name: Prod canary (healthz / Clerk auth / CORS / account / daemon-register)
     runs-on: ubuntu-latest
-    # environment:production — gha-infra-cfn-deploy trust policy accepts this sub.
-    environment: production
+    # environment:production-canary — a non-gated environment with no required_reviewers.
+    # The `production` environment has required_reviewers: [RdHamilton], which means every
+    # scheduled run pended for human approval and was cancelled by the next cron tick before
+    # anyone clicked approve. A 5-minute canary cannot require a manual gate on every run.
+    # `production-canary` has no protection rules; gha-infra-cfn-deploy trust policy accepts
+    # environment:production-canary via the sub added in cloudformation/iam-gha-roles.yml.
+    # The role PERMISSIONS are unchanged (same SSM reads + SNS publish). The production
+    # approval gate on deploy.yml (real CFN deploys) is NOT relaxed. See #268 env fix PR.
+    environment: production-canary
     timeout-minutes: 5
 
     outputs:
