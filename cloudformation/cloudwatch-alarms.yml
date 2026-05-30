@@ -380,7 +380,7 @@ Resources:
   DiskFillAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmName: !Sub "vault-mtg-${Environment}-disk-fill"
+      AlarmName: !Sub "vaultmtg-${Environment}-disk-fill"
       AlarmDescription: !Sub |
         Staging EC2 root disk utilisation has exceeded ${DiskAlarmThreshold}%.
         Log in via SSM Session Manager and clean up: journalctl --vacuum-size=500M
@@ -434,7 +434,7 @@ Resources:
   BffStagingRestartAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmName: !Sub "vault-mtg-${Environment}-bff-staging-restart-loop"
+      AlarmName: !Sub "vaultmtg-${Environment}-bff-staging-restart-loop"
       AlarmDescription: !Sub |
         bff-staging.service has restarted more than ${RestartCountThreshold} times
         in a 5-minute window. Check systemd journal:
@@ -493,7 +493,7 @@ Resources:
     Type: AWS::Logs::MetricFilter
     Properties:
       LogGroupName: !Sub "/vaultmtg/${Environment}/nginx"
-      FilterName: !Sub "vault-mtg-${Environment}-bff-5xx"
+      FilterName: !Sub "vaultmtg-${Environment}-bff-5xx"
       FilterPattern: '[ip, ident, user, ts, request, status_code=5*, size, ...]'
       # NOTE: AWS::Logs::MetricFilter Dimensions.Value must be a parsed-field
       # selector ($-prefixed) from the log line, NOT a literal template value.
@@ -533,7 +533,7 @@ Resources:
   Bff5xxAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmName: !Sub "vault-mtg-${Environment}-bff-5xx-rate"
+      AlarmName: !Sub "vaultmtg-${Environment}-bff-5xx-rate"
       AlarmDescription: !Sub |
         BFF is returning elevated HTTP 5xx responses (>${Bff5xxThreshold} per 5 min
         for ${Bff5xxEvaluationPeriods} consecutive windows).
@@ -588,7 +588,7 @@ Resources:
     Type: AWS::Logs::MetricFilter
     Properties:
       LogGroupName: !Sub "/vaultmtg/${Environment}/bff"
-      FilterName: !Sub "vault-mtg-${Environment}-projection-dlq"
+      FilterName: !Sub "vaultmtg-${Environment}-projection-dlq"
       FilterPattern: '"[projection] dead-lettered"'
       MetricTransformations:
         - MetricNamespace: VaultMTG/Projection
@@ -616,7 +616,7 @@ Resources:
   ProjectionDLQAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmName: !Sub "vault-mtg-${Environment}-projection-dlq"
+      AlarmName: !Sub "vaultmtg-${Environment}-projection-dlq"
       AlarmDescription: |
         The projection worker has written one or more events to the
         projection_errors dead-letter table (DLQ) in the last 5 minutes.
@@ -663,7 +663,7 @@ Resources:
   EC2CpuAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmName: !Sub "vault-mtg-${Environment}-ec2-cpu-high"
+      AlarmName: !Sub "vaultmtg-${Environment}-ec2-cpu-high"
       AlarmDescription: !Sub |
         EC2 instance CPU utilisation has been above ${EC2CpuThreshold}% for
         ${EC2CpuEvaluationPeriods} consecutive 5-minute periods.
@@ -707,7 +707,7 @@ Resources:
   EC2MemAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmName: !Sub "vault-mtg-${Environment}-ec2-memory-high"
+      AlarmName: !Sub "vaultmtg-${Environment}-ec2-memory-high"
       AlarmDescription: !Sub |
         EC2 instance memory utilisation has been above ${EC2MemThreshold}% for
         ${EC2MemEvaluationPeriods} consecutive minutes.
@@ -755,7 +755,7 @@ Resources:
   RdsReadLatencyAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmName: !Sub "vault-mtg-${Environment}-rds-read-latency-high"
+      AlarmName: !Sub "vaultmtg-${Environment}-rds-read-latency-high"
       AlarmDescription: !Sub |
         RDS PostgreSQL read latency (average) has exceeded ${RdsReadLatencyThreshold}s
         for ${RdsLatencyEvaluationPeriods} consecutive 5-minute periods.
@@ -795,7 +795,7 @@ Resources:
   RdsWriteLatencyAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmName: !Sub "vault-mtg-${Environment}-rds-write-latency-high"
+      AlarmName: !Sub "vaultmtg-${Environment}-rds-write-latency-high"
       AlarmDescription: !Sub |
         RDS PostgreSQL write latency (average) has exceeded ${RdsWriteLatencyThreshold}s
         for ${RdsLatencyEvaluationPeriods} consecutive 5-minute periods.
@@ -833,7 +833,7 @@ Resources:
   RdsCpuAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmName: !Sub "vault-mtg-${Environment}-rds-cpu-high"
+      AlarmName: !Sub "vaultmtg-${Environment}-rds-cpu-high"
       AlarmDescription: !Sub |
         RDS PostgreSQL CPU utilisation has been above ${RdsCpuThreshold}% for
         ${RdsCpuEvaluationPeriods} consecutive 5-minute periods.
@@ -882,7 +882,7 @@ Resources:
   RdsFreeStorageAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmName: !Sub "vault-mtg-${Environment}-rds-free-storage-low"
+      AlarmName: !Sub "vaultmtg-${Environment}-rds-free-storage-low"
       AlarmDescription: !Sub |
         RDS PostgreSQL free storage has dropped below ${RdsFreeStorageThresholdBytes} bytes.
         If storage reaches zero the database is forced read-only and all writes fail.
@@ -944,7 +944,7 @@ Resources:
   BffLatencyAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmName: !Sub "vault-mtg-${Environment}-bff-latency-high"
+      AlarmName: !Sub "vaultmtg-${Environment}-bff-latency-high"
       AlarmDescription: !Sub |
         BFF p99 request latency has exceeded ${BffLatencyThresholdMs} ms for
         ${BffLatencyEvaluationPeriods} consecutive 5-minute periods.
@@ -1010,7 +1010,7 @@ Resources:
   BffRestartAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmName: !Sub "vault-mtg-${Environment}-bff-restart-loop"
+      AlarmName: !Sub "vaultmtg-${Environment}-bff-restart-loop"
       AlarmDescription: !Sub |
         The production BFF (vaultmtg-bff.service) has restarted more than
         ${BffRestartCountThreshold} times in a 5-minute window -- it is crash-looping.
@@ -1074,7 +1074,7 @@ Resources:
         EnableSNI: true
       HealthCheckTags:
         - Key: Name
-          Value: !Sub "vault-mtg-${Environment}-bff-healthz"
+          Value: !Sub "vaultmtg-${Environment}-bff-healthz"
         - Key: Project
           Value: vault-mtg
         - Key: Environment
@@ -1083,7 +1083,7 @@ Resources:
   BffDownAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmName: !Sub "vault-mtg-${Environment}-bff-down"
+      AlarmName: !Sub "vaultmtg-${Environment}-bff-down"
       AlarmDescription: !Sub |
         BFF health check is failing: api.vaultmtg.app/healthz did not return 200
         for ${BffHealthCheckFailureThreshold} consecutive Route 53 checks (~90 s).
@@ -1140,7 +1140,7 @@ Resources:
   TlsCertExpiryAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmName: !Sub "vault-mtg-${Environment}-tls-cert-expiry"
+      AlarmName: !Sub "vaultmtg-${Environment}-tls-cert-expiry"
       AlarmDescription: !Sub |
         TLS certificate expiry warning: fewer than ${TlsExpiryThresholdDays} days remain
         before the certificate expires.
@@ -1187,88 +1187,88 @@ Outputs:
     Description: ARN of the staging disk-fill CloudWatch alarm.
     Value: !GetAtt DiskFillAlarm.Arn
     Export:
-      Name: !Sub "vault-mtg-${Environment}-DiskFillAlarmArn"
+      Name: !Sub "vaultmtg-${Environment}-DiskFillAlarmArn"
 
   BffStagingRestartAlarmArn:
     Description: ARN of the bff-staging restart-loop CloudWatch alarm.
     Value: !GetAtt BffStagingRestartAlarm.Arn
     Export:
-      Name: !Sub "vault-mtg-${Environment}-BffStagingRestartAlarmArn"
+      Name: !Sub "vaultmtg-${Environment}-BffStagingRestartAlarmArn"
 
   Bff5xxAlarmArn:
     Description: ARN of the BFF HTTP 5xx rate CloudWatch alarm.
     Value: !GetAtt Bff5xxAlarm.Arn
     Export:
-      Name: !Sub "vault-mtg-${Environment}-Bff5xxAlarmArn"
+      Name: !Sub "vaultmtg-${Environment}-Bff5xxAlarmArn"
 
   EC2CpuAlarmArn:
     Description: ARN of the EC2 CPU utilisation CloudWatch alarm.
     Value: !GetAtt EC2CpuAlarm.Arn
     Export:
-      Name: !Sub "vault-mtg-${Environment}-EC2CpuAlarmArn"
+      Name: !Sub "vaultmtg-${Environment}-EC2CpuAlarmArn"
 
   EC2MemAlarmArn:
     Description: ARN of the EC2 memory utilisation CloudWatch alarm.
     Value: !GetAtt EC2MemAlarm.Arn
     Export:
-      Name: !Sub "vault-mtg-${Environment}-EC2MemAlarmArn"
+      Name: !Sub "vaultmtg-${Environment}-EC2MemAlarmArn"
 
   RdsReadLatencyAlarmArn:
     Description: ARN of the RDS read latency CloudWatch alarm.
     Value: !GetAtt RdsReadLatencyAlarm.Arn
     Export:
-      Name: !Sub "vault-mtg-${Environment}-RdsReadLatencyAlarmArn"
+      Name: !Sub "vaultmtg-${Environment}-RdsReadLatencyAlarmArn"
 
   RdsWriteLatencyAlarmArn:
     Description: ARN of the RDS write latency CloudWatch alarm.
     Value: !GetAtt RdsWriteLatencyAlarm.Arn
     Export:
-      Name: !Sub "vault-mtg-${Environment}-RdsWriteLatencyAlarmArn"
+      Name: !Sub "vaultmtg-${Environment}-RdsWriteLatencyAlarmArn"
 
   RdsCpuAlarmArn:
     Description: ARN of the RDS CPU utilisation CloudWatch alarm.
     Value: !GetAtt RdsCpuAlarm.Arn
     Export:
-      Name: !Sub "vault-mtg-${Environment}-RdsCpuAlarmArn"
+      Name: !Sub "vaultmtg-${Environment}-RdsCpuAlarmArn"
 
   RdsFreeStorageAlarmArn:
     Description: ARN of the RDS free-storage CloudWatch alarm.
     Value: !GetAtt RdsFreeStorageAlarm.Arn
     Export:
-      Name: !Sub "vault-mtg-${Environment}-RdsFreeStorageAlarmArn"
+      Name: !Sub "vaultmtg-${Environment}-RdsFreeStorageAlarmArn"
 
   BffLatencyAlarmArn:
     Description: ARN of the BFF p99 latency CloudWatch alarm.
     Value: !GetAtt BffLatencyAlarm.Arn
     Export:
-      Name: !Sub "vault-mtg-${Environment}-BffLatencyAlarmArn"
+      Name: !Sub "vaultmtg-${Environment}-BffLatencyAlarmArn"
 
   BffRestartAlarmArn:
     Description: ARN of the production BFF restart-loop CloudWatch alarm.
     Value: !GetAtt BffRestartAlarm.Arn
     Export:
-      Name: !Sub "vault-mtg-${Environment}-BffRestartAlarmArn"
+      Name: !Sub "vaultmtg-${Environment}-BffRestartAlarmArn"
 
   BffHealthCheckId:
     Description: Route 53 health check ID for the BFF /healthz synthetic check.
     Value: !Ref BffHealthCheck
     Export:
-      Name: !Sub "vault-mtg-${Environment}-BffHealthCheckId"
+      Name: !Sub "vaultmtg-${Environment}-BffHealthCheckId"
 
   BffDownAlarmArn:
     Description: ARN of the BFF-down CloudWatch alarm.
     Value: !GetAtt BffDownAlarm.Arn
     Export:
-      Name: !Sub "vault-mtg-${Environment}-BffDownAlarmArn"
+      Name: !Sub "vaultmtg-${Environment}-BffDownAlarmArn"
 
   TlsCertExpiryAlarmArn:
     Description: ARN of the TLS certificate expiry CloudWatch alarm.
     Value: !GetAtt TlsCertExpiryAlarm.Arn
     Export:
-      Name: !Sub "vault-mtg-${Environment}-TlsCertExpiryAlarmArn"
+      Name: !Sub "vaultmtg-${Environment}-TlsCertExpiryAlarmArn"
 
   ProjectionDLQAlarmArn:
     Description: ARN of the projection dead-letter (DLQ) CloudWatch alarm.
     Value: !GetAtt ProjectionDLQAlarm.Arn
     Export:
-      Name: !Sub "vault-mtg-${Environment}-ProjectionDLQAlarmArn"
+      Name: !Sub "vaultmtg-${Environment}-ProjectionDLQAlarmArn"
