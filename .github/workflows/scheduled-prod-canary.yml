@@ -1,0 +1,443 @@
+name: Scheduled Prod Canary
+
+# #268 — Synthetic production canary.
+#
+# WHY THIS EXISTS
+#   The 2026-05-29 prod config-drift incident (Clerk allowed-subdomains empty,
+#   BFF stale CLERK_FRONTEND_API, nginx rate-limit 503, /api/v1/account 404)
+#   was invisible to Sentry, CloudWatch, PostHog, and the Route 53 health check
+#   until a human manually tested. Every one of those faults would have tripped
+#   at least one check in this canary within 5 minutes of the breakage.
+#
+# WHAT IT CHECKS (5 probes, ordered by incident coverage)
+#   1. GET /healthz — BFF/nginx liveness.
+#   2. POST clerk.vaultmtg.app/v1/sign_in_tokens — Clerk subdomain reachability
+#      and allowed-subdomains configuration (the root cause of the May incident).
+#   3. OPTIONS /api/v1/health w/ Origin: https://app.vaultmtg.app — CORS
+#      preflight. Asserts the exact string "https://app.vaultmtg.app" in
+#      Access-Control-Allow-Origin (a wildcard * or wrong origin fails).
+#   4. GET /api/v1/account w/ Bearer token — authenticated data fetch.
+#      Validates ClerkAuthMiddleware, JWKS reachability, and the /account route.
+#   5. POST /api/v1/daemon/register (unauthenticated) — expects HTTP 401, not
+#      404. A 404 indicates the route is missing or CLERK_FRONTEND_API is stale.
+#
+# ANALYTICS SUPPRESSION — Option A (approved, no BFF code change)
+#   Every canary request carries the header "X-Synthetic: true". The BFF
+#   PostHog middleware gates on this header server-side. No BFF deploy required;
+#   this is the zero-dependency PostHog synthetic-traffic suppression pattern.
+#
+# ACTIVATION PREREQUISITE (Ramone-gated — does NOT block this PR)
+#   Before the canary can function, Ramone must:
+#     1. Create a Clerk machine account (canary@vaultmtg.app) with standard
+#        user role in the production Clerk dashboard.
+#     2. Generate a Clerk Backend API secret key for that account.
+#     3. Store the key in SSM:
+#          aws ssm put-parameter \
+#            --profile personal \
+#            --name /vaultmtg/app/production/canary-clerk-api-token \
+#            --type SecureString \
+#            --value "<clerk-backend-api-key>" \
+#            --description "Clerk backend API key for prod canary machine account (canary@vaultmtg.app)" \
+#            --region us-east-1
+#   Until the SSM parameter exists the canary will fail on step 2 and produce
+#   alerts — this is intentional (fail-open). Do NOT run workflow_dispatch until
+#   the parameter is provisioned. Use dry_run:true for pre-activation testing.
+#
+# CADENCE
+#   Every 5 minutes (approved by Ray, 2026-05-30 issue #268 comment). At
+#   ~8,640 runs/month this is well within GitHub Actions free-tier limits for
+#   a private repo. Each run executes 5 HTTP calls + 1 SSM read.
+#
+# IAM
+#   Uses gha-infra-cfn-deploy OIDC role. Trust policy already covers
+#   environment:production and environment:staging-alerts for mtga-companion-infra.
+#   One new Sid added (SNSPublishProdAlerts): sns:Publish scoped to
+#   vaultmtg-production-alerts. The existing SSM Sid already grants
+#   ssm:GetParameter on "*" — no new SSM Sid required.
+#   The boundary SNS Sid grants sns:* on "*", so the intersection with
+#   SNSPublishProdAlerts is correct; no boundary edit is needed.
+#
+# PRIOR ART
+#   Mirrors scheduled-synthetic-staging-deploy.yml (P-12 / vault-mtg#2370).
+
+on:
+  schedule:
+    # Every 5 minutes. Approved cadence: #268 Ray APPROVED-WITH-NOTES.
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: >
+          Run all probes but skip the SNS failure publication step at the end.
+          Use for pre-activation testing or manual re-runs when the SNS topic
+          does not need to fire. Default false (publish on failure).
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  # One canary run at a time. A second triggered while the first runs would
+  # race on the SNS publish and produce duplicate alerts.
+  group: scheduled-prod-canary
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write  # OIDC role assumption
+
+env:
+  AWS_REGION: us-east-1
+  # Production BFF base URL.
+  PROD_BFF_BASE: https://api.vaultmtg.app
+  # Clerk backend API base URL (subdomain-isolated per ADR).
+  CLERK_API_BASE: https://clerk.vaultmtg.app
+  # SSM path for the canary Clerk backend API key (SecureString).
+  # RAMONE-GATED: must be created before the canary functions. See header.
+  CANARY_TOKEN_SSM_PATH: /vaultmtg/app/production/canary-clerk-api-token
+  # SNS topic for failure notifications (→ ramone.d.hamilton@gmail.com).
+  # Topic created by cloudwatch-alarms.yml (Environment=production).
+  PROD_ALERTS_TOPIC_ARN: arn:aws:sns:us-east-1:901347789205:vaultmtg-production-alerts
+  # X-Synthetic header value for PostHog analytics suppression (Option A).
+  SYNTHETIC_HEADER: "X-Synthetic: true"
+  # Expected CORS origin — must be the EXACT string, not a wildcard.
+  EXPECTED_CORS_ORIGIN: https://app.vaultmtg.app
+
+jobs:
+  prod-canary:
+    name: Prod canary (healthz / Clerk auth / CORS / account / daemon-register)
+    runs-on: ubuntu-latest
+    # environment:production — gha-infra-cfn-deploy trust policy accepts this sub.
+    environment: production
+    timeout-minutes: 5
+
+    outputs:
+      step_failed: ${{ steps.summary.outputs.step_failed }}
+      failure_reason: ${{ steps.summary.outputs.failure_reason }}
+
+    steps:
+      # ------------------------------------------------------------------
+      # STEP 0: Assume OIDC role.
+      # ------------------------------------------------------------------
+      - name: STEP 0 -- Assume gha-infra-cfn-deploy via OIDC
+        id: oidc
+        uses: aws-actions/configure-aws-credentials@796449b3e38e3c256861227399e58b780e0e5538  # v6 SHA-pinned
+        with:
+          role-to-assume: ${{ secrets.AWS_CFN_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # ------------------------------------------------------------------
+      # STEP 0b: Fetch Clerk backend API token from SSM SecureString.
+      # Token is masked immediately and never logged.
+      # ------------------------------------------------------------------
+      - name: STEP 0b -- Read canary Clerk API token from SSM
+        id: fetch_token
+        run: |
+          set -euo pipefail
+          # --with-decryption required for SecureString parameters.
+          # The SSM Sid in gha-infra-cfn-deploy grants ssm:GetParameter on "*".
+          if ! CANARY_TOKEN=$(aws ssm get-parameter \
+              --name "${{ env.CANARY_TOKEN_SSM_PATH }}" \
+              --with-decryption \
+              --query 'Parameter.Value' \
+              --output text \
+              --region "$AWS_REGION" 2>/tmp/ssm-token.err); then
+            echo "::error::Failed to read canary Clerk API token from SSM path ${{ env.CANARY_TOKEN_SSM_PATH }}"
+            echo "::error::Is the parameter provisioned? See workflow header for Ramone activation steps."
+            cat /tmp/ssm-token.err >&2
+            echo "step_failed=ssm-token-read" >> "$GITHUB_OUTPUT"
+            echo "failure_reason=ssm:GetParameter failed on ${{ env.CANARY_TOKEN_SSM_PATH }} -- parameter not provisioned or permission denied. See workflow header for Ramone activation steps." >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          # Mask the token so it never appears in plain text in the log.
+          echo "::add-mask::${CANARY_TOKEN}"
+          # Write to a temp file so subsequent steps can read it without
+          # passing it through environment variables that GHA might echo.
+          printf '%s' "${CANARY_TOKEN}" > /tmp/canary-clerk-token.txt
+          echo "Canary Clerk API token read from SSM: [MASKED]"
+
+      # ------------------------------------------------------------------
+      # CHECK 1: GET /healthz — BFF/nginx liveness.
+      # ------------------------------------------------------------------
+      - name: CHECK 1 -- GET /healthz (BFF liveness)
+        id: check_healthz
+        run: |
+          set -euo pipefail
+          HTTP_CODE=$(curl -s -o /tmp/check1.body -w '%{http_code}' \
+            --max-time 10 \
+            --connect-timeout 5 \
+            -H "${{ env.SYNTHETIC_HEADER }}" \
+            "${{ env.PROD_BFF_BASE }}/healthz" || echo "000")
+          echo "GET /healthz -> HTTP $HTTP_CODE"
+          if [ "$HTTP_CODE" != "200" ]; then
+            BODY=$(head -c 500 /tmp/check1.body 2>/dev/null || true)
+            echo "::error::CHECK 1 FAILED: /healthz returned HTTP $HTTP_CODE (expected 200). Body: ${BODY:-<empty>}"
+            echo "step_failed=check1-healthz" >> "$GITHUB_OUTPUT"
+            echo "failure_reason=CHECK 1: GET ${{ env.PROD_BFF_BASE }}/healthz returned HTTP $HTTP_CODE (expected 200). Body: ${BODY:-<empty>}" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          echo "CHECK 1 PASSED: /healthz HTTP 200."
+
+      # ------------------------------------------------------------------
+      # CHECK 2: POST clerk.vaultmtg.app/v1/sign_in_tokens — Clerk subdomain
+      # reachability and allowed-subdomains configuration.
+      # Catches: Clerk allowed-subdomains empty/misconfigured.
+      # The canary token IS the Clerk backend API secret key; it is passed
+      # as the Authorization bearer to the Clerk backend API (not the BFF).
+      # ------------------------------------------------------------------
+      - name: CHECK 2 -- Clerk sign-in-token (subdomain auth reachability)
+        id: check_clerk
+        run: |
+          set -euo pipefail
+          CANARY_TOKEN=$(cat /tmp/canary-clerk-token.txt)
+          echo "::add-mask::${CANARY_TOKEN}"
+
+          HTTP_CODE=$(curl -s -o /tmp/check2.body -w '%{http_code}' \
+            --max-time 10 \
+            --connect-timeout 5 \
+            -X POST \
+            -H "Authorization: Bearer ${CANARY_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -H "${{ env.SYNTHETIC_HEADER }}" \
+            "${{ env.CLERK_API_BASE }}/v1/sign_in_tokens" || echo "000")
+
+          echo "POST ${{ env.CLERK_API_BASE }}/v1/sign_in_tokens -> HTTP $HTTP_CODE"
+
+          if [ "$HTTP_CODE" != "200" ]; then
+            # Redact the body in case Clerk echoes auth details.
+            echo "::error::CHECK 2 FAILED: Clerk sign-in-token returned HTTP $HTTP_CODE (expected 200). Clerk subdomain may be misconfigured or allowed-subdomains is empty."
+            echo "step_failed=check2-clerk-auth" >> "$GITHUB_OUTPUT"
+            echo "failure_reason=CHECK 2: POST ${{ env.CLERK_API_BASE }}/v1/sign_in_tokens returned HTTP $HTTP_CODE (expected 200). Clerk subdomain misconfigured or allowed-subdomains empty." >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          # Confirm the response body contains a token field (structure sanity).
+          if ! grep -q '"token"' /tmp/check2.body; then
+            echo "::error::CHECK 2 FAILED: Clerk response did not contain a token field."
+            echo "step_failed=check2-clerk-no-token" >> "$GITHUB_OUTPUT"
+            echo "failure_reason=CHECK 2: Clerk sign-in-token response was HTTP 200 but no token field found in body." >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          # Extract the session token and mask it. Used by CHECK 4.
+          SESSION_TOKEN=$(grep -o '"token":"[^"]*"' /tmp/check2.body | head -1 | cut -d'"' -f4 || echo "")
+          if [ -z "$SESSION_TOKEN" ]; then
+            echo "::error::CHECK 2 FAILED: Could not parse token from Clerk response."
+            echo "step_failed=check2-clerk-parse" >> "$GITHUB_OUTPUT"
+            echo "failure_reason=CHECK 2: Clerk response was HTTP 200 with token field but token value could not be parsed." >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          echo "::add-mask::${SESSION_TOKEN}"
+          printf '%s' "${SESSION_TOKEN}" > /tmp/canary-session-token.txt
+          echo "CHECK 2 PASSED: Clerk sign-in-token issued."
+
+      # ------------------------------------------------------------------
+      # CHECK 3: OPTIONS CORS preflight with Origin: https://app.vaultmtg.app
+      # Asserts the EXACT Access-Control-Allow-Origin string — not just header
+      # presence. A wildcard (*) or wrong origin FAILS this check.
+      # Catches: ALLOWED_ORIGINS SSM drift, BFF stale CORS config.
+      # ------------------------------------------------------------------
+      - name: CHECK 3 -- CORS OPTIONS preflight (exact origin assertion)
+        id: check_cors
+        run: |
+          set -euo pipefail
+          # Capture full response headers.
+          HTTP_CODE=$(curl -s -o /tmp/check3.body -D /tmp/check3.headers -w '%{http_code}' \
+            --max-time 10 \
+            --connect-timeout 5 \
+            -X OPTIONS \
+            -H "Origin: ${{ env.EXPECTED_CORS_ORIGIN }}" \
+            -H "Access-Control-Request-Method: GET" \
+            -H "Access-Control-Request-Headers: Authorization" \
+            -H "${{ env.SYNTHETIC_HEADER }}" \
+            "${{ env.PROD_BFF_BASE }}/api/v1/health" || echo "000")
+
+          echo "OPTIONS /api/v1/health -> HTTP $HTTP_CODE"
+          echo "Response headers:"
+          cat /tmp/check3.headers || true
+
+          # Accept 200 or 204 -- both are valid CORS preflight responses.
+          if [ "$HTTP_CODE" != "200" ] && [ "$HTTP_CODE" != "204" ]; then
+            echo "::error::CHECK 3 FAILED: CORS preflight returned HTTP $HTTP_CODE (expected 200 or 204)."
+            echo "step_failed=check3-cors-status" >> "$GITHUB_OUTPUT"
+            echo "failure_reason=CHECK 3: OPTIONS ${{ env.PROD_BFF_BASE }}/api/v1/health returned HTTP $HTTP_CODE (expected 200 or 204)." >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          # Extract the Access-Control-Allow-Origin header value (case-insensitive).
+          ACAO=$(grep -i '^access-control-allow-origin:' /tmp/check3.headers \
+            | head -1 \
+            | sed 's/^[^:]*: //;s/\r//' \
+            | tr -d '[:space:]' || echo "")
+
+          echo "Access-Control-Allow-Origin: ${ACAO}"
+
+          # Ray's binding note: assert the EXACT string, not just header presence.
+          # A wildcard (*) or wrong origin is a CORS regression.
+          if [ "$ACAO" != "${{ env.EXPECTED_CORS_ORIGIN }}" ]; then
+            echo "::error::CHECK 3 FAILED: Access-Control-Allow-Origin is '${ACAO}' (expected exactly '${{ env.EXPECTED_CORS_ORIGIN }}'). A wildcard or wrong origin indicates ALLOWED_ORIGINS SSM drift."
+            echo "step_failed=check3-cors-origin" >> "$GITHUB_OUTPUT"
+            echo "failure_reason=CHECK 3: Access-Control-Allow-Origin is '${ACAO}' (expected exactly '${{ env.EXPECTED_CORS_ORIGIN }}'). Possible ALLOWED_ORIGINS SSM drift or BFF stale CORS config." >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          echo "CHECK 3 PASSED: CORS preflight returned correct Access-Control-Allow-Origin."
+
+      # ------------------------------------------------------------------
+      # CHECK 4: GET /api/v1/account w/ Bearer session token.
+      # Validates ClerkAuthMiddleware, JWKS reachability, account route.
+      # ------------------------------------------------------------------
+      - name: CHECK 4 -- Authenticated GET /api/v1/account
+        id: check_account
+        run: |
+          set -euo pipefail
+          SESSION_TOKEN=$(cat /tmp/canary-session-token.txt)
+          echo "::add-mask::${SESSION_TOKEN}"
+
+          HTTP_CODE=$(curl -s -o /tmp/check4.body -w '%{http_code}' \
+            --max-time 10 \
+            --connect-timeout 5 \
+            -H "Authorization: Bearer ${SESSION_TOKEN}" \
+            -H "${{ env.SYNTHETIC_HEADER }}" \
+            "${{ env.PROD_BFF_BASE }}/api/v1/account" || echo "000")
+
+          echo "GET /api/v1/account -> HTTP $HTTP_CODE"
+
+          if [ "$HTTP_CODE" != "200" ]; then
+            # Truncate body to avoid leaking account data.
+            BODY=$(head -c 200 /tmp/check4.body 2>/dev/null | sed 's/[a-zA-Z0-9+/=]\{20,\}/[REDACTED]/g' || true)
+            echo "::error::CHECK 4 FAILED: GET /api/v1/account returned HTTP $HTTP_CODE (expected 200). ClerkAuthMiddleware or JWKS reachability issue. Body (truncated+redacted): ${BODY:-<empty>}"
+            echo "step_failed=check4-account" >> "$GITHUB_OUTPUT"
+            echo "failure_reason=CHECK 4: GET ${{ env.PROD_BFF_BASE }}/api/v1/account returned HTTP $HTTP_CODE (expected 200). ClerkAuthMiddleware or JWKS issue." >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          echo "CHECK 4 PASSED: authenticated /api/v1/account returned HTTP 200."
+
+      # ------------------------------------------------------------------
+      # CHECK 5: POST /api/v1/daemon/register (unauthenticated) → expect 401.
+      # A 404 means the route is missing or CLERK_FRONTEND_API is stale.
+      # A 503 means nginx is rate-limiting (durable rate-limit fix from PR #271
+      # should prevent this, but the canary catches regressions).
+      # ------------------------------------------------------------------
+      - name: CHECK 5 -- Unauthenticated daemon/register expects 401
+        id: check_daemon_register
+        run: |
+          set -euo pipefail
+          HTTP_CODE=$(curl -s -o /tmp/check5.body -w '%{http_code}' \
+            --max-time 10 \
+            --connect-timeout 5 \
+            -X POST \
+            -H "Content-Type: application/json" \
+            -H "${{ env.SYNTHETIC_HEADER }}" \
+            --data '{}' \
+            "${{ env.PROD_BFF_BASE }}/api/v1/daemon/register" || echo "000")
+
+          echo "POST /api/v1/daemon/register (unauthenticated) -> HTTP $HTTP_CODE"
+
+          if [ "$HTTP_CODE" != "401" ]; then
+            echo "::error::CHECK 5 FAILED: daemon/register returned HTTP $HTTP_CODE (expected 401). If 404: route missing or CLERK_FRONTEND_API stale. If 503: nginx rate-limit regression."
+            echo "step_failed=check5-daemon-register" >> "$GITHUB_OUTPUT"
+            echo "failure_reason=CHECK 5: POST ${{ env.PROD_BFF_BASE }}/api/v1/daemon/register returned HTTP $HTTP_CODE (expected 401). If 404=route missing/CLERK_FRONTEND_API stale. If 503=nginx rate-limit regression." >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          echo "CHECK 5 PASSED: daemon/register returned 401 (expected rejection, route present)."
+
+      # ------------------------------------------------------------------
+      # Summary step — always runs, aggregates pass/fail for notify job.
+      # ------------------------------------------------------------------
+      - name: Summarise canary outcome
+        id: summary
+        if: ${{ always() }}
+        run: |
+          if [ "${{ job.status }}" = "success" ]; then
+            echo "step_failed=" >> "$GITHUB_OUTPUT"
+            echo "failure_reason=" >> "$GITHUB_OUTPUT"
+            echo "Prod canary: ALL 5 CHECKS PASSED."
+          else
+            # Aggregate: whichever failing step wrote to GITHUB_OUTPUT first
+            # is the one we surface. Concatenate all outputs and take the first
+            # non-empty segment.
+            STEP_FAILED="${{ steps.fetch_token.outputs.step_failed }}${{ steps.check_healthz.outputs.step_failed }}${{ steps.check_clerk.outputs.step_failed }}${{ steps.check_cors.outputs.step_failed }}${{ steps.check_account.outputs.step_failed }}${{ steps.check_daemon_register.outputs.step_failed }}"
+            REASON="${{ steps.fetch_token.outputs.failure_reason }}${{ steps.check_healthz.outputs.failure_reason }}${{ steps.check_clerk.outputs.failure_reason }}${{ steps.check_cors.outputs.failure_reason }}${{ steps.check_account.outputs.failure_reason }}${{ steps.check_daemon_register.outputs.failure_reason }}"
+            if [ -z "$STEP_FAILED" ]; then
+              STEP_FAILED="unknown"
+              REASON="Canary failed but no step captured a failure reason. Inspect the job log."
+            fi
+            echo "step_failed=${STEP_FAILED}" >> "$GITHUB_OUTPUT"
+            echo "failure_reason=${REASON}" >> "$GITHUB_OUTPUT"
+            echo "Prod canary: FAILED at step=${STEP_FAILED}"
+          fi
+
+  # Separate job so SNS notify runs even when prod-canary fails.
+  notify-on-failure:
+    name: Publish failure notification to production SNS
+    needs: [prod-canary]
+    # `always()` required so this job evaluates even when prod-canary failed.
+    # Compare to literal false so the cron path (where inputs.dry_run is absent)
+    # always reaches notify-on-failure.
+    if: ${{ always() && needs.prod-canary.result == 'failure' && inputs.dry_run != true }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      id-token: write
+      contents: read
+    # staging-alerts environment (no required reviewers) — same pattern as
+    # scheduled-synthetic-staging-deploy.yml. Publishing a failure notification
+    # must not require a human approval. gha-infra-cfn-deploy trust policy
+    # already allows environment:staging-alerts for mtga-companion-infra.
+    # The SNSPublishProdAlerts Sid (added in iam-gha-roles.yml in this PR)
+    # scopes sns:Publish to vaultmtg-production-alerts only.
+    environment: staging-alerts
+    env:
+      AWS_REGION: us-east-1
+      PROD_ALERTS_TOPIC_ARN: arn:aws:sns:us-east-1:901347789205:vaultmtg-production-alerts
+
+    steps:
+      - name: Assume gha-infra-cfn-deploy via OIDC
+        uses: aws-actions/configure-aws-credentials@796449b3e38e3c256861227399e58b780e0e5538  # v6 SHA-pinned
+        with:
+          role-to-assume: ${{ secrets.AWS_CFN_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Publish failure notification to vaultmtg-production-alerts
+        env:
+          STEP_FAILED: ${{ needs.prod-canary.outputs.step_failed }}
+          FAILURE_REASON: ${{ needs.prod-canary.outputs.failure_reason }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          GH_REPO: ${{ github.repository }}
+          GH_WORKFLOW: ${{ github.workflow }}
+          GH_RUN_ID: ${{ github.run_id }}
+          GH_EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          SUBJECT="[PROD CANARY] VaultMTG prod check FAILED at step=${STEP_FAILED:-unknown}"
+          # SNS Subject is capped at 100 chars (ASCII). Truncate defensively.
+          SUBJECT=$(printf '%s' "$SUBJECT" | cut -c1-100)
+
+          {
+            printf 'VaultMTG production canary failed.\n\n'
+            printf 'Repository: %s\n' "$GH_REPO"
+            printf 'Workflow:   %s\n' "$GH_WORKFLOW"
+            printf 'Run ID:     %s\n' "$GH_RUN_ID"
+            printf 'Run URL:    %s\n' "$RUN_URL"
+            printf 'Triggered:  %s\n' "$GH_EVENT_NAME"
+            printf 'Failed at:  %s\n\n' "${STEP_FAILED:-unknown}"
+            printf 'Failure reason:\n%s\n\n' "${FAILURE_REASON:-<no reason captured>}"
+            printf 'Checks run every 5 minutes against:\n'
+            printf '  1. GET api.vaultmtg.app/healthz\n'
+            printf '  2. POST clerk.vaultmtg.app/v1/sign_in_tokens (Clerk subdomain auth)\n'
+            printf '  3. OPTIONS /api/v1/health w/ Origin: https://app.vaultmtg.app (CORS exact-origin)\n'
+            printf '  4. GET /api/v1/account w/ Bearer token (ClerkAuthMiddleware + JWKS)\n'
+            printf '  5. POST /api/v1/daemon/register unauthenticated (expect 401 not 404)\n\n'
+            printf 'Investigate the run URL above. This canary was introduced in ticket #268\n'
+            printf 'after the 2026-05-29 prod config-drift incident.\n'
+          } > /tmp/sns-message.txt
+
+          aws sns publish \
+            --topic-arn "$PROD_ALERTS_TOPIC_ARN" \
+            --subject "$SUBJECT" \
+            --message "file:///tmp/sns-message.txt" \
+            --region "$AWS_REGION"
+
+          echo "Failure notification published to $PROD_ALERTS_TOPIC_ARN"
