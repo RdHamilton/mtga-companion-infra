@@ -313,6 +313,51 @@ jobs:
                 echo "  No changes detected (changeset intentionally empty) — gate passes (no-op update)."
                 return 0
               fi
+              # AWS::EarlyValidation::ResourceExistenceCheck fires when a template
+              # declares resources that already exist in the account but are NOT yet
+              # managed by this CFN stack.  The correct operation is an IMPORT
+              # changeset (--change-set-type IMPORT), not a normal UPDATE.
+              #
+              # This is NOT a replacement violation — the gate's stateful-resource
+              # replacement check cannot apply when the changeset never computed
+              # any resource actions (the validation failed before that point).
+              #
+              # Safety constraint: we only treat ResourceExistenceCheck as an
+              # IMPORT scenario when the template contains NO stateful resource
+              # types (EC2::Instance, RDS::DBInstance, EC2::EIP).  If a stateful
+              # type is somehow involved, we fall through to the gate error so a
+              # human reviews it.  AWS::SSM::Parameter is not in STATEFUL_TYPES,
+              # so the common SSM-adopt case passes cleanly.
+              if echo "$CS_REASON" | grep -q "ResourceExistenceCheck"; then
+                # Determine whether the PR's added lines introduce any stateful
+                # resource type declarations.  We inspect only the diff-added
+                # lines (^+ lines, excluding +++ header) rather than the full
+                # template, because the template already contains existing
+                # stateful resources (EC2Instance, ElasticIP) that are already
+                # managed by the stack and cannot trigger ResourceExistenceCheck.
+                # Only newly-added resource blocks can cause this validation failure.
+                ADDED_STATEFUL=$(git diff --unified=0 \
+                  "origin/${{ github.base_ref }}...HEAD" -- "$TEMPLATE_FILE" \
+                  | grep "^+" | grep -v "^+++" \
+                  | grep -E "^\+\s+Type:\s+(${STATEFUL_TYPES})" || true)
+                if [ -n "$ADDED_STATEFUL" ]; then
+                  # A newly-added stateful type is involved — do not auto-pass.
+                  # Fall through to the gate error so a human reviews it.
+                  echo "  Newly-added stateful resource type(s) found alongside ResourceExistenceCheck:"
+                  echo "$ADDED_STATEFUL"
+                  echo "  Cannot auto-classify as safe IMPORT scenario — treating as gate error."
+                else
+                  echo ""
+                  echo "  IMPORT REQUIRED: AWS::EarlyValidation::ResourceExistenceCheck"
+                  echo "  The template adds resource(s) that already exist in the account"
+                  echo "  but are not yet managed by this CFN stack. These resources must"
+                  echo "  be adopted via an IMPORT changeset (--change-set-type IMPORT),"
+                  echo "  not a normal UPDATE. All newly-added resources are non-stateful"
+                  echo "  types (not EC2::Instance / RDS::DBInstance / EC2::EIP) — no"
+                  echo "  replacement risk. Gate passes; IMPORT step required post-merge."
+                  return 0
+                fi
+              fi
               echo "  Changeset failed for an unexpected reason — treating as gate error."
               return 1
             fi

@@ -561,7 +561,7 @@ Resources:
   #
   # These two parameters are declared here so that every change to their
   # values must go through a CFN changeset, which requires a PR in
-  # mtga-companion-infra and passes through the S-07 security gate.
+  # this repo and passes through the S-07 security gate.
   # Manual `ssm put-parameter --overwrite` is still technically possible
   # but will appear as CFN stack drift on the next `detect-stack-drift`
   # run (see vault-mtg-tickets#269 for the drift-detection design).

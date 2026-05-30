@@ -80,6 +80,6 @@ else
     echo "[origins-check]   MISSING: ${m}"
   done
   echo "[origins-check] ACTION REQUIRED: update /vaultmtg/app/${ENVIRONMENT}/ALLOWED_ORIGINS via a"
-  echo "[origins-check]   CFN changeset in mtga-companion-infra (vault-mtg-tickets#269)."
+  echo "[origins-check]   CFN changeset in this repo (vault-mtg-tickets#269)."
   exit 1
 fi
