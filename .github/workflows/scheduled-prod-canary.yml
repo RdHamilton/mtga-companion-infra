@@ -11,10 +11,15 @@ name: Scheduled Prod Canary
 #
 # WHAT IT CHECKS (5 probes, ordered by incident coverage)
 #   1. GET /healthz — BFF/nginx liveness.
-#   2. POST clerk.vaultmtg.app/v1/sign_in_tokens — Clerk subdomain reachability
-#      and allowed-subdomains configuration (root cause of the May incident).
+#   2. POST api.clerk.com/v1/sign_in_tokens — Clerk Backend API reachability
+#      and sign-in token minting (validates sk_live key + canary user ID).
+#      /v1/sign_in_tokens is a Backend API endpoint that lives at api.clerk.com,
+#      NOT on the FAPI subdomain (clerk.vaultmtg.app). Hitting it on the FAPI
+#      returns HTTP 404. The sk_live key is passed as Authorization: Bearer.
 #      Requires the canary user_id in the POST body (Clerk mandates it — 422
 #      without it). user_id is a non-secret SSM String param; see below.
+#      FAPI subdomain reachability (the root cause of the May incident) is
+#      covered by CHECK 4a and CHECK 4b, which hit clerk.vaultmtg.app directly.
 #   3. OPTIONS /api/v1/health w/ Origin: https://app.vaultmtg.app — CORS
 #      preflight. Asserts the exact string "https://app.vaultmtg.app" in
 #      Access-Control-Allow-Origin (wildcard * or wrong origin fails).
@@ -35,11 +40,13 @@ name: Scheduled Prod Canary
 #
 # AUTH CHAIN — CHECK 2 + CHECK 4 (end-to-end token flow)
 #
-#   Boundary 1: canary → Clerk Backend API
-#     POST clerk.vaultmtg.app/v1/sign_in_tokens
+#   Boundary 1: canary → Clerk Backend API (api.clerk.com — NOT the FAPI subdomain)
+#     POST https://api.clerk.com/v1/sign_in_tokens
 #     Authorization: Bearer sk_live_... (CANARY_TOKEN, from SSM SecureString)
 #     Body: { "user_id": "user_xxx" }  ← required; from SSM String param
 #     Produces: { "token": "sit_xxx" } — a one-time sign-in TICKET, NOT a JWT
+#     NOTE: /v1/sign_in_tokens is a Backend API endpoint. Calling it on the
+#     FAPI subdomain (clerk.vaultmtg.app) returns HTTP 404 — route not found.
 #
 #   Boundary 2: canary → Clerk Frontend API (FAPI ticket exchange)
 #     POST clerk.vaultmtg.app/v1/client/sign_ins
@@ -139,8 +146,14 @@ env:
   AWS_REGION: us-east-1
   # Production BFF base URL.
   PROD_BFF_BASE: https://api.vaultmtg.app
-  # Clerk backend API base URL (subdomain-isolated per ADR).
+  # Clerk Frontend API (FAPI) base URL — the clerk.* subdomain for this instance.
+  # Used by CHECK 4a (POST /v1/client/sign_ins ticket exchange) and CHECK 4b
+  # (GET /v1/client/sessions/{id}/tokens). Do NOT use for /v1/sign_in_tokens.
   CLERK_API_BASE: https://clerk.vaultmtg.app
+  # Clerk Backend API base URL — always api.clerk.com, never the FAPI subdomain.
+  # Used by CHECK 2 (POST /v1/sign_in_tokens). The Backend API requires
+  # Authorization: Bearer <sk_live> and does not route through the FAPI subdomain.
+  CLERK_BACKEND_API_BASE: https://api.clerk.com
   # SSM path for the canary Clerk backend API key (SecureString).
   # RAMONE-GATED: must be created before the canary functions. See header.
   CANARY_TOKEN_SSM_PATH: /vaultmtg/app/production/canary-clerk-api-token
@@ -267,8 +280,13 @@ jobs:
           echo "CHECK 1 PASSED: /healthz HTTP 200."
 
       # ------------------------------------------------------------------
-      # CHECK 2: POST clerk.vaultmtg.app/v1/sign_in_tokens — Clerk subdomain
-      # reachability and allowed-subdomains configuration.
+      # CHECK 2: POST api.clerk.com/v1/sign_in_tokens — Clerk Backend API
+      # reachability and sign-in token minting.
+      #
+      # /v1/sign_in_tokens is a BACKEND API endpoint hosted at api.clerk.com.
+      # It is NOT available on the FAPI subdomain (clerk.vaultmtg.app) — hitting
+      # it there returns HTTP 404. We use CLERK_BACKEND_API_BASE (api.clerk.com)
+      # here and CLERK_API_BASE (clerk.vaultmtg.app) only for CHECK 4a/4b.
       #
       # The canary token IS the Clerk backend API secret key, passed as the
       # Authorization bearer to the Clerk backend API (not the BFF).
@@ -276,10 +294,15 @@ jobs:
       # returns HTTP 422. The value is read from the SSM String param above.
       #
       # The sign_in_token "ticket" produced here is NOT a session JWT.
-      # It is a one-time token that must be exchanged via the FAPI in
-      # CHECK 4 before it can be used as a Bearer credential to the BFF.
+      # It is a one-time token that must be exchanged via the FAPI (CHECK 4a)
+      # before it can be used as a Bearer credential to the BFF.
+      #
+      # FAPI SUBDOMAIN COVERAGE: CHECK 4a hits clerk.vaultmtg.app directly
+      # (POST /v1/client/sign_ins) and CHECK 4b also hits it (GET
+      # /v1/client/sessions/{id}/tokens). The May incident (empty allowed-
+      # subdomains blocking clerk.vaultmtg.app) would still trip CHECK 4a/4b.
       # ------------------------------------------------------------------
-      - name: CHECK 2 -- Clerk sign-in-token (subdomain auth reachability)
+      - name: CHECK 2 -- Clerk Backend API sign-in-token mint (api.clerk.com)
         id: check_clerk
         run: |
           set -euo pipefail
@@ -296,15 +319,15 @@ jobs:
             -H "Content-Type: application/json" \
             -H "${{ env.SYNTHETIC_HEADER }}" \
             --data "{\"user_id\":\"${CANARY_USER_ID}\"}" \
-            "${{ env.CLERK_API_BASE }}/v1/sign_in_tokens" || echo "000")
+            "${{ env.CLERK_BACKEND_API_BASE }}/v1/sign_in_tokens" || echo "000")
 
-          echo "POST ${{ env.CLERK_API_BASE }}/v1/sign_in_tokens -> HTTP $HTTP_CODE"
+          echo "POST ${{ env.CLERK_BACKEND_API_BASE }}/v1/sign_in_tokens -> HTTP $HTTP_CODE"
 
           if [ "$HTTP_CODE" != "200" ]; then
             # Redact the body in case Clerk echoes auth details.
-            echo "::error::CHECK 2 FAILED: Clerk sign-in-token returned HTTP $HTTP_CODE (expected 200). Possible causes: Clerk subdomain misconfigured, allowed-subdomains empty, or canary user_id does not exist in this Clerk instance."
+            echo "::error::CHECK 2 FAILED: Clerk Backend API sign-in-token returned HTTP $HTTP_CODE (expected 200). Possible causes: invalid sk_live key, canary user_id does not exist in this Clerk instance, or api.clerk.com unreachable."
             echo "step_failed=check2-clerk-auth" >> "$GITHUB_OUTPUT"
-            echo "failure_reason=CHECK 2: POST ${{ env.CLERK_API_BASE }}/v1/sign_in_tokens returned HTTP $HTTP_CODE (expected 200). Clerk subdomain misconfigured, allowed-subdomains empty, or invalid user_id." >> "$GITHUB_OUTPUT"
+            echo "failure_reason=CHECK 2: POST ${{ env.CLERK_BACKEND_API_BASE }}/v1/sign_in_tokens returned HTTP $HTTP_CODE (expected 200). Invalid sk_live key, unknown user_id, or api.clerk.com unreachable." >> "$GITHUB_OUTPUT"
             exit 1
           fi
 
@@ -629,7 +652,7 @@ jobs:
             printf 'Failure reason:\n%s\n\n' "${FAILURE_REASON:-<no reason captured>}"
             printf 'Checks run every 5 minutes against:\n'
             printf '  1. GET api.vaultmtg.app/healthz\n'
-            printf '  2. POST clerk.vaultmtg.app/v1/sign_in_tokens (Clerk subdomain auth)\n'
+            printf '  2. POST api.clerk.com/v1/sign_in_tokens (Clerk Backend API sign-in token)\n'
             printf '  3. OPTIONS /api/v1/health w/ Origin: https://app.vaultmtg.app (CORS exact-origin)\n'
             printf '  4. FAPI ticket exchange + GET /api/v1/system/account w/ Bearer JWT (ClerkAuthMiddleware + JWKS)\n'
             printf '  5. POST /api/v1/daemon/register unauthenticated (expect 401 not 404)\n\n'
