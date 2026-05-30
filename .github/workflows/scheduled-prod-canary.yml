@@ -71,7 +71,11 @@ name: Scheduled Prod Canary
 #     GET api.vaultmtg.app/api/v1/system/account
 #     Authorization: Bearer eyJ... (the session JWT from boundary 3)
 #     BFF validates via clerkhttp.RequireHeaderAuthorization → JWKS fetch →
-#     JWT signature + expiry check → 200 if valid.
+#     JWT signature + expiry check. PASS = HTTP 200 (account row exists) OR
+#     HTTP 404 with body "account not found" (healthy first-run state: auth
+#     passed, handler ran, but canary user has no daemon/account row yet).
+#     FAIL = HTTP 401 (ClerkAuthMiddleware rejected JWT, JWKS issue) or
+#     HTTP 404 without "account not found" body (route missing).
 #
 # ACTIVATION PREREQUISITES (Ramone-gated — do NOT run workflow_dispatch until
 # ALL four parameters are provisioned)
@@ -537,10 +541,41 @@ jobs:
           echo "CHECK 4 (4b): session JWT obtained via Backend API."
 
           # ---- 4c: Authenticated GET /api/v1/system/account ------------------
-          # Use the JWKS-signed session JWT as Bearer. A 200 response confirms:
-          # - ClerkAuthMiddleware is mounted and active on this route
-          # - The BFF can reach clerk.vaultmtg.app JWKS to verify the JWT
-          # - The /api/v1/system/account route is registered and serving
+          # Use the JWKS-signed session JWT as Bearer.
+          #
+          # HEALTHY RESPONSES (both are a PASS):
+          #   HTTP 200 — canary account row exists (daemon has paired + synced).
+          #   HTTP 404 with body containing "account not found" — healthy first-run
+          #     state. The handler (system_account.go) resolves the authenticated
+          #     user from context FIRST (returns 401 if it fails), THEN queries for
+          #     an account row. A 404 with this specific body proves:
+          #       - ClerkAuthMiddleware passed (auth chain is healthy)
+          #       - JWKS endpoint was reachable (JWT signature verified)
+          #       - The /api/v1/system/account route is registered and serving
+          #       - The handler ran to completion
+          #     The canary user has no daemon and therefore no account row — this
+          #     is the expected steady-state. If a canary account is ever provisioned
+          #     (daemon paired and MTGA data synced), the response would be HTTP 200.
+          #     Both HTTP 200 and the authenticated HTTP 404 are healthy.
+          #
+          # REAL FAILURES (FAIL):
+          #   HTTP 401 — ClerkAuthMiddleware rejected the JWT; JWKS unreachable or
+          #     CLERK_FRONTEND_API stale (the class of fault from the May incident).
+          #     The handler returns 401 before any DB query when it cannot resolve
+          #     the user ID from context — so 401 unambiguously means auth broken.
+          #   HTTP 404 WITHOUT "account not found" body — route missing or chi's
+          #     default 404 (plain text "404 page not found\n"). This indicates a
+          #     broken route registration or a stale CLERK_FRONTEND_API that
+          #     redirected the request to the wrong handler. The body assertion
+          #     distinguishes this from the healthy first-run 404.
+          #   Any other non-2xx / non-404 — unexpected error; treat as failure.
+          #
+          # DISCRIMINATOR PROOF: chi's default 404 body is "404 page not found\n"
+          # (plain text). An auth-broken 401 body is {"error":"unauthorized"}.
+          # Neither contains the substring "account not found", which is only
+          # emitted by the BFF's writeJSONError in system_account.go line 69.
+          # The body assertion therefore genuinely distinguishes the healthy
+          # first-run 404 from an incident 404/401.
           SESSION_JWT=$(cat /tmp/canary-session-jwt.txt)
           echo "::add-mask::${SESSION_JWT}"
 
@@ -553,16 +588,43 @@ jobs:
 
           echo "GET /api/v1/system/account -> HTTP $HTTP_CODE"
 
-          if [ "$HTTP_CODE" != "200" ]; then
-            # Truncate body to avoid leaking account data.
+          if [ "$HTTP_CODE" = "200" ]; then
+            echo "CHECK 4 (4c): HTTP 200 -- canary account row present. Auth chain healthy."
+          elif [ "$HTTP_CODE" = "404" ]; then
+            # Read and truncate the body for analysis. Redact any long tokens.
+            BODY=$(head -c 300 /tmp/check4c.body 2>/dev/null | sed 's/[a-zA-Z0-9+/=]\{20,\}/[REDACTED]/g' || true)
+            # Check for the authenticated-404 body emitted by system_account.go.
+            # The BFF returns {"error":"account not found"} when ClerkAuthMiddleware
+            # has passed and the handler ran but found no account row. This is the
+            # healthy first-run state for a canary user with no daemon paired.
+            # A route-missing or auth-broken 404 would NOT contain this substring.
+            if echo "${BODY}" | grep -q "account not found"; then
+              echo "CHECK 4 (4c): HTTP 404 with body 'account not found' -- authenticated first-run state. ClerkAuthMiddleware passed, JWKS healthy, route registered. No account row (expected: canary user has no daemon)."
+            else
+              # 404 WITHOUT the expected body: route missing, chi default 404, or
+              # CLERK_FRONTEND_API stale causing wrong handler to serve the path.
+              echo "::error::CHECK 4 FAILED (4c): GET /api/v1/system/account returned HTTP 404 but body did not contain 'account not found'. This indicates a route-registration failure or CLERK_FRONTEND_API staleness, NOT a healthy first-run state. Body (truncated+redacted): ${BODY:-<empty>}"
+              echo "step_failed=check4c-account-unexpected-404" >> "$GITHUB_OUTPUT"
+              echo "failure_reason=CHECK 4 (4c): GET ${{ env.PROD_BFF_BASE }}/api/v1/system/account returned HTTP 404 without the expected 'account not found' body (got: ${BODY:-<empty>}). Route missing or CLERK_FRONTEND_API stale -- not a healthy first-run state." >> "$GITHUB_OUTPUT"
+              exit 1
+            fi
+          else
+            # HTTP 401 = auth/JWKS broken. Any other code = unexpected failure.
+            # Truncate body to avoid leaking account data or JWT fragments.
             BODY=$(head -c 200 /tmp/check4c.body 2>/dev/null | sed 's/[a-zA-Z0-9+/=]\{20,\}/[REDACTED]/g' || true)
-            echo "::error::CHECK 4 FAILED (4c): GET /api/v1/system/account returned HTTP $HTTP_CODE (expected 200). ClerkAuthMiddleware or JWKS reachability issue. Body (truncated+redacted): ${BODY:-<empty>}"
-            echo "step_failed=check4c-account" >> "$GITHUB_OUTPUT"
-            echo "failure_reason=CHECK 4 (4c): GET ${{ env.PROD_BFF_BASE }}/api/v1/system/account returned HTTP $HTTP_CODE (expected 200). ClerkAuthMiddleware or JWKS issue." >> "$GITHUB_OUTPUT"
+            if [ "$HTTP_CODE" = "401" ]; then
+              echo "::error::CHECK 4 FAILED (4c): GET /api/v1/system/account returned HTTP 401. ClerkAuthMiddleware rejected the session JWT -- JWKS endpoint unreachable or CLERK_FRONTEND_API stale (the May 2026 incident class). Body (truncated+redacted): ${BODY:-<empty>}"
+              echo "step_failed=check4c-account-auth-rejected" >> "$GITHUB_OUTPUT"
+              echo "failure_reason=CHECK 4 (4c): GET ${{ env.PROD_BFF_BASE }}/api/v1/system/account returned HTTP 401. ClerkAuthMiddleware rejected the JWT -- check CLERK_FRONTEND_API SSM value and JWKS reachability (clerk.vaultmtg.app/.well-known/jwks.json)." >> "$GITHUB_OUTPUT"
+            else
+              echo "::error::CHECK 4 FAILED (4c): GET /api/v1/system/account returned HTTP $HTTP_CODE (expected 200 or authenticated 404 with 'account not found'). Body (truncated+redacted): ${BODY:-<empty>}"
+              echo "step_failed=check4c-account" >> "$GITHUB_OUTPUT"
+              echo "failure_reason=CHECK 4 (4c): GET ${{ env.PROD_BFF_BASE }}/api/v1/system/account returned HTTP $HTTP_CODE (expected 200 or authenticated 404 with body 'account not found'). Inspect the run log." >> "$GITHUB_OUTPUT"
+            fi
             exit 1
           fi
 
-          echo "CHECK 4 PASSED: FAPI ticket exchange complete + authenticated /api/v1/system/account returned HTTP 200."
+          echo "CHECK 4 PASSED: FAPI ticket exchange complete + authenticated /api/v1/system/account confirmed healthy (HTTP $HTTP_CODE)."
 
       # ------------------------------------------------------------------
       # CHECK 5: POST /api/v1/daemon/register (unauthenticated) → expect 401.
@@ -680,7 +742,7 @@ jobs:
             printf '  1. GET api.vaultmtg.app/healthz\n'
             printf '  2. POST api.clerk.com/v1/sign_in_tokens (Clerk Backend API sign-in token)\n'
             printf '  3. OPTIONS /api/v1/health w/ Origin: https://app.vaultmtg.app (CORS exact-origin)\n'
-            printf '  4. FAPI ticket (4a) + Backend API token (4b) + GET /api/v1/system/account w/ Bearer JWT (ClerkAuthMiddleware + JWKS)\n'
+            printf '  4. FAPI ticket (4a) + Backend API token (4b) + GET /api/v1/system/account w/ Bearer JWT (ClerkAuthMiddleware + JWKS). PASS=HTTP 200 OR HTTP 404 with body "account not found" (healthy first-run state -- canary user has no daemon). FAIL=HTTP 401 (auth broken) or 404 without that body (route missing).\n'
             printf '  5. POST /api/v1/daemon/register unauthenticated (expect 401 not 404)\n\n'
             printf 'Investigate the run URL above. This canary was introduced in ticket #268\n'
             printf 'after the 2026-05-29 prod config-drift incident.\n'
