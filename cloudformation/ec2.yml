@@ -556,6 +556,65 @@ Resources:
       InstanceId: !Ref EC2Instance
       EIP: !Ref ElasticIP
 
+  # ---------------------------------------------------------
+  # IaC-managed SSM Parameters (vault-mtg-tickets#269)
+  #
+  # These two parameters are declared here so that every change to their
+  # values must go through a CFN changeset, which requires a PR in
+  # this repo and passes through the S-07 security gate.
+  # Manual `ssm put-parameter --overwrite` is still technically possible
+  # but will appear as CFN stack drift on the next `detect-stack-drift`
+  # run (see vault-mtg-tickets#269 for the drift-detection design).
+  #
+  # DeletionPolicy: Retain is REQUIRED on both resources. These params
+  # hold live config values; a stack delete or accidental changeset must
+  # not wipe the production parameter values.
+  #
+  # IMPORT NOTE: These parameters already exist in SSM. Do NOT execute
+  # a normal CREATE changeset against them — use `--change-set-type IMPORT`
+  # (see the PR body for the exact operator command). Ray executes the
+  # import changeset manually after reviewing it; this is not wired into
+  # the automated deploy workflow.
+  #
+  # Credentials (CLERK_SECRET_KEY, CLERK_PUBLISHABLE_KEY) are intentionally
+  # excluded — CFN must not hold plaintext credential values.
+  # ---------------------------------------------------------
+
+  AllowedOriginsParam:
+    Type: AWS::SSM::Parameter
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Name: /vaultmtg/app/production/ALLOWED_ORIGINS
+      Type: String
+      Value: "https://app.vaultmtg.app,https://vaultmtg.app,https://www.vaultmtg.app,https://stg-app.vaultmtg.app"
+      Description: >
+        BFF CORS allowed origins for production.
+        Change only via CFN diff + code review (vault-mtg-tickets#269).
+        Value must include every active CloudFront hostname.
+        deploy-bff.yml asserts completeness post-deploy (RULE-INFRA-01 soft mode).
+      Tags:
+        Project: vaultmtg
+        Environment: production
+        ManagedBy: cloudformation
+
+  ClerkFrontendApiParam:
+    Type: AWS::SSM::Parameter
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Name: /vaultmtg/app/production/CLERK_FRONTEND_API
+      Type: String
+      Value: "https://clerk.vaultmtg.app"
+      Description: >
+        Clerk frontend API domain for production.
+        Change only via CFN diff + code review (vault-mtg-tickets#269).
+        Changes only when the Clerk subdomain changes.
+      Tags:
+        Project: vaultmtg
+        Environment: production
+        ManagedBy: cloudformation
+
 Outputs:
   InstanceId:
     Description: EC2 instance ID
