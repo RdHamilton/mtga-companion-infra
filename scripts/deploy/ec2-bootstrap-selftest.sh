@@ -128,8 +128,9 @@ PARAM_NAME="$2"
 case "$PARAM_NAME" in
     "/vaultmtg/app/production/ALLOWED_ORIGINS")   VAL="https://app.vaultmtg.app" ;;
     "/vaultmtg/app/production/CLERK_SECRET_KEY")  VAL="sk_test_STUB_CLERK_SECRET" ;;
-    "/vaultmtg/app/production/bff-admin-token")   VAL="STUB_BFF_ADMIN_TOKEN_VALUE" ;;
-    *)                                             VAL="STUB_VALUE_FOR_${KEY}" ;;
+    "/vaultmtg/app/production/bff-admin-token")      VAL="STUB_BFF_ADMIN_TOKEN_VALUE" ;;
+    "/vaultmtg/app/production/CLERK_FRONTEND_API")  VAL="https://clerk.vaultmtg.app" ;;
+    *)                                               VAL="STUB_VALUE_FOR_${KEY}" ;;
 esac
 ENV_FILE="${BOOTSTRAP_PREFIX}/etc/mtga-companion/env"
 # Upsert: drop existing line for KEY then append.
@@ -344,6 +345,26 @@ if ! grep -q "^BFF_ADMIN_TOKEN=STUB_BFF_ADMIN_TOKEN_VALUE$" "${F7}/etc/vaultmtg/
     KEEP_TMPDIRS=1; exit 1
 fi
 echo "ASSERTION 7 PASS (BFF_ADMIN_TOKEN present in canonical env file)"
+echo ""
+
+# ---------------------------------------------------------------------
+# ASSERTION 8 — section 3b overlays CLERK_FRONTEND_API into env file
+# (#276: provision-env.sh CLERK_FRONTEND_API /vaultmtg/app/production/CLERK_FRONTEND_API)
+# No --with-decryption: plain String param.
+# ---------------------------------------------------------------------
+echo "===================================================================="
+echo "ASSERTION 8 — section 3b: env file contains CLERK_FRONTEND_API after overlay"
+echo "===================================================================="
+F8="$(make_fixture sec3b-clerk-frontend-api)"
+OUT8="$(run_bootstrap "$F8" 2>&1)" || { echo "BOOTSTRAP EXIT NONZERO"; echo "$OUT8"; KEEP_TMPDIRS=1; exit 1; }
+
+if ! grep -q "^CLERK_FRONTEND_API=https://clerk.vaultmtg.app$" "${F8}/etc/vaultmtg/env"; then
+    echo "FAIL: CLERK_FRONTEND_API missing from /etc/vaultmtg/env after section-3b overlay"
+    echo "--- env file contents:"
+    cat "${F8}/etc/vaultmtg/env" 2>/dev/null || echo "(no file)"
+    KEEP_TMPDIRS=1; exit 1
+fi
+echo "ASSERTION 8 PASS (CLERK_FRONTEND_API present in canonical env file)"
 echo ""
 
 echo "===================================================================="
