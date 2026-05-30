@@ -617,7 +617,7 @@ Resources:
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: !Sub "vault-mtg-${Environment}-projection-dlq"
-      AlarmDescription: !Sub |
+      AlarmDescription: |
         The projection worker has written one or more events to the
         projection_errors dead-letter table (DLQ) in the last 5 minutes.
         Affected events could not be projected due to a structural payload
