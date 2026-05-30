@@ -114,7 +114,7 @@ log() { echo "[setup] $(date '+%Y-%m-%dT%H:%M:%S') $*"; }
 # Mixing them up either (a) needlessly requests KMS decrypt on non-secret data
 # or (b) silently fails to decrypt a SecureString (AWS returns the ciphertext).
 #
-# Production parameter inventory (verified against SSM 2026-05-23; updated 2026-05-27):
+# Production parameter inventory (verified against SSM 2026-05-23; updated 2026-05-30):
 #   SecureString : /vaultmtg/app/production/daemon-jwt-secret
 #                  /vaultmtg/app/production/CLERK_SECRET_KEY   (§3b overlay)
 #                  /vaultmtg/app/production/bff-admin-token    (§3b overlay — #2559)
@@ -125,6 +125,7 @@ log() { echo "[setup] $(date '+%Y-%m-%dT%H:%M:%S') $*"; }
 #                  /vaultmtg/app/production/latest-bff-sha
 #                  /vaultmtg/app/production/domain-name
 #                  /vaultmtg/app/production/certbot-email
+#                  /vaultmtg/app/production/CLERK_FRONTEND_API (§3b overlay — #276)
 
 fetch_ssm_plain() {
     aws ssm get-parameter \
@@ -387,6 +388,19 @@ fi
 # not a crash-loop risk, but the endpoint is unusable. Bootstrap MUST abort so
 # the operator knows the token is missing rather than silently running without it.
 "${PROV_TMP}/provision-env.sh" BFF_ADMIN_TOKEN /vaultmtg/app/production/bff-admin-token --with-decryption
+
+# provision-env.sh CLERK_FRONTEND_API: CRITICAL. Writes the Clerk frontend API
+# host (https://clerk.vaultmtg.app) consumed by the Clerk OAuth middleware
+# for daemon registration (/api/v1/daemon/register). Missing this value causes
+# the middleware to initialise as nil and silently 404 all daemon register
+# requests — the Fault 4 root cause from the 2026-05-30 prod incident (#276).
+# Stored as a plain String in SSM (value is a public hostname, NOT a secret).
+# Do NOT add --with-decryption: this is String-typed; passing that flag would
+# write the raw SSM ciphertext instead of the value (reproduces the 2026-05-29
+# staging CLERK_FRONTEND_API bug). The EC2 instance role already covers this
+# path via the VaultmtgAppProd SSM grant in ec2.yml (lines 236-280).
+# Mirrors deploy-bff.yml production PROVISION_CMD (PR #2792).
+"${PROV_TMP}/provision-env.sh" CLERK_FRONTEND_API /vaultmtg/app/production/CLERK_FRONTEND_API
 
 # Restore the strict mode/ownership that provision-*.sh may have
 # relaxed (provision-env.sh chmods 600 itself; provision-db-url.sh
