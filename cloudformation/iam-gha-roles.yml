@@ -674,6 +674,18 @@ Resources:
                 # is still scoped to the staging alerts topic ARN only via the
                 # SNSPublishStagingAlerts Sid below.
                 #
+                # `environment:production-canary` (2026-05-30, #268 canary env fix):
+                # The scheduled-prod-canary.yml job runs every 5 minutes and must
+                # execute UNATTENDED. Moving its job from `environment: production`
+                # (which has required_reviewers: RdHamilton, can_admins_bypass: false)
+                # to `environment: production-canary` (no protection rules) allows the
+                # cron to run without a human approval click every 5 minutes. The role's
+                # actual AWS PERMISSIONS are unchanged -- the same SSM reads + SNS
+                # publish that were already granted. Only the OIDC sub allow-list is
+                # widened by this one entry. `environment: production` remains on all
+                # real CFN deploy jobs (deploy.yml) -- the production approval gate is
+                # NOT relaxed. See vault-mtg-tickets#<TBD>.
+                #
                 # `environment:staging` (2026-05-27, Phase 1 staging separation):
                 # deploy.yml now routes any stack matching `*staging*` to
                 # `environment: staging` (no approval gate) instead of
@@ -698,11 +710,13 @@ Resources:
                   - !Sub repo:${GitHubOrg}/${InfraRepo}:ref:refs/heads/main
                   - !Sub repo:${GitHubOrg}/${InfraRepo}:pull_request
                   - !Sub repo:${GitHubOrg}/${InfraRepo}:environment:production
+                  - !Sub repo:${GitHubOrg}/${InfraRepo}:environment:production-canary
                   - !Sub repo:${GitHubOrg}/${InfraRepo}:environment:staging
                   - !Sub repo:${GitHubOrg}/${InfraRepo}:environment:staging-alerts
                   - repo:RdHamilton/mtga-companion-infra:ref:refs/heads/main
                   - repo:RdHamilton/mtga-companion-infra:pull_request
                   - repo:RdHamilton/mtga-companion-infra:environment:production
+                  - repo:RdHamilton/mtga-companion-infra:environment:production-canary
                   - repo:RdHamilton/mtga-companion-infra:environment:staging
                   - repo:RdHamilton/mtga-companion-infra:environment:staging-alerts
       Policies:
