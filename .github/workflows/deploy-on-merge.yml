@@ -126,6 +126,7 @@ jobs:
             [sync-lambda.yml]="sync-lambda sync-lambda-staging"
             [nat-egress.yml]="nat-egress"
             [dns-staging.yml]="dns-staging"
+            [daemon-release-ssm-role.yml]="daemon-release-ssm-role"
             [vaultmtg-security-services.yml]="vaultmtg-security-services"
             [vpc.yml]="vpc"
           )
@@ -160,6 +161,7 @@ jobs:
             [staging-deploy-role]="mtga-companion-staging-deploy-role"
             [sync-lambda]="mtga-companion-sync-lambda"
             [sync-lambda-staging]="vaultmtg-sync-lambda-staging"
+            [daemon-release-ssm-role]="vaultmtg-daemon-release-ssm-role"
             [vaultmtg-security-services]="vaultmtg-security-services"
             [vpc]="mtga-companion-vpc"
           )
@@ -496,6 +498,7 @@ jobs:
             # dns-staging.yml backs the Route53 record for staging-api.vaultmtg.app.
             # Wiring gap caught in the 2026-05-27 pre-Wave-N audit.
             [dns-staging.yml]="dns-staging"
+            [daemon-release-ssm-role.yml]="daemon-release-ssm-role"
             [vaultmtg-security-services.yml]="vaultmtg-security-services"
             [vpc.yml]="vpc"
           )
