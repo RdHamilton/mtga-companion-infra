@@ -438,6 +438,19 @@ Resources:
                   # vault-mtg-web: main branch and release tag deploys
                   - !Sub repo:${GitHubOrg}/${WebRepo}:ref:refs/heads/main
                   - !Sub repo:${GitHubOrg}/${WebRepo}:ref:refs/tags/v*
+                  # vault-mtg-web production env: the marketing release.yml deploy
+                  # job runs in `environment: production`. A named GH environment
+                  # sub replaces the ref-based sub in the OIDC token, so it must be
+                  # allowed explicitly or the first v* tag deploy is denied at
+                  # AssumeRoleWithWebIdentity. See marketing go-live remediation.
+                  - !Sub repo:${GitHubOrg}/${WebRepo}:environment:production
+                  # rhamiltoneng-web: marketing release.yml deploys on v* tags and
+                  # runs the deploy job in the `Production` environment (capital P --
+                  # the OIDC environment sub is case-sensitive and must match the
+                  # actual GitHub environment name exactly). No CFN param exists for
+                  # this repo, so the literal repo path is used here.
+                  - repo:RdHamilton/rhamiltoneng-web:environment:Production
+                  - repo:RdHamilton/rhamiltoneng-web:ref:refs/tags/v*
       Policies:
         - PolicyName: github-actions-deploy-permissions
           PolicyDocument:
