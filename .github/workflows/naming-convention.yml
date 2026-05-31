@@ -136,6 +136,12 @@ jobs:
             # (#2605) — proper rename deferred per ADR-022 §3 maintenance-window
             # plan. Remove when the resource is recreated under the vaultmtg-* prefix.
             'vault-mtg-\$\{Environment\}-vpc-config-lambda-role'  # comment-only reference to the prior rename literal restored by PR #43 revert (#2605); deferred per ADR-022 §3
+            # CFN parameter default values that ARE the repo slug.
+            # AppRepo param in daemon-release-ssm-role.yml (and similar per-template
+            # parameters) carry `Default: vault-mtg` — this IS the correct GitHub
+            # repo slug (vault-mtg, not vaultmtg), not an AWS resource name.
+            # ADR-022 explicitly allows vault-mtg in repo-slug contexts.
+            'Default: vault-mtg$'              # CFN AppRepo parameter default (repo slug, not AWS resource name; daemon-release-ssm-role.yml L26 and similar)
           )
 
           # Legacy-slug exceptions for the rename progression. These specific
