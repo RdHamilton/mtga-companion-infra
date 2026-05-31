@@ -1,0 +1,565 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Meta-scrape Lambda VPC placement, IAM execution role, EventBridge daily 03:00 UTC schedule, DLQ, and CloudWatch alarms (ticket 177, ADR-044)
+
+Parameters:
+  Environment:
+    Type: String
+    Default: production
+    AllowedValues: [production, staging]
+    Description: Deployment environment
+  LambdaFunctionName:
+    Type: String
+    Default: vaultmtg-meta-scrape
+    Description: Name of the meta-scrape Lambda function (created out-of-band by the deploy workflow, configured here)
+  SubnetIdA:
+    Type: AWS::EC2::Subnet::Id
+    Default: subnet-05f881623516300b0
+    Description: VPC subnet in AZ-a for Lambda (private subnet vaultmtg-production-private-1a, NAT-routed via nat-07dd75f2da096369f)
+  SubnetIdB:
+    Type: AWS::EC2::Subnet::Id
+    Default: subnet-06d52651558bfbe7e
+    Description: VPC subnet in AZ-b for Lambda (private subnet vaultmtg-production-private-1b, NAT-routed via nat-07dd75f2da096369f)
+  LambdaTimeout:
+    Type: Number
+    Default: 900
+    Description: Lambda function timeout in seconds (Lambda max = 900s / 15 min; sized for scraping 10 formats x 2 sources per run, each an external HTTPS call plus DB writes)
+  LambdaMemorySize:
+    Type: Number
+    Default: 256
+    Description: Lambda function memory allocation in MB
+  ScheduleCron:
+    Type: String
+    Default: 'cron(0 3 * * ? *)'
+    Description: EventBridge Scheduler cron expression in UTC. Defaults to 03:00 UTC, offset one hour after the 02:00 sync Lambda to avoid NAT/RDS contention (ADR-044).
+  LambdaErrorThreshold:
+    Type: Number
+    Default: 1
+    Description: Number of Lambda invocation errors within EvaluationPeriods x 300s that triggers the error alarm. Default 1 means any single failure fires the alarm.
+  LambdaErrorEvaluationPeriods:
+    Type: Number
+    Default: 1
+    Description: Number of consecutive 5-minute periods used by the error alarm. With the default of 1 the alarm fires as soon as one error is observed.
+  DLQDepthThreshold:
+    Type: Number
+    Default: 1
+    Description: Number of visible messages in the DLQ that triggers the DLQ-depth alarm. Default 1 means any message landing in the DLQ fires the alarm.
+  ZeroInvocationEvaluationPeriods:
+    Type: Number
+    Default: 2
+    Description: |
+      Number of consecutive 24-hour periods (Period 86400s) with zero Lambda
+      invocations before the zero-invocations alarm fires. Default 2 allows a
+      one-day scheduling slip before paging (fires after 48h of silence).
+  # ---------------------------------------------------------
+  # Meta-scrape Lambda runtime environment (ADR-044)
+  #
+  # Unlike the sync Lambda (ADR-035), the DB password is NOT injected into the
+  # Lambda environment. The Lambda is given only the SSM SecureString PATH; it
+  # fetches and decrypts the password at runtime via ssm:GetParameter with
+  # WithDecryption=true (kms:Decrypt). The plaintext password never appears in
+  # the Lambda configuration or CloudFormation state. See ticket 341.
+  # ---------------------------------------------------------
+  DbEndpointSsmPath:
+    Type: String
+    Default: /vaultmtg/app/production/db-endpoint
+    Description: SSM Parameter Store path that holds the RDS endpoint hostname (resolved at stack-update time into DB_HOST).
+  DbNameSsmPath:
+    Type: String
+    Default: /vaultmtg/app/production/db-name
+    Description: SSM Parameter Store path that holds the PostgreSQL database name (resolved at stack-update time into DB_NAME).
+  DbUser:
+    Type: String
+    Default: mtga_sync
+    Description: PostgreSQL role the meta-scrape Lambda authenticates as (DB_USER). M2M-only role; password is stored as an SSM SecureString at DbPasswordSsmPath.
+  DbPort:
+    Type: String
+    Default: '5432'
+    Description: PostgreSQL port the meta-scrape Lambda connects to (DB_PORT).
+  DbPasswordSsmPath:
+    Type: String
+    Default: /vaultmtg/app/production/meta-scrape-db-password
+    Description: SSM SecureString parameter path holding the meta-scrape Lambda PostgreSQL password. The PATH (not the value) is injected into DB_PASSWORD_SSM_PATH; the Lambda decrypts the value at runtime via ssm:GetParameter WithDecryption=true. The parameter must be created out-of-band as Type=SecureString.
+
+Resources:
+
+  # Security group for the meta-scrape Lambda - outbound to RDS and AWS APIs
+  LambdaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub "vaultmtg-${Environment} meta-scrape Lambda outbound access"
+      VpcId: vpc-01d097c495e941d32
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          # RDS SG pinned to live physical ID (same SG the sync Lambda uses).
+          DestinationSecurityGroupId: sg-0290854dc63d3b6e9
+          Description: Allow outbound to RDS PostgreSQL
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: Allow outbound HTTPS for AWS API calls (SSM GetParameter, KMS Decrypt, CloudWatch Logs) and scrape egress to mtggoldfish.com and mtgtop8.com
+      Tags:
+        - Key: Project
+          Value: vaultmtg
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Component
+          Value: meta-scrape
+        - Key: Name
+          Value: !Sub "vaultmtg-${Environment}-meta-scrape-lambda-sg"
+
+  # Inject ingress into the shared RDS security group to allow Lambda access.
+  RDSIngressFromMetaScrapeLambda:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: sg-0290854dc63d3b6e9
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      SourceSecurityGroupId: !Ref LambdaSecurityGroup
+      Description: Allow inbound from meta-scrape Lambda security group
+
+  # IAM execution role for the Lambda
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    DependsOn: MetaScrapeDLQ
+    Properties:
+      RoleName: !Sub "vaultmtg-${Environment}-meta-scrape-lambda-role"
+      Description: Execution role for meta-scrape Lambda with VPC access; fetches the DB password from SSM SecureString at runtime (ssm:GetParameter + kms:Decrypt)
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      Policies:
+        - PolicyName: DLQSendMessage
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: sqs:SendMessage
+                Resource: !GetAtt MetaScrapeDLQ.Arn
+        - PolicyName: ReadDbPasswordSecureString
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Scoped to the single meta-scrape DB password parameter ARN.
+              - Sid: ReadMetaScrapeDbPassword
+                Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${DbPasswordSsmPath}"
+              # kms:Decrypt for the SecureString, scoped to SSM via kms:ViaService.
+              - Sid: DecryptMetaScrapeDbPassword
+                Effect: Allow
+                Action:
+                  - kms:Decrypt
+                Resource: !Sub "arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/*"
+                Condition:
+                  StringEquals:
+                    kms:ViaService: !Sub "ssm.${AWS::Region}.amazonaws.com"
+      Tags:
+        - Key: Project
+          Value: vaultmtg
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Component
+          Value: meta-scrape
+
+  # Custom resource to apply VPC config, execution role, and env to the Lambda.
+  LambdaVpcConfigFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "vaultmtg-${Environment}-meta-scrape-cfn-vpc-config"
+      Description: CloudFormation custom resource to configure VPC placement on the meta-scrape Lambda
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt LambdaVpcConfigRole.Arn
+      Timeout: 300
+      Code:
+        ZipFile: |
+          import boto3, json, urllib.request
+
+          def send(event, context, status, data={}, reason=''):
+              body = json.dumps({
+                  'Status': status,
+                  'Reason': reason,
+                  'PhysicalResourceId': event.get('PhysicalResourceId', 'meta-scrape-vpc-config'),
+                  'StackId': event['StackId'],
+                  'RequestId': event['RequestId'],
+                  'LogicalResourceId': event['LogicalResourceId'],
+                  'Data': data,
+              }).encode()
+              req = urllib.request.Request(event['ResponseURL'], data=body,
+                  method='PUT', headers={'Content-Type': ''})
+              urllib.request.urlopen(req)
+
+          def handler(event, context):
+              try:
+                  props = event['ResourceProperties']
+                  client = boto3.client('lambda')
+                  if event['RequestType'] == 'Delete':
+                      send(event, context, 'SUCCESS')
+                      return
+                  waiter = client.get_waiter('function_updated')
+                  waiter.wait(FunctionName=props['FunctionName'])
+                  kwargs = dict(
+                      FunctionName=props['FunctionName'],
+                      VpcConfig={
+                          'SubnetIds': props['SubnetIds'],
+                          'SecurityGroupIds': props['SecurityGroupIds'],
+                      },
+                      Role=props['ExecutionRoleArn'],
+                      Timeout=int(props['Timeout']),
+                      MemorySize=int(props['MemorySize']),
+                  )
+                  env_vars = props.get('EnvironmentVariables')
+                  if env_vars:
+                      kwargs['Environment'] = {'Variables': dict(env_vars)}
+                  client.update_function_configuration(**kwargs)
+                  waiter.wait(FunctionName=props['FunctionName'])
+                  send(event, context, 'SUCCESS')
+              except Exception as e:
+                  send(event, context, 'FAILED', reason=str(e))
+
+  LambdaVpcConfigRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "vaultmtg-${Environment}-meta-scrape-vpc-config-role"
+      Description: Role for the meta-scrape VPC config custom resource Lambda
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: ConfigureMetaScrapeLambda
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:UpdateFunctionConfiguration
+                  - lambda:GetFunction
+                  - lambda:GetFunctionConfiguration
+                  - iam:PassRole
+                Resource:
+                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${LambdaFunctionName}"
+                  - !GetAtt LambdaExecutionRole.Arn
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeSecurityGroups
+                  - ec2:DescribeSubnets
+                  - ec2:DescribeVpcs
+                Resource: "*"
+      Tags:
+        - Key: Project
+          Value: vaultmtg
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Component
+          Value: meta-scrape
+
+  LambdaVpcConfigCustomResource:
+    Type: Custom::LambdaVpcConfig
+    DependsOn:
+      - RDSIngressFromMetaScrapeLambda
+      - LambdaExecutionRole
+    Properties:
+      ServiceToken: !GetAtt LambdaVpcConfigFunction.Arn
+      FunctionName: !Ref LambdaFunctionName
+      SubnetIds:
+        - !Ref SubnetIdA
+        - !Ref SubnetIdB
+      SecurityGroupIds:
+        - !Ref LambdaSecurityGroup
+      ExecutionRoleArn: !GetAtt LambdaExecutionRole.Arn
+      Timeout: !Ref LambdaTimeout
+      MemorySize: !Ref LambdaMemorySize
+      # The DB password is NOT here. Only literal/SSM-resolved non-secret values
+      # plus the SecureString PATH are injected; the Lambda decrypts at runtime.
+      EnvironmentVariables:
+        DB_HOST: !Sub '{{resolve:ssm:${DbEndpointSsmPath}}}'
+        DB_NAME: !Sub '{{resolve:ssm:${DbNameSsmPath}}}'
+        DB_USER: !Ref DbUser
+        DB_PORT: !Ref DbPort
+        DB_PASSWORD_SSM_PATH: !Ref DbPasswordSsmPath
+
+  # EventBridge Scheduler execution role
+  SchedulerExecutionRole:
+    Type: AWS::IAM::Role
+    DependsOn: MetaScrapeDLQ
+    Properties:
+      RoleName: !Sub "vaultmtg-${Environment}-meta-scrape-scheduler-role"
+      Description: Role for EventBridge Scheduler to invoke the meta-scrape Lambda and write to the DLQ
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: scheduler.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: InvokeMetaScrapeLambda
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${LambdaFunctionName}"
+        - PolicyName: SendToDLQ
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: sqs:SendMessage
+                Resource: !GetAtt MetaScrapeDLQ.Arn
+      Tags:
+        - Key: Project
+          Value: vaultmtg
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Component
+          Value: meta-scrape
+
+  # Daily EventBridge Scheduler to trigger the meta-scrape Lambda at 03:00 UTC
+  DailyMetaScrapeSchedule:
+    Type: AWS::Scheduler::Schedule
+    DependsOn: MetaScrapeDLQ
+    Properties:
+      Name: !Sub "vaultmtg-${Environment}-meta-scrape-daily"
+      Description: Daily meta-scrape Lambda trigger at 03:00 UTC (offset from sync at 02:00 per ADR-044)
+      ScheduleExpression: !Ref ScheduleCron
+      ScheduleExpressionTimezone: UTC
+      FlexibleTimeWindow:
+        Mode: 'OFF'
+      State: ENABLED
+      Target:
+        Arn: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${LambdaFunctionName}"
+        RoleArn: !GetAtt SchedulerExecutionRole.Arn
+        DeadLetterConfig:
+          Arn: !GetAtt MetaScrapeDLQ.Arn
+        RetryPolicy:
+          MaximumRetryAttempts: 2
+
+  # Allow EventBridge Scheduler to invoke the Lambda
+  LambdaPermissionScheduler:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref LambdaFunctionName
+      Action: lambda:InvokeFunction
+      Principal: scheduler.amazonaws.com
+      SourceArn: !GetAtt DailyMetaScrapeSchedule.Arn
+
+  # Dead-letter queue for failed Scheduler invocations and Lambda async errors.
+  # Stateful resource: retain on stack delete so failed-invocation forensics survive.
+  MetaScrapeDLQ:
+    Type: AWS::SQS::Queue
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      QueueName: !Sub "vaultmtg-${Environment}-meta-scrape-dlq"
+      MessageRetentionPeriod: 1209600
+      Tags:
+        - Key: Project
+          Value: vaultmtg
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Component
+          Value: meta-scrape
+
+  # Allow the EventBridge Scheduler role to send failed invocation payloads to the DLQ
+  SchedulerDLQPolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref MetaScrapeDLQ
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowSchedulerDLQ
+            Effect: Allow
+            Principal:
+              Service: scheduler.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: !GetAtt MetaScrapeDLQ.Arn
+
+  # Lambda async invocation config: 2 retries; failed events land in the DLQ.
+  MetaScrapeLambdaEventInvokeConfig:
+    Type: AWS::Lambda::EventInvokeConfig
+    DependsOn: LambdaExecutionRole
+    Properties:
+      FunctionName: !Ref LambdaFunctionName
+      Qualifier: $LATEST
+      MaximumRetryAttempts: 2
+      DestinationConfig:
+        OnFailure:
+          Destination: !GetAtt MetaScrapeDLQ.Arn
+
+  # CloudWatch alarm: Lambda invocation errors
+  MetaScrapeLambdaErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    DependsOn: MetaScrapeDLQ
+    Properties:
+      AlarmName: !Sub "vaultmtg-${Environment}-meta-scrape-lambda-errors"
+      AlarmDescription: !Sub |
+        Meta-scrape Lambda (${LambdaFunctionName}) reported invocation errors.
+        Check CloudWatch Logs for the Lambda function and inspect the DLQ:
+          aws sqs receive-message --queue-url ${MetaScrapeDLQ} --profile personal
+        The scrape may have failed for every format, or RDS may be unreachable.
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref LambdaFunctionName
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: !Ref LambdaErrorEvaluationPeriods
+      Threshold: !Ref LambdaErrorThreshold
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !ImportValue
+          Fn::Sub: "vaultmtg-${Environment}-AlertTopicArn"
+      OKActions:
+        - !ImportValue
+          Fn::Sub: "vaultmtg-${Environment}-AlertTopicArn"
+      Tags:
+        - Key: Project
+          Value: vaultmtg
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Component
+          Value: meta-scrape
+
+  # CloudWatch alarm: DLQ message depth
+  MetaScrapeDLQDepthAlarm:
+    Type: AWS::CloudWatch::Alarm
+    DependsOn: MetaScrapeDLQ
+    Properties:
+      AlarmName: !Sub "vaultmtg-${Environment}-meta-scrape-dlq-depth"
+      AlarmDescription: !Sub |
+        Messages have landed in the meta-scrape DLQ (${MetaScrapeDLQ}).
+        The meta-scrape Lambda failed and exhausted all EventBridge retries.
+        Inspect the DLQ messages:
+          aws sqs receive-message --queue-url ${MetaScrapeDLQ} --profile personal
+      Namespace: AWS/SQS
+      MetricName: NumberOfMessagesSent
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt MetaScrapeDLQ.QueueName
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: !Ref DLQDepthThreshold
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !ImportValue
+          Fn::Sub: "vaultmtg-${Environment}-AlertTopicArn"
+      OKActions:
+        - !ImportValue
+          Fn::Sub: "vaultmtg-${Environment}-AlertTopicArn"
+      Tags:
+        - Key: Project
+          Value: vaultmtg
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Component
+          Value: meta-scrape
+
+  # CloudWatch alarm: zero invocations (silently-dead scheduler)
+  MetaScrapeLambdaZeroInvocationsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "vaultmtg-${Environment}-meta-scrape-lambda-zero-invocations"
+      AlarmDescription: !Sub |
+        Meta-scrape Lambda (${LambdaFunctionName}) has had zero invocations for
+        ${ZeroInvocationEvaluationPeriods} consecutive 24-hour window(s).
+        The EventBridge schedule may be disabled, the Lambda deleted, or the
+        IAM invoke permission revoked. Check the schedule state:
+          aws scheduler get-schedule --name vaultmtg-${Environment}-meta-scrape-daily --profile personal
+      Namespace: AWS/Lambda
+      MetricName: Invocations
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref LambdaFunctionName
+      Statistic: Sum
+      Period: 86400
+      EvaluationPeriods: !Ref ZeroInvocationEvaluationPeriods
+      DatapointsToAlarm: !Ref ZeroInvocationEvaluationPeriods
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+      AlarmActions:
+        - !ImportValue
+          Fn::Sub: "vaultmtg-${Environment}-AlertTopicArn"
+      OKActions:
+        - !ImportValue
+          Fn::Sub: "vaultmtg-${Environment}-AlertTopicArn"
+      Tags:
+        - Key: Project
+          Value: vaultmtg
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Component
+          Value: meta-scrape
+
+Outputs:
+  LambdaSecurityGroupId:
+    Description: Security group ID for the meta-scrape Lambda
+    Value: !Ref LambdaSecurityGroup
+    Export:
+      Name: !Sub "${AWS::StackName}-LambdaSecurityGroupId"
+
+  LambdaExecutionRoleArn:
+    Description: ARN of the meta-scrape Lambda execution role
+    Value: !GetAtt LambdaExecutionRole.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-LambdaExecutionRoleArn"
+
+  DailyMetaScrapeScheduleArn:
+    Description: ARN of the EventBridge daily meta-scrape schedule
+    Value: !GetAtt DailyMetaScrapeSchedule.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-DailyMetaScrapeScheduleArn"
+
+  MetaScrapeDLQArn:
+    Description: ARN of the SQS dead-letter queue for failed meta-scrape invocations
+    Value: !GetAtt MetaScrapeDLQ.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-MetaScrapeDLQArn"
+
+  MetaScrapeDLQUrl:
+    Description: URL of the SQS dead-letter queue for failed meta-scrape invocations
+    Value: !Ref MetaScrapeDLQ
+    Export:
+      Name: !Sub "${AWS::StackName}-MetaScrapeDLQUrl"
+
+  MetaScrapeLambdaErrorAlarmArn:
+    Description: ARN of the CloudWatch alarm for meta-scrape Lambda invocation errors
+    Value: !GetAtt MetaScrapeLambdaErrorAlarm.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-MetaScrapeLambdaErrorAlarmArn"
+
+  MetaScrapeDLQDepthAlarmArn:
+    Description: ARN of the CloudWatch alarm for meta-scrape DLQ message depth
+    Value: !GetAtt MetaScrapeDLQDepthAlarm.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-MetaScrapeDLQDepthAlarmArn"
+
+  MetaScrapeLambdaZeroInvocationsAlarmArn:
+    Description: ARN of the CloudWatch alarm for zero meta-scrape Lambda invocations
+    Value: !GetAtt MetaScrapeLambdaZeroInvocationsAlarm.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-MetaScrapeLambdaZeroInvocationsAlarmArn"

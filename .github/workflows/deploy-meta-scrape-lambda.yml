@@ -1,0 +1,212 @@
+name: Deploy Meta-Scrape Lambda
+
+on:
+  repository_dispatch:
+    types: [meta-scrape-lambda-deploy]
+  workflow_dispatch:
+    inputs:
+      app_repo_ref:
+        description: "App repo ref to build from (tag, branch, or SHA). Advance this to the new release tag before deploying."
+        required: false
+        type: string
+        default: "main"
+      dry_run:
+        description: Dry run - build only, do not deploy to Lambda
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: deploy-meta-scrape-lambda
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy meta-scrape Lambda @ ${{ github.event_name == 'workflow_dispatch' && inputs.app_repo_ref || 'main' }} (${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && 'dry-run' || 'deploy' }})
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      id-token: write
+      contents: read
+
+    env:
+      AWS_REGION: us-east-1
+      LAMBDA_FUNCTION_NAME: vaultmtg-meta-scrape
+      GONOSUMDB: github.com/RdHamilton/vault-mtg
+      GOPRIVATE: github.com/RdHamilton/vault-mtg
+
+    steps:
+      - name: Checkout app repo
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6 — SHA pinned
+        with:
+          repository: RdHamilton/vault-mtg
+          token: ${{ secrets.GH_PAT }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.app_repo_ref || 'main' }}
+
+      - name: Verify meta-scrape Lambda source exists
+        run: |
+          if [ ! -d "services/meta-scrape/cmd/lambda" ]; then
+            echo "ERROR: services/meta-scrape/cmd/lambda not found in app repo at ref '${{ github.event_name == 'workflow_dispatch' && inputs.app_repo_ref || 'main' }}'."
+            echo "The meta-scrape Lambda source has moved or the ref is invalid. Update the pinned ref or the build path."
+            exit 1
+          fi
+          echo "Verified: services/meta-scrape/cmd/lambda exists."
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c  # v6 — SHA pinned
+        with:
+          go-version-file: services/meta-scrape/go.mod
+          cache-dependency-path: services/meta-scrape/go.sum
+
+      - name: Download dependencies
+        working-directory: services/meta-scrape
+        env:
+          GONOSUMDB: ${{ env.GONOSUMDB }}
+          GOPRIVATE: ${{ env.GOPRIVATE }}
+        run: go mod download
+
+      - name: Build Lambda binary
+        working-directory: services/meta-scrape
+        env:
+          GOOS: linux
+          GOARCH: arm64
+          CGO_ENABLED: "0"
+          GONOSUMDB: ${{ env.GONOSUMDB }}
+          GOPRIVATE: ${{ env.GOPRIVATE }}
+        run: |
+          go build -tags lambda.norpc -trimpath -o bootstrap ./cmd/lambda/
+          echo "Built bootstrap binary: $(ls -lh bootstrap)"
+
+      - name: Validate binary architecture
+        working-directory: services/meta-scrape
+        run: |
+          BINARY_INFO="$(file bootstrap)"
+          echo "Binary info: ${BINARY_INFO}"
+          if ! echo "${BINARY_INFO}" | grep -q "aarch64"; then
+            echo "ERROR: bootstrap binary is not aarch64. Got: ${BINARY_INFO}"
+            echo "Expected GOARCH=arm64 (aarch64) — cross-compilation may have silently fallen back to the host architecture."
+            exit 1
+          fi
+          echo "Architecture validated: bootstrap is aarch64 (arm64) as required."
+
+      - name: Package Lambda zip
+        working-directory: services/meta-scrape
+        run: |
+          zip -j meta-scrape-lambda.zip bootstrap
+          echo "Zip: $(ls -lh meta-scrape-lambda.zip)"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@796449b3e38e3c256861227399e58b780e0e5538  # v6 — SHA pinned
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy to Lambda
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.dry_run) }}
+        working-directory: services/meta-scrape
+        run: |
+          if aws lambda get-function --function-name "${{ env.LAMBDA_FUNCTION_NAME }}" --region "${{ env.AWS_REGION }}" > /dev/null 2>&1; then
+            echo "Function exists — updating code..."
+            aws lambda update-function-code \
+              --function-name "${{ env.LAMBDA_FUNCTION_NAME }}" \
+              --zip-file fileb://meta-scrape-lambda.zip \
+              --architectures arm64 \
+              --region "${{ env.AWS_REGION }}"
+
+            echo "Waiting for Lambda update to complete..."
+            aws lambda wait function-updated \
+              --function-name "${{ env.LAMBDA_FUNCTION_NAME }}" \
+              --region "${{ env.AWS_REGION }}"
+          else
+            echo "Function does not exist — creating..."
+            ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+            ROLE_ARN="arn:aws:iam::${ACCOUNT_ID}:role/vaultmtg-production-meta-scrape-lambda-role"
+            echo "Resolved execution role ARN: ${ROLE_ARN}"
+            aws lambda create-function \
+              --function-name "${{ env.LAMBDA_FUNCTION_NAME }}" \
+              --runtime provided.al2023 \
+              --architectures arm64 \
+              --handler bootstrap \
+              --role "${ROLE_ARN}" \
+              --zip-file fileb://meta-scrape-lambda.zip \
+              --timeout 900 \
+              --memory-size 256 \
+              --description "VaultMTG daily metagame scrape (mtgzone_archetypes)" \
+              --region "${{ env.AWS_REGION }}"
+
+            echo "Waiting for Lambda to become active..."
+            aws lambda wait function-active \
+              --function-name "${{ env.LAMBDA_FUNCTION_NAME }}" \
+              --region "${{ env.AWS_REGION }}"
+          fi
+
+      - name: Enforce Lambda configuration (defense-in-depth)
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.dry_run) }}
+        run: |
+          echo "Applying Timeout=900 and MemorySize=256 to ${{ env.LAMBDA_FUNCTION_NAME }}..."
+          aws lambda update-function-configuration \
+            --function-name "${{ env.LAMBDA_FUNCTION_NAME }}" \
+            --timeout 900 \
+            --memory-size 256 \
+            --region "${{ env.AWS_REGION }}"
+
+          echo "Waiting for configuration update to complete..."
+          aws lambda wait function-updated \
+            --function-name "${{ env.LAMBDA_FUNCTION_NAME }}" \
+            --region "${{ env.AWS_REGION }}"
+
+          aws lambda get-function-configuration \
+            --function-name "${{ env.LAMBDA_FUNCTION_NAME }}" \
+            --query '{Runtime:Runtime,Arch:Architectures,Timeout:Timeout,MemorySize:MemorySize,State:State,LastModified:LastModified}' \
+            --output table
+
+      - name: Post-deploy smoke invocation
+        # DryRun validates IAM invoke permission + Active state without running a
+        # full scrape (a RequestResponse invocation runs all 10 formats and can
+        # take minutes). StatusCode 204 confirms the function is reachable.
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.dry_run) }}
+        run: |
+          set -euo pipefail
+
+          FN="${{ env.LAMBDA_FUNCTION_NAME }}"
+          echo "Post-deploy smoke: DryRun invocation on ${FN}..."
+
+          INVOKE_OUT=$(aws lambda invoke \
+            --function-name "${FN}" \
+            --invocation-type DryRun \
+            --region "${{ env.AWS_REGION }}" \
+            /dev/null \
+            --output json 2>&1) || {
+            echo "ERROR: aws lambda invoke failed (non-zero exit)."
+            echo "${INVOKE_OUT}"
+            exit 1
+          }
+
+          echo "Invoke response: ${INVOKE_OUT}"
+
+          STATUS_CODE=$(echo "${INVOKE_OUT}" | jq -r '.StatusCode // empty')
+          FUNCTION_ERROR=$(echo "${INVOKE_OUT}" | jq -r '.FunctionError // empty')
+
+          if [ -z "${STATUS_CODE}" ]; then
+            echo "ERROR: Could not parse StatusCode from invoke response."
+            exit 1
+          fi
+
+          if [ -n "${FUNCTION_ERROR}" ]; then
+            echo "ERROR: Lambda invoke returned FunctionError: ${FUNCTION_ERROR}"
+            exit 1
+          fi
+
+          if [ "${STATUS_CODE}" != "204" ]; then
+            echo "ERROR: Expected StatusCode 204 from DryRun invocation, got ${STATUS_CODE}."
+            exit 1
+          fi
+
+          echo "Post-deploy smoke PASS: DryRun StatusCode=${STATUS_CODE}, no FunctionError."
+
+      - name: Dry run summary
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+        run: |
+          echo "DRY RUN - would deploy meta-scrape Lambda binary to ${{ env.LAMBDA_FUNCTION_NAME }}"
+          echo "DRY RUN - would enforce Timeout=900 and MemorySize=256 on ${{ env.LAMBDA_FUNCTION_NAME }}"
+          ls -lh services/meta-scrape/meta-scrape-lambda.zip
