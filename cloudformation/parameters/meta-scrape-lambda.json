@@ -1,0 +1,7 @@
+[
+  { "ParameterKey": "Environment",        "ParameterValue": "production" },
+  { "ParameterKey": "LambdaFunctionName", "ParameterValue": "vault-mtg-meta-scrape" },
+  { "ParameterKey": "SubnetIdA",          "ParameterValue": "subnet-05f881623516300b0" },
+  { "ParameterKey": "SubnetIdB",          "ParameterValue": "subnet-06d52651558bfbe7e" },
+  { "ParameterKey": "ScheduleCron",       "ParameterValue": "cron(0 3 * * ? *)" }
+]
