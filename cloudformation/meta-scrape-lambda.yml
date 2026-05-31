@@ -9,7 +9,7 @@ Parameters:
     Description: Deployment environment
   LambdaFunctionName:
     Type: String
-    Default: vault-mtg-meta-scrape
+    Default: vaultmtg-meta-scrape
     Description: Name of the meta-scrape Lambda function (created out-of-band by the deploy workflow, configured here)
   SubnetIdA:
     Type: AWS::EC2::Subnet::Id

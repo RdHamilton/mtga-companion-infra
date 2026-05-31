@@ -31,7 +31,7 @@ jobs:
 
     env:
       AWS_REGION: us-east-1
-      LAMBDA_FUNCTION_NAME: vault-mtg-meta-scrape
+      LAMBDA_FUNCTION_NAME: vaultmtg-meta-scrape
       GONOSUMDB: github.com/RdHamilton/vault-mtg
       GOPRIVATE: github.com/RdHamilton/vault-mtg
 
