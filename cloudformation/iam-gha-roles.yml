@@ -445,11 +445,15 @@ Resources:
                   # AssumeRoleWithWebIdentity. See marketing go-live remediation.
                   - !Sub repo:${GitHubOrg}/${WebRepo}:environment:production
                   # rhamiltoneng-web: marketing release.yml deploys on v* tags and
-                  # runs the deploy job in the `Production` environment (capital P --
-                  # the OIDC environment sub is case-sensitive and must match the
-                  # actual GitHub environment name exactly). No CFN param exists for
-                  # this repo, so the literal repo path is used here.
-                  - repo:RdHamilton/rhamiltoneng-web:environment:Production
+                  # runs the deploy job in deploy-site.yml's `environment: production`.
+                  # The OIDC environment sub is derived from the WORKFLOW's lowercase
+                  # `environment:` string (not the GitHub environment's display name)
+                  # and the StringLike match is case-sensitive, so it MUST be lowercase
+                  # `production` to match the presented sub. See go-live run 26723075094
+                  # failure (CloudTrail showed presented sub
+                  # repo:RdHamilton/rhamiltoneng-web:environment:production). No CFN
+                  # param exists for this repo, so the literal repo path is used here.
+                  - repo:RdHamilton/rhamiltoneng-web:environment:production
                   - repo:RdHamilton/rhamiltoneng-web:ref:refs/tags/v*
       Policies:
         - PolicyName: github-actions-deploy-permissions
