@@ -1,0 +1,118 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Scoped IAM role assumed by daemon-release.yml via GitHub Actions OIDC to
+  update BFF_DAEMON_LATEST_VERSION and BFF_DAEMON_RELEASED_AT SSM parameters
+  on each daemon/v* tag push. Implements fix for vault-mtg-tickets#167.
+
+  Permission set: ssm:PutParameter on exactly the four daemon version SSM
+  parameter ARNs (two environments × two keys). No GetParameter. No wildcards.
+  No other services.
+
+  Trust: GitHub Actions OIDC pinned to RdHamilton/vault-mtg daemon/v* tag refs
+  only. The sign-macos job that runs this step is tag-guarded
+  (startsWith(github.ref, 'refs/tags/daemon/v')), so the trust condition is
+  consistent with the job-level guard.
+
+  Deploy order: standalone (no stack dependencies).
+
+Parameters:
+  GitHubOrg:
+    Type: String
+    Default: RdHamilton
+    Description: GitHub organization or user that owns the app repo
+
+  AppRepo:
+    Type: String
+    Default: vault-mtg
+    Description: GitHub app repository name
+
+  OidcProviderArn:
+    Type: String
+    Default: arn:aws:iam::901347789205:oidc-provider/token.actions.githubusercontent.com
+    Description: ARN of the GitHub Actions OIDC provider in this account
+
+Resources:
+
+  # ---------------------------------------------------------------------------
+  # vaultmtg-daemon-release-ssm-updater
+  #
+  # Purpose: allow daemon-release.yml to write BFF_DAEMON_LATEST_VERSION and
+  #   BFF_DAEMON_RELEASED_AT into SSM on each daemon/v* release so the BFF
+  #   GET /api/v1/daemon/version endpoint stays current without manual
+  #   intervention. vault-mtg-tickets#167 AC3.
+  #
+  # Trust: pinned to daemon/v* tag refs in RdHamilton/vault-mtg. The
+  #   sign-macos job (where the SSM update step runs) is already tag-guarded
+  #   (`if: startsWith(github.ref, 'refs/tags/daemon/v')`), so the OIDC
+  #   sub-claim condition reinforces the same gate at the IAM level.
+  #
+  # Permission set (exact four parameter ARNs, ssm:PutParameter only):
+  #   - /vaultmtg/app/staging/BFF_DAEMON_LATEST_VERSION
+  #   - /vaultmtg/app/staging/BFF_DAEMON_RELEASED_AT
+  #   - /vaultmtg/app/production/BFF_DAEMON_LATEST_VERSION
+  #   - /vaultmtg/app/production/BFF_DAEMON_RELEASED_AT
+  #
+  # What is NOT granted:
+  #   - ssm:GetParameter / ssm:GetParameters (read path not needed)
+  #   - Any wildcard resource (e.g. /vaultmtg/app/*)
+  #   - Any other SSM action (PutParameter only)
+  #   - Any other service
+  #
+  # DeletionPolicy: Retain — losing this role would break every future daemon
+  #   release's SSM update step. Retain ensures a stack delete does not
+  #   silently remove the release pipeline's write credential.
+  # ---------------------------------------------------------------------------
+  DaemonReleaseSSMUpdaterRole:
+    Type: AWS::IAM::Role
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      RoleName: vaultmtg-daemon-release-ssm-updater
+      Description: >
+        GitHub Actions OIDC role for daemon-release.yml to write
+        BFF_DAEMON_LATEST_VERSION and BFF_DAEMON_RELEASED_AT SSM params
+        on each daemon/v* tag. ssm:PutParameter on exactly four param ARNs.
+        No GetParameter. No wildcards. vault-mtg-tickets#167.
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DaemonReleaseTrust
+            Effect: Allow
+            Principal:
+              Federated: !Ref OidcProviderArn
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              StringLike:
+                # Pinned to daemon/v* tag refs only. The sign-macos job that
+                # runs the SSM update step is itself tag-guarded
+                # (startsWith(github.ref, 'refs/tags/daemon/v')), so the OIDC
+                # sub condition is a belt-and-suspenders enforcement of the
+                # same guard at the IAM level.
+                token.actions.githubusercontent.com:sub:
+                  - !Sub "repo:${GitHubOrg}/${AppRepo}:ref:refs/tags/daemon/v*"
+      Policies:
+        - PolicyName: daemon-release-ssm-put
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: PutDaemonVersionParams
+                Effect: Allow
+                Action: ssm:PutParameter
+                Resource:
+                  # Exactly the four daemon version metadata params.
+                  # No wildcards. No GetParameter. vault-mtg-tickets#167.
+                  - !Sub "arn:aws:ssm:us-east-1:${AWS::AccountId}:parameter/vaultmtg/app/staging/BFF_DAEMON_LATEST_VERSION"
+                  - !Sub "arn:aws:ssm:us-east-1:${AWS::AccountId}:parameter/vaultmtg/app/staging/BFF_DAEMON_RELEASED_AT"
+                  - !Sub "arn:aws:ssm:us-east-1:${AWS::AccountId}:parameter/vaultmtg/app/production/BFF_DAEMON_LATEST_VERSION"
+                  - !Sub "arn:aws:ssm:us-east-1:${AWS::AccountId}:parameter/vaultmtg/app/production/BFF_DAEMON_RELEASED_AT"
+      Tags:
+        - Key: Project
+          Value: vaultmtg
+        - Key: Environment
+          Value: production
+        - Key: ManagedBy
+          Value: cloudformation
+        - Key: Stack
+          Value: vaultmtg-daemon-release-ssm-role
