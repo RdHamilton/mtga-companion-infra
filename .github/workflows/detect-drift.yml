@@ -121,6 +121,7 @@ jobs:
             mtga-companion-logs
             mtga-companion-logs-staging
             mtga-companion-sync-lambda
+            mtga-companion-meta-scrape-lambda
             mtga-companion-staging-deploy-role
             vaultmtg-app-cdn
             vaultmtg-cloudtrail
