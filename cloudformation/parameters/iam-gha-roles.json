@@ -3,5 +3,6 @@
   { "ParameterKey": "InfraRepo",              "ParameterValue": "mtga-companion-infra" },
   { "ParameterKey": "OidcProviderArn",        "ParameterValue": "arn:aws:iam::901347789205:oidc-provider/token.actions.githubusercontent.com" },
   { "ParameterKey": "SyncLambdaFunctionArn",  "ParameterValue": "arn:aws:lambda:us-east-1:901347789205:function:vault-mtg-sync" },
-  { "ParameterKey": "SyncLambdaStackArn",     "ParameterValue": "arn:aws:cloudformation:us-east-1:901347789205:stack/mtga-companion-sync-lambda/*" }
+  { "ParameterKey": "SyncLambdaStackArn",     "ParameterValue": "arn:aws:cloudformation:us-east-1:901347789205:stack/mtga-companion-sync-lambda/*" },
+  { "ParameterKey": "MetaScrapeLambdaFunctionArn", "ParameterValue": "arn:aws:lambda:us-east-1:901347789205:function:vaultmtg-meta-scrape" }
 ]
