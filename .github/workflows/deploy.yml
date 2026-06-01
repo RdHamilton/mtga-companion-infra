@@ -34,6 +34,7 @@ on:
           - cloudtrail
           - security-alarms
           - staging-deploy-role
+          - daemon-release-ssm-role
           - vaultmtg-security-services
           - rhamiltoneng-cdn
       dry_run:
@@ -92,8 +93,9 @@ jobs:
             security-alarms)            STACK_NAME="vaultmtg-security-alarms" ;          TEMPLATE_NAME="${{ inputs.stack }}" ;;
             vaultmtg-security-services) STACK_NAME="vaultmtg-security-services" ;        TEMPLATE_NAME="${{ inputs.stack }}" ;;
             cloudwatch-dashboards)      STACK_NAME="vaultmtg-cloudwatch-dashboards" ;     TEMPLATE_NAME="${{ inputs.stack }}" ;;
-            staging-deploy-role)        STACK_NAME="mtga-companion-staging-deploy-role" ; TEMPLATE_NAME="${{ inputs.stack }}" ;;
-            logs-import)                STACK_NAME="mtga-companion-logs" ;                TEMPLATE_NAME="logs" ;;
+            staging-deploy-role)        STACK_NAME="mtga-companion-staging-deploy-role" ;  TEMPLATE_NAME="${{ inputs.stack }}" ;;
+            daemon-release-ssm-role)    STACK_NAME="vaultmtg-daemon-release-ssm-role" ;   TEMPLATE_NAME="${{ inputs.stack }}" ;;
+            logs-import)                STACK_NAME="mtga-companion-logs" ;                 TEMPLATE_NAME="logs" ;;
             logs-staging)               STACK_NAME="mtga-companion-logs-staging" ;        TEMPLATE_NAME="logs" ;;
             rhamiltoneng-cdn)           STACK_NAME="rhamiltoneng-cdn" ;                   TEMPLATE_NAME="${{ inputs.stack }}" ;;
             ec2-sg-staging)             STACK_NAME="mtga-companion-ec2-sg-staging" ;      TEMPLATE_NAME="ec2-sg" ;;
