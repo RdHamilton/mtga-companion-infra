@@ -79,6 +79,34 @@ Parameters:
     Type: String
     Default: /vaultmtg/app/production/meta-scrape-db-password
     Description: SSM SecureString parameter path holding the meta-scrape Lambda PostgreSQL password. The PATH (not the value) is injected into DB_PASSWORD_SSM_PATH; the Lambda decrypts the value at runtime via ssm:GetParameter WithDecryption=true. The parameter must be created out-of-band as Type=SecureString.
+  # ---------------------------------------------------------
+  # Cold-start ordering gate (replaces the per-resource tolerance hack).
+  #
+  # The Lambda FUNCTION is created out-of-band by deploy-meta-scrape-lambda.yml,
+  # which itself needs the IAM execution role this stack creates. That circular
+  # dependency means the function cannot exist on the FIRST stack CREATE. Several
+  # resources here reference the function by name/ARN and CANNOT be created until
+  # it exists (EventInvokeConfig, Lambda::Permission, the Scheduler target, the
+  # VPC-config custom resource, and the function-metric alarms).
+  #
+  # FunctionExists gates ALL of those as a single deterministic switch:
+  #   Pass 1 (FunctionExists=false, the parameter default): create only the
+  #     function-independent infra — security group, RDS ingress, execution role,
+  #     scheduler role, DLQ, and DLQ policy. The stack reaches CREATE_COMPLETE.
+  #   Pass 2: deploy-meta-scrape-lambda.yml finds the role and creates the function.
+  #   Pass 3 (FunctionExists=true, injected by deploy.yml on the UPDATE changeset):
+  #     add the EventInvokeConfig, schedule + target, invoke permission, VPC config,
+  #     and alarms against the now-existing function.
+  # See docs/infra/meta-scrape-lambda-deploy.md.
+  # ---------------------------------------------------------
+  FunctionExists:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: Whether the out-of-band Lambda function already exists. deploy.yml derives this from the changeset type (CREATE -> 'false', UPDATE -> 'true'), so the cold-start needs no manual flag; the default 'false' applies only on the first stack CREATE.
+
+Conditions:
+  FunctionExists: !Equals [!Ref FunctionExists, 'true']
 
 Resources:
 
@@ -207,19 +235,11 @@ Resources:
                   if event['RequestType'] == 'Delete':
                       send(event, context, 'SUCCESS')
                       return
-                  # Cold-start ordering: on the first stack CREATE the function does
-                  # not yet exist (it is created out-of-band by deploy-meta-scrape-lambda.yml,
-                  # which itself needs this stack's IAM role). Breaking that circular
-                  # dependency: if the function is absent, succeed as a no-op so the stack
-                  # can finish creating the role + infra. The function is then created and
-                  # the VPC config is applied on the next stack pass (or the next deploy),
-                  # which finds the function present. See docs/infra/meta-scrape-lambda-deploy.md.
-                  try:
-                      client.get_function(FunctionName=props['FunctionName'])
-                  except client.exceptions.ResourceNotFoundException:
-                      send(event, context, 'SUCCESS',
-                           reason='Function not yet created; VPC config deferred to next stack pass.')
-                      return
+                  # This custom resource only exists when FunctionExists=true (the
+                  # stack-level Condition gates the whole resource), so the function
+                  # is guaranteed present by the time this runs. No per-resource
+                  # tolerance for an absent function is needed.
+                  # See docs/infra/meta-scrape-lambda-deploy.md.
                   waiter = client.get_waiter('function_updated')
                   waiter.wait(FunctionName=props['FunctionName'])
                   kwargs = dict(
@@ -285,6 +305,7 @@ Resources:
 
   LambdaVpcConfigCustomResource:
     Type: Custom::LambdaVpcConfig
+    Condition: FunctionExists
     DependsOn:
       - RDSIngressFromMetaScrapeLambda
       - LambdaExecutionRole
@@ -348,6 +369,7 @@ Resources:
   # Daily EventBridge Scheduler to trigger the meta-scrape Lambda at 03:00 UTC
   DailyMetaScrapeSchedule:
     Type: AWS::Scheduler::Schedule
+    Condition: FunctionExists
     DependsOn: MetaScrapeDLQ
     Properties:
       Name: !Sub "vaultmtg-${Environment}-meta-scrape-daily"
@@ -368,6 +390,7 @@ Resources:
   # Allow EventBridge Scheduler to invoke the Lambda
   LambdaPermissionScheduler:
     Type: AWS::Lambda::Permission
+    Condition: FunctionExists
     Properties:
       FunctionName: !Ref LambdaFunctionName
       Action: lambda:InvokeFunction
@@ -410,6 +433,7 @@ Resources:
   # Lambda async invocation config: 2 retries; failed events land in the DLQ.
   MetaScrapeLambdaEventInvokeConfig:
     Type: AWS::Lambda::EventInvokeConfig
+    Condition: FunctionExists
     DependsOn: LambdaExecutionRole
     Properties:
       FunctionName: !Ref LambdaFunctionName
@@ -422,6 +446,7 @@ Resources:
   # CloudWatch alarm: Lambda invocation errors
   MetaScrapeLambdaErrorAlarm:
     Type: AWS::CloudWatch::Alarm
+    Condition: FunctionExists
     DependsOn: MetaScrapeDLQ
     Properties:
       AlarmName: !Sub "vaultmtg-${Environment}-meta-scrape-lambda-errors"
@@ -494,6 +519,7 @@ Resources:
   # CloudWatch alarm: zero invocations (silently-dead scheduler)
   MetaScrapeLambdaZeroInvocationsAlarm:
     Type: AWS::CloudWatch::Alarm
+    Condition: FunctionExists
     Properties:
       AlarmName: !Sub "vaultmtg-${Environment}-meta-scrape-lambda-zero-invocations"
       AlarmDescription: !Sub |
@@ -542,6 +568,7 @@ Outputs:
       Name: !Sub "${AWS::StackName}-LambdaExecutionRoleArn"
 
   DailyMetaScrapeScheduleArn:
+    Condition: FunctionExists
     Description: ARN of the EventBridge daily meta-scrape schedule
     Value: !GetAtt DailyMetaScrapeSchedule.Arn
     Export:
@@ -560,6 +587,7 @@ Outputs:
       Name: !Sub "${AWS::StackName}-MetaScrapeDLQUrl"
 
   MetaScrapeLambdaErrorAlarmArn:
+    Condition: FunctionExists
     Description: ARN of the CloudWatch alarm for meta-scrape Lambda invocation errors
     Value: !GetAtt MetaScrapeLambdaErrorAlarm.Arn
     Export:
@@ -572,6 +600,7 @@ Outputs:
       Name: !Sub "${AWS::StackName}-MetaScrapeDLQDepthAlarmArn"
 
   MetaScrapeLambdaZeroInvocationsAlarmArn:
+    Condition: FunctionExists
     Description: ARN of the CloudWatch alarm for zero meta-scrape Lambda invocations
     Value: !GetAtt MetaScrapeLambdaZeroInvocationsAlarm.Arn
     Export:
