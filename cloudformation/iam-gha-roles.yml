@@ -52,6 +52,11 @@ Parameters:
     Default: arn:aws:cloudformation:us-east-1:901347789205:stack/mtga-companion-sync-lambda/*
     Description: ARN pattern for the sync-lambda CloudFormation stack
 
+  MetaScrapeLambdaFunctionArn:
+    Type: String
+    Default: arn:aws:lambda:us-east-1:901347789205:function:vaultmtg-meta-scrape
+    Description: ARN of the vaultmtg-meta-scrape Lambda function (created out-of-band by deploy-meta-scrape-lambda.yml; #177)
+
 Resources:
   # ===========================================================================
   # Permissions boundary for gha-infra-cfn-deploy (S-04 / vault-mtg#2325)
@@ -614,6 +619,13 @@ Resources:
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
+              # Same action set for both deploy workflows (deploy-sync-lambda.yml
+              # and deploy-meta-scrape-lambda.yml are structurally identical:
+              # get-function -> create-or-update-code -> update-configuration ->
+              # DryRun invoke). The meta-scrape function ARN (#177) is added to the
+              # resource list so the same role can deploy the meta-scrape Lambda.
+              # CreateFunction additionally requires iam:PassRole on the function's
+              # execution role -- granted in the LambdaPassExecRoles Sid below.
               - Sid: LambdaDeploy
                 Effect: Allow
                 Action:
@@ -624,7 +636,24 @@ Resources:
                   - lambda:CreateFunction
                   - lambda:WaitForFunctionUpdated
                   - lambda:InvokeFunction  # required by post-deploy smoke (DryRun invocation)
-                Resource: !Ref SyncLambdaFunctionArn
+                Resource:
+                  - !Ref SyncLambdaFunctionArn
+                  - !Ref MetaScrapeLambdaFunctionArn
+              # iam:PassRole is required when create-function runs (Pass 2 cold
+              # start): the deploy workflow passes the function's CFN-created
+              # execution role to Lambda. Scoped to the two function execution
+              # roles only (sync + meta-scrape), never role/*. The permissions
+              # boundary already permits iam:PassRole on role/vaultmtg-* and
+              # role/vault-mtg-*, so the intersection equals this grant.
+              - Sid: LambdaPassExecRoles
+                Effect: Allow
+                Action: iam:PassRole
+                Resource:
+                  - !Sub "arn:aws:iam::${AWS::AccountId}:role/vault-mtg-production-sync-lambda-role"
+                  - !Sub "arn:aws:iam::${AWS::AccountId}:role/vaultmtg-production-meta-scrape-lambda-role"
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: lambda.amazonaws.com
               - Sid: CloudFormationSyncStack
                 Effect: Allow
                 Action: cloudformation:*
