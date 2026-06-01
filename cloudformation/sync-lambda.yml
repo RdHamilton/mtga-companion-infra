@@ -106,7 +106,13 @@ Parameters:
   DbPasswordSsmPath:
     Type: String
     Default: /vaultmtg/app/production/sync-db-password
-    Description: SSM Parameter Store path that holds the sync Lambda PostgreSQL password (resolved at stack-update time into DB_PASSWORD). Stored as SSM Type=String (not SecureString) because the ssm-secure dynamic reference is not supported in Lambda env vars; the credential is M2M-only with no user PII path. See ADR-035 and the #37 pivot PR body for the full security trade-off.
+    Description: |
+      SSM SecureString parameter path holding the sync Lambda PostgreSQL password.
+      The PATH (not the value) is injected into DB_PASSWORD_SSM_PATH; the Lambda
+      decrypts the value at runtime via ssm:GetParameter WithDecryption=true.
+      The parameter must be converted to Type=SecureString out-of-band before
+      deploying this stack update (see #341). Previously Type=String resolved at
+      stack-update time into a plaintext DB_PASSWORD env var (ADR-035 trade-off).
 
 Resources:
 
@@ -156,7 +162,7 @@ Resources:
     DependsOn: SyncDLQ
     Properties:
       RoleName: !Sub "mtga-companion-${Environment}-sync-lambda-role"
-      Description: Execution role for sync Lambda with VPC access (RDS auth is password-based via DB_PASSWORD env injected from SSM)
+      Description: Execution role for sync Lambda with VPC access; fetches the DB password from SSM SecureString at runtime (ssm:GetParameter + kms:Decrypt). See #341.
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -167,10 +173,8 @@ Resources:
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
       # NOTE: the former 'RdsIamConnect' inline policy granting rds-db:connect
-      # was removed in the #37 pivot PR. The sync Lambda now authenticates to
-      # RDS via password auth -- DB_PASSWORD is injected by CFN at stack-update
-      # time from SSM (see DbPasswordSsmPath above). PR #2650 retains the
-      # forensic record of the prior IAM-auth attempt.
+      # was removed in the #37 pivot PR. PR #2650 retains the forensic record
+      # of the prior IAM-auth attempt.
       Policies:
         - PolicyName: DLQSendMessage
           PolicyDocument:
@@ -179,6 +183,25 @@ Resources:
               - Effect: Allow
                 Action: sqs:SendMessage
                 Resource: !GetAtt SyncDLQ.Arn
+        - PolicyName: ReadDbPasswordSecureString
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Scoped to the single sync DB password parameter ARN.
+              - Sid: ReadSyncDbPassword
+                Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${DbPasswordSsmPath}"
+              # kms:Decrypt for the SecureString, scoped to SSM via kms:ViaService.
+              - Sid: DecryptSyncDbPassword
+                Effect: Allow
+                Action:
+                  - kms:Decrypt
+                Resource: !Sub "arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/*"
+                Condition:
+                  StringEquals:
+                    kms:ViaService: !Sub "ssm.${AWS::Region}.amazonaws.com"
       Tags:
         - Key: Project
           Value: vaultmtg
@@ -307,24 +330,23 @@ Resources:
       ExecutionRoleArn: !GetAtt LambdaExecutionRole.Arn
       Timeout: !Ref LambdaTimeout
       MemorySize: !Ref LambdaMemorySize
-      # Per ADR-035, the CFN template is the source-of-record for the sync
-      # Lambda's Environment.Variables. SSM-backed values are resolved at
-      # stack-update time via CFN-native dynamic references. Literal values
-      # (DB_USER, DB_PORT) come from template parameters. AWS_REGION is
-      # auto-injected by the Lambda runtime and is intentionally omitted.
+      # Per #341, the CFN template is the source-of-record for the sync
+      # Lambda's Environment.Variables. Non-secret values are resolved at
+      # stack-update time via CFN-native dynamic references. The DB password
+      # is NOT injected; only the SSM path is passed so the Lambda can
+      # fetch-and-decrypt at runtime (mirroring the meta-scrape pattern).
+      # AWS_REGION is auto-injected by the Lambda runtime and intentionally omitted.
       EnvironmentVariables:
         DB_HOST: !Sub '{{resolve:ssm:${DbEndpointSsmPath}}}'
         DB_NAME: !Sub '{{resolve:ssm:${DbNameSsmPath}}}'
         DB_USER: !Ref DbUser
         DB_PORT: !Ref DbPort
-        # DB_PASSWORD is resolved from SSM at stack-update time and injected
-        # into the Lambda's env. Per AWS docs, '{{resolve:ssm-secure:...}}' is
-        # NOT supported in Lambda env vars, so DbPasswordSsmPath is an SSM
-        # parameter of Type=String. The credential is M2M-only -- see the
-        # security trade-off in the #37 pivot PR body. The orchestrator
-        # provisions the SSM parameter + sets the DB user's password
-        # out-of-band; this template just resolves whatever the param holds.
-        DB_PASSWORD: !Sub '{{resolve:ssm:${DbPasswordSsmPath}}}'
+        # DB_PASSWORD_SSM_PATH: the Lambda decrypts the password from this
+        # SSM SecureString parameter at runtime (ssm:GetParameter WithDecryption=true
+        # + kms:Decrypt via ReadDbPasswordSecureString policy on LambdaExecutionRole).
+        # The plaintext password never appears in Lambda env, CFN state, or
+        # get-function-configuration output. See #341.
+        DB_PASSWORD_SSM_PATH: !Ref DbPasswordSsmPath
 
   # EventBridge Scheduler execution role
   SchedulerExecutionRole:
