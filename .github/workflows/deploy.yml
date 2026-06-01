@@ -570,6 +570,37 @@ jobs:
               fi
               PARAMS_ARG="--parameters file://$MERGED_PARAMS"
               echo "Injected BootstrapSha=${{ steps.upload_bootstrap.outputs.bootstrap_sha }} into changeset parameters"
+            elif [ "${{ inputs.stack }}" = "meta-scrape-lambda" ] || [ "${{ inputs.stack }}" = "meta-scrape-lambda-staging" ]; then
+              # Cold-start gate (ticket #177): the meta-scrape Lambda FUNCTION is
+              # created out-of-band by deploy-meta-scrape-lambda.yml, which needs
+              # the IAM role THIS stack creates. So on the first stack CREATE the
+              # function cannot exist yet, and every function-dependent resource
+              # (EventInvokeConfig, schedule, invoke permission, VPC custom resource,
+              # alarms) is gated behind the FunctionExists CFN Condition.
+              #
+              # Derive FunctionExists from the changeset type, not from the static
+              # parameters file, so the cold-start is deterministic and there is no
+              # manual flag to flip (and no risk of a routine UPDATE tearing the
+              # schedule/alarms down):
+              #   CREATE -> false  (Pass 1: role + DLQ + SG only; function not built yet)
+              #   UPDATE -> true   (function already created by the workflow; add the rest)
+              if [ "$CHANGE_TYPE" = "CREATE" ]; then
+                FUNCTION_EXISTS="false"
+              else
+                FUNCTION_EXISTS="true"
+              fi
+              MERGED_PARAMS="${RUNNER_TEMP}/${{ inputs.stack }}-merged-params.json"
+              if [ -f "$PARAMS_FILE" ]; then
+                jq --arg fe "$FUNCTION_EXISTS" \
+                   '[.[] | select(.ParameterKey != "FunctionExists")] + [{ParameterKey:"FunctionExists", ParameterValue:$fe}]' \
+                   "$PARAMS_FILE" > "$MERGED_PARAMS"
+              else
+                jq -n --arg fe "$FUNCTION_EXISTS" \
+                   '[{ParameterKey:"FunctionExists", ParameterValue:$fe}]' \
+                   > "$MERGED_PARAMS"
+              fi
+              PARAMS_ARG="--parameters file://$MERGED_PARAMS"
+              echo "Injected FunctionExists=${FUNCTION_EXISTS} (CHANGE_TYPE=${CHANGE_TYPE}) into changeset parameters"
             else
               [ -f "$PARAMS_FILE" ] && PARAMS_ARG="--parameters file://$PARAMS_FILE"
             fi
