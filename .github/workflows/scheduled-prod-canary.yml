@@ -1,7 +1,14 @@
 name: Scheduled Prod Canary
 
-# #268 — Synthetic production canary.
-# #335 — CHECK 5: authenticated daemon/register idempotency guard.
+# #268 -- Synthetic production canary.
+#
+# NOTE: The authenticated daemon/register idempotency guard (PR #287 /
+# vault-mtg-tickets#335) was removed 2026-06-01 (vault-mtg-tickets#622 Tier-0
+# hotfix). That check used the session JWT from CHECK 4 against a route
+# guarded by RequireClerkOAuthToken, which requires an OAuth access token --
+# not a session JWT -- so it 401d on every run and fired the SNS alert chain
+# continuously. The idempotency regression it targeted is covered by the Go
+# integration test suite. Redesign tracked in vault-mtg-tickets#623.
 #
 # WHY THIS EXISTS
 #   The 2026-05-29 prod config-drift incident (Clerk allowed-subdomains empty,
@@ -10,25 +17,21 @@ name: Scheduled Prod Canary
 #   check until a human manually tested. Every one of those faults would have
 #   tripped at least one check in this canary within 5 minutes of the breakage.
 #
-#   The v0.3.5 daemon-register P0 (non-idempotent UpsertKey → Postgres 23505
-#   unique-constraint violation on (account_id, device_id) → HTTP 500 on any
-#   re-pair) was ALSO invisible to the canary until CHECK 5 was added here.
-#
-# WHAT IT CHECKS (6 probes, ordered by incident coverage)
-#   1. GET /healthz — BFF/nginx liveness.
-#   2. POST api.clerk.com/v1/sign_in_tokens — Clerk Backend API reachability
+# WHAT IT CHECKS (5 probes, ordered by incident coverage)
+#   1. GET /healthz -- BFF/nginx liveness.
+#   2. POST api.clerk.com/v1/sign_in_tokens -- Clerk Backend API reachability
 #      and sign-in token minting (validates sk_live key + canary user ID).
 #      /v1/sign_in_tokens is a Backend API endpoint that lives at api.clerk.com,
 #      NOT on the FAPI subdomain (clerk.vaultmtg.app). Hitting it on the FAPI
 #      returns HTTP 404. The sk_live key is passed as Authorization: Bearer.
-#      Requires the canary user_id in the POST body (Clerk mandates it — 422
+#      Requires the canary user_id in the POST body (Clerk mandates it -- 422
 #      without it). user_id is a non-secret SSM String param; see below.
 #      FAPI subdomain reachability (the root cause of the May incident) is
 #      covered by CHECK 4a and CHECK 4b, which hit clerk.vaultmtg.app directly.
-#   3. OPTIONS /api/v1/health w/ Origin: https://app.vaultmtg.app — CORS
+#   3. OPTIONS /api/v1/health w/ Origin: https://app.vaultmtg.app -- CORS
 #      preflight. Asserts the exact string "https://app.vaultmtg.app" in
 #      Access-Control-Allow-Origin (wildcard * or wrong origin fails).
-#   4. GET /api/v1/system/account w/ Bearer session JWT — authenticated data
+#   4. GET /api/v1/system/account w/ Bearer session JWT -- authenticated data
 #      fetch. Validates ClerkAuthMiddleware, JWKS reachability, and the
 #      /system/account route.
 #      Auth chain: sign_in_token (ticket) is exchanged via FAPI
@@ -36,18 +39,8 @@ name: Scheduled Prod Canary
 #      Backend API POST /v1/sessions/{id}/tokens mints a short-lived (~60s)
 #      session JWT acceptable to ClerkAuthMiddleware (JWKS-verified) (4b).
 #      FAPI token fetch rejected headless curl with 401 bot-protection (PR #268
-#      CHECK 4b fix) — Backend API is the correct server-to-server path.
-#   5. POST /api/v1/daemon/register (authenticated, idempotent) — uses the
-#      session JWT from CHECK 4 to call register with a fixed synthetic
-#      device_id (CANARY_DAEMON_DEVICE_ID). Asserts 2xx on every run. This
-#      is the regression guard for the v0.3.5 re-pair P0: on the first ever
-#      canary run the endpoint returns 201 (new key minted); on all subsequent
-#      runs it returns 200+empty (idempotent re-register path). Before the P0
-#      fix, re-registering the same (account, device_id) returned 500 — this
-#      check catches that regression in every run. Only the synthetic canary
-#      account and the fixed device_id are written to daemon_api_keys; no real
-#      user data is touched. Row growth is bounded: one row, ever.
-#   6. POST /api/v1/daemon/register (unauthenticated) — expects HTTP 401, not
+#      CHECK 4b fix) -- Backend API is the correct server-to-server path.
+#   5. POST /api/v1/daemon/register (unauthenticated) -- expects HTTP 401, not
 #      404. A 404 indicates the route is missing or CLERK_FRONTEND_API is stale.
 #
 # ANALYTICS SUPPRESSION — Option A (approved, no BFF code change)
@@ -192,16 +185,11 @@ env:
   SYNTHETIC_HEADER: "X-Synthetic: true"
   # Expected CORS origin — must be the EXACT string, not a wildcard.
   EXPECTED_CORS_ORIGIN: https://app.vaultmtg.app
-  # Fixed synthetic device_id for CHECK 5 (authenticated daemon/register).
-  # This UUID is a permanent canary fixture — the same value on every run.
-  # Steady state: first run → 201 (key minted); all subsequent runs → 200+empty
-  # (idempotent re-register). One daemon_api_keys row is written, ever, for the
-  # canary account + this device_id. Not a secret; hardcoded here deliberately.
-  CANARY_DAEMON_DEVICE_ID: "00000000-0000-0000-0000-000000000ca1"
+
 
 jobs:
   prod-canary:
-    name: Prod canary (healthz / Clerk auth / CORS / account / daemon-register-auth / daemon-register-unauth)
+    name: Prod canary (healthz / Clerk auth / CORS / account / daemon-register-unauth)
     runs-on: ubuntu-latest
     # environment:production-canary — a non-gated environment with no required_reviewers.
     # The `production` environment has required_reviewers: [RdHamilton], which means every
@@ -648,86 +636,17 @@ jobs:
           echo "CHECK 4 PASSED: FAPI ticket exchange complete + authenticated /api/v1/system/account confirmed healthy (HTTP $HTTP_CODE)."
 
       # ------------------------------------------------------------------
-      # CHECK 5: POST /api/v1/daemon/register (authenticated, idempotent)
-      #
-      # WHY: The v0.3.5 P0 (non-idempotent UpsertKey → Postgres 23505 →
-      # HTTP 500 on re-pair) was not caught by the canary because CHECK 5
-      # only exercised the unauthenticated path. This check closes that gap
-      # by re-registering the same synthetic device on every run and
-      # asserting 2xx — which is only true when the idempotent 200-empty
-      # path is working correctly.
-      #
-      # AUTH: Reuses the session JWT written to /tmp/canary-session-jwt.txt
-      # by CHECK 4. The JWT has a ~60s TTL; CHECK 5 runs immediately after
-      # CHECK 4 so the token is still valid at this point.
-      #
-      # DEVICE ID: Fixed synthetic UUID (CANARY_DAEMON_DEVICE_ID). The
-      # canary account + this device_id write one daemon_api_keys row total
-      # (on the very first canary run). All subsequent runs hit the
-      # idempotent 200+empty path — bounded row growth, no key rotation.
-      #
-      # HEALTHY RESPONSES (both are a PASS):
-      #   201 — first-ever run only: key minted for the canary (account,device).
-      #   200 — all subsequent runs: already-registered, 200+empty api_key.
-      #         This 200 is the P0 regression guard — before the fix this
-      #         path returned 500. FAIL on 500/4xx/000.
-      #
-      # SIDE EFFECT SCOPE: one daemon_api_keys row for the dedicated canary
-      # Clerk account + CANARY_DAEMON_DEVICE_ID. No real user data is
-      # touched. The canary account has no MTGA session so any api_key
-      # minted on the first run is permanently inert. X-Synthetic header
-      # suppresses PostHog event capture for this request.
-      # ------------------------------------------------------------------
-      - name: CHECK 5 -- Authenticated daemon/register (idempotency regression guard)
-        id: check_daemon_register_auth
-        run: |
-          set -euo pipefail
-          SESSION_JWT=$(cat /tmp/canary-session-jwt.txt)
-          echo "::add-mask::${SESSION_JWT}"
-
-          HTTP_CODE=$(curl -s -o /tmp/check5.body -w '%{http_code}' \
-            --max-time 10 \
-            --connect-timeout 5 \
-            -X POST \
-            -H "Authorization: Bearer ${SESSION_JWT}" \
-            -H "Content-Type: application/json" \
-            -H "${{ env.SYNTHETIC_HEADER }}" \
-            --data "{
-              \"device_id\": \"${{ env.CANARY_DAEMON_DEVICE_ID }}\",
-              \"platform\": \"canary\",
-              \"daemon_version\": \"canary\"
-            }" \
-            "${{ env.PROD_BFF_BASE }}/api/v1/daemon/register" || echo "000")
-
-          echo "POST /api/v1/daemon/register (authenticated, device_id=${{ env.CANARY_DAEMON_DEVICE_ID }}) -> HTTP $HTTP_CODE"
-
-          if [ "$HTTP_CODE" = "201" ]; then
-            echo "CHECK 5 PASSED: daemon/register returned 201 (first-ever run — new key minted for canary device). Auth chain + DB write path healthy."
-          elif [ "$HTTP_CODE" = "200" ]; then
-            # Verify the idempotent 200 response has an empty api_key — the
-            # contract from the v0.3.5 P0 fix (see PR #2806).
-            API_KEY=$(grep -o '"api_key":"[^"]*"' /tmp/check5.body | head -1 | cut -d'"' -f4 || echo "")
-            echo "CHECK 5 PASSED: daemon/register returned 200 (idempotent re-register path, api_key=${API_KEY:-<empty>}). P0 regression guard green."
-          else
-            BODY=$(head -c 300 /tmp/check5.body 2>/dev/null | sed 's/[A-Za-z0-9_-]\{20,\}/[REDACTED]/g' || true)
-            echo "::error::CHECK 5 FAILED: authenticated daemon/register returned HTTP $HTTP_CODE (expected 200 or 201). If 500: idempotency P0 regression (non-idempotent UpsertKey). If 401: auth/JWKS broken. If 404: route missing or CLERK_FRONTEND_API stale. Body (redacted): ${BODY:-<empty>}"
-            echo "step_failed=check5-daemon-register-auth" >> "$GITHUB_OUTPUT"
-            echo "failure_reason=CHECK 5: POST ${{ env.PROD_BFF_BASE }}/api/v1/daemon/register (authenticated) returned HTTP $HTTP_CODE (expected 200 or 201). If 500: daemon-register idempotency P0 regression. If 401: ClerkAuthMiddleware/JWKS broken. If 404: route missing or CLERK_FRONTEND_API stale. Body (redacted): ${BODY:-<empty>}" >> "$GITHUB_OUTPUT"
-            exit 1
-          fi
-
-      # ------------------------------------------------------------------
-      # CHECK 6: POST /api/v1/daemon/register (unauthenticated) → expect 401.
+      # CHECK 5: POST /api/v1/daemon/register (unauthenticated) -- expect 401.
       # A 404 means the route is missing or CLERK_FRONTEND_API is stale.
       # A 503 means nginx is rate-limiting (durable rate-limit fix from PR #271
       # should prevent this, but the canary catches regressions).
       # This check is unaffected by the CHECK 2/4 auth chain changes.
       # ------------------------------------------------------------------
-      - name: CHECK 6 -- Unauthenticated daemon/register expects 401
+      - name: CHECK 5 -- Unauthenticated daemon/register expects 401
         id: check_daemon_register
         run: |
           set -euo pipefail
-          HTTP_CODE=$(curl -s -o /tmp/check6.body -w '%{http_code}' \
+          HTTP_CODE=$(curl -s -o /tmp/check5.body -w '%{http_code}' \
             --max-time 10 \
             --connect-timeout 5 \
             -X POST \
@@ -739,13 +658,13 @@ jobs:
           echo "POST /api/v1/daemon/register (unauthenticated) -> HTTP $HTTP_CODE"
 
           if [ "$HTTP_CODE" != "401" ]; then
-            echo "::error::CHECK 6 FAILED: daemon/register returned HTTP $HTTP_CODE (expected 401). If 404: route missing or CLERK_FRONTEND_API stale. If 503: nginx rate-limit regression."
-            echo "step_failed=check6-daemon-register-unauth" >> "$GITHUB_OUTPUT"
-            echo "failure_reason=CHECK 6: POST ${{ env.PROD_BFF_BASE }}/api/v1/daemon/register returned HTTP $HTTP_CODE (expected 401). If 404=route missing/CLERK_FRONTEND_API stale. If 503=nginx rate-limit regression." >> "$GITHUB_OUTPUT"
+            echo "::error::CHECK 5 FAILED: daemon/register returned HTTP $HTTP_CODE (expected 401). If 404: route missing or CLERK_FRONTEND_API stale. If 503: nginx rate-limit regression."
+            echo "step_failed=check5-daemon-register-unauth" >> "$GITHUB_OUTPUT"
+            echo "failure_reason=CHECK 5: POST ${{ env.PROD_BFF_BASE }}/api/v1/daemon/register returned HTTP $HTTP_CODE (expected 401). If 404=route missing/CLERK_FRONTEND_API stale. If 503=nginx rate-limit regression." >> "$GITHUB_OUTPUT"
             exit 1
           fi
 
-          echo "CHECK 6 PASSED: daemon/register returned 401 (expected rejection, route present)."
+          echo "CHECK 5 PASSED: daemon/register returned 401 (expected rejection, route present)."
 
       # ------------------------------------------------------------------
       # Summary step — always runs, aggregates pass/fail for notify job.
@@ -757,13 +676,13 @@ jobs:
           if [ "${{ job.status }}" = "success" ]; then
             echo "step_failed=" >> "$GITHUB_OUTPUT"
             echo "failure_reason=" >> "$GITHUB_OUTPUT"
-            echo "Prod canary: ALL 6 CHECKS PASSED."
+            echo "Prod canary: ALL 5 CHECKS PASSED."
           else
             # Aggregate: whichever failing step wrote to GITHUB_OUTPUT first
             # is the one we surface. Concatenate all outputs and take the first
             # non-empty segment.
-            STEP_FAILED="${{ steps.fetch_token.outputs.step_failed }}${{ steps.fetch_user_id.outputs.step_failed }}${{ steps.check_healthz.outputs.step_failed }}${{ steps.check_clerk.outputs.step_failed }}${{ steps.check_cors.outputs.step_failed }}${{ steps.check_account.outputs.step_failed }}${{ steps.check_daemon_register_auth.outputs.step_failed }}${{ steps.check_daemon_register.outputs.step_failed }}"
-            REASON="${{ steps.fetch_token.outputs.failure_reason }}${{ steps.fetch_user_id.outputs.failure_reason }}${{ steps.check_healthz.outputs.failure_reason }}${{ steps.check_clerk.outputs.failure_reason }}${{ steps.check_cors.outputs.failure_reason }}${{ steps.check_account.outputs.failure_reason }}${{ steps.check_daemon_register_auth.outputs.failure_reason }}${{ steps.check_daemon_register.outputs.failure_reason }}"
+            STEP_FAILED="${{ steps.fetch_token.outputs.step_failed }}${{ steps.fetch_user_id.outputs.step_failed }}${{ steps.check_healthz.outputs.step_failed }}${{ steps.check_clerk.outputs.step_failed }}${{ steps.check_cors.outputs.step_failed }}${{ steps.check_account.outputs.step_failed }}${{ steps.check_daemon_register.outputs.step_failed }}"
+            REASON="${{ steps.fetch_token.outputs.failure_reason }}${{ steps.fetch_user_id.outputs.failure_reason }}${{ steps.check_healthz.outputs.failure_reason }}${{ steps.check_clerk.outputs.failure_reason }}${{ steps.check_cors.outputs.failure_reason }}${{ steps.check_account.outputs.failure_reason }}${{ steps.check_daemon_register.outputs.failure_reason }}"
             if [ -z "$STEP_FAILED" ]; then
               STEP_FAILED="unknown"
               REASON="Canary failed but no step captured a failure reason. Inspect the job log."
@@ -833,11 +752,11 @@ jobs:
             printf '  2. POST api.clerk.com/v1/sign_in_tokens (Clerk Backend API sign-in token)\n'
             printf '  3. OPTIONS /api/v1/health w/ Origin: https://app.vaultmtg.app (CORS exact-origin)\n'
             printf '  4. FAPI ticket (4a) + Backend API token (4b) + GET /api/v1/system/account w/ Bearer JWT (ClerkAuthMiddleware + JWKS). PASS=HTTP 200 OR HTTP 404 with body "account not found" (healthy first-run state -- canary user has no daemon). FAIL=HTTP 401 (auth broken) or 404 without that body (route missing).\n'
-            printf '  5. POST /api/v1/daemon/register authenticated w/ fixed canary device_id (idempotency guard -- regression test for v0.3.5 re-pair P0). PASS=200 or 201. FAIL=500 (idempotency regression), 401 (auth broken), 404 (route missing).\n'
-            printf '  6. POST /api/v1/daemon/register unauthenticated (expect 401 not 404)\n\n'
+            printf '  5. POST /api/v1/daemon/register unauthenticated (expect 401 not 404)\n\n'
             printf 'Investigate the run URL above. This canary was introduced in ticket #268\n'
-            printf 'after the 2026-05-29 prod config-drift incident. CHECK 5 added in ticket #335\n'
-            printf 'after the v0.3.5 daemon-register re-pair P0.\n'
+            printf 'after the 2026-05-29 prod config-drift incident.\n'
+            printf 'NOTE: The authenticated daemon/register idempotency guard (ticket #335) was\n'
+            printf 'removed 2026-06-01 (ticket #622) -- redesign tracked in ticket #623.\n'
           } > /tmp/sns-message.txt
 
           aws sns publish \
