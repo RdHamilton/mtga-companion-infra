@@ -207,6 +207,19 @@ Resources:
                   if event['RequestType'] == 'Delete':
                       send(event, context, 'SUCCESS')
                       return
+                  # Cold-start ordering: on the first stack CREATE the function does
+                  # not yet exist (it is created out-of-band by deploy-meta-scrape-lambda.yml,
+                  # which itself needs this stack's IAM role). Breaking that circular
+                  # dependency: if the function is absent, succeed as a no-op so the stack
+                  # can finish creating the role + infra. The function is then created and
+                  # the VPC config is applied on the next stack pass (or the next deploy),
+                  # which finds the function present. See docs/infra/meta-scrape-lambda-deploy.md.
+                  try:
+                      client.get_function(FunctionName=props['FunctionName'])
+                  except client.exceptions.ResourceNotFoundException:
+                      send(event, context, 'SUCCESS',
+                           reason='Function not yet created; VPC config deferred to next stack pass.')
+                      return
                   waiter = client.get_waiter('function_updated')
                   waiter.wait(FunctionName=props['FunctionName'])
                   kwargs = dict(
