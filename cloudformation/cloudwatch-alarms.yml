@@ -179,6 +179,24 @@ Parameters:
       5-minute evaluation window that triggers the restart-loop alarm.
     Default: 3
 
+  # ----- RDS database-connections alarm -----
+
+  RdsDatabaseConnectionsThreshold:
+    Type: Number
+    Description: |
+      Number of active RDS database connections that triggers the alarm.
+      Default 80 -- conservative ceiling for a db.t3.micro (max_connections ~100)
+      that leaves headroom before the database starts refusing new connections.
+    Default: 80
+
+  RdsDatabaseConnectionsEvaluationPeriods:
+    Type: Number
+    Description: |
+      Number of consecutive 1-minute periods above RdsDatabaseConnectionsThreshold
+      before the alarm fires. Default 5 (5 minutes) guards against transient spikes
+      during cold-start request bursts while still catching genuine connection leaks.
+    Default: 5
+
   # ----- RDS identifier -----
 
   RdsInstanceIdentifier:
@@ -1174,6 +1192,70 @@ Resources:
         - Key: Environment
           Value: !Ref Environment
 
+  # ---------------------------------------------------------
+  # RDS database-connections alarm (vmt-t#606)
+  #
+  # Fires when the number of active connections to the RDS
+  # PostgreSQL instance exceeds RdsDatabaseConnectionsThreshold
+  # (default 80) for RdsDatabaseConnectionsEvaluationPeriods
+  # consecutive 1-minute periods.
+  #
+  # Metric source: AWS/RDS namespace (built-in; no agent required).
+  # The db.t3.micro default max_connections is ~100 (memory-derived).
+  # Alerting at 80 gives a 20-connection window to investigate before
+  # the database starts refusing new connections and the BFF returns
+  # 5xx errors on every DB-bound request.
+  #
+  # Typical causes: BFF connection pool misconfiguration, a connection
+  # leak in a handler that does not release pgxpool conns, or a burst
+  # of concurrent requests during beta launch.
+  #
+  # Period=60 (1 minute): DatabaseConnections is emitted once per
+  # minute, so a 5-minute period would aggregate across 5 samples.
+  # Using 1-minute periods with EvaluationPeriods=5 catches a
+  # sustained leak without false-positiving on a single cold-start burst.
+  #
+  # TreatMissingData=notBreaching: the metric is not emitted when no
+  # connections are active (e.g. pre-deploy). Not a concern.
+  # ---------------------------------------------------------
+  RdsDatabaseConnectionsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "vaultmtg-${Environment}-rds-connections-high"
+      AlarmDescription: !Sub |
+        RDS PostgreSQL active connections have been above ${RdsDatabaseConnectionsThreshold}
+        for ${RdsDatabaseConnectionsEvaluationPeriods} consecutive minutes.
+        The db.t3.micro max_connections ceiling is ~100; at ${RdsDatabaseConnectionsThreshold}
+        the database is near capacity and may start refusing connections.
+        1. Check current connections:
+             psql ... -c "SELECT count(*) FROM pg_stat_activity;"
+        2. Identify clients holding idle connections:
+             psql ... -c "SELECT application_name, state, count(*) FROM pg_stat_activity GROUP BY 1,2 ORDER BY 3 DESC;"
+        3. Check BFF connection pool config in /etc/vaultmtg/env (DB_MAX_OPEN_CONNS).
+        4. If a connection leak is suspected, restart vaultmtg-bff.service after
+           verifying no active transactions: sudo systemctl restart vaultmtg-bff
+        Runbook: vault-mtg-docs/engineering/runbooks/on-call.md
+      Namespace: AWS/RDS
+      MetricName: DatabaseConnections
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref RdsInstanceIdentifier
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: !Ref RdsDatabaseConnectionsEvaluationPeriods
+      Threshold: !Ref RdsDatabaseConnectionsThreshold
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
+      OKActions:
+        - !Ref AlertTopic
+      Tags:
+        - Key: Project
+          Value: vaultmtg
+        - Key: Environment
+          Value: !Ref Environment
+
 Outputs:
   AlertTopicArn:
     Description: |
@@ -1272,3 +1354,9 @@ Outputs:
     Value: !GetAtt ProjectionDLQAlarm.Arn
     Export:
       Name: !Sub "vaultmtg-${Environment}-ProjectionDLQAlarmArn"
+
+  RdsDatabaseConnectionsAlarmArn:
+    Description: ARN of the RDS database-connections CloudWatch alarm.
+    Value: !GetAtt RdsDatabaseConnectionsAlarm.Arn
+    Export:
+      Name: !Sub "vaultmtg-${Environment}-RdsDatabaseConnectionsAlarmArn"

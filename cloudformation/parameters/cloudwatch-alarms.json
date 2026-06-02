@@ -19,6 +19,8 @@
   { "ParameterKey": "BffLatencyThresholdMs",     "ParameterValue": "750" },
   { "ParameterKey": "BffLatencyEvaluationPeriods", "ParameterValue": "3" },
   { "ParameterKey": "BffRestartCountThreshold",  "ParameterValue": "3" },
+  { "ParameterKey": "RdsDatabaseConnectionsThreshold",        "ParameterValue": "80" },
+  { "ParameterKey": "RdsDatabaseConnectionsEvaluationPeriods", "ParameterValue": "5" },
   { "ParameterKey": "RdsInstanceIdentifier",     "ParameterValue": "mtga-companion-postgres" },
   { "ParameterKey": "BffHealthCheckHost",        "ParameterValue": "api.vaultmtg.app" },
   { "ParameterKey": "BffHealthCheckFailureThreshold", "ParameterValue": "3" },
