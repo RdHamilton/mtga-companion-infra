@@ -1221,7 +1221,7 @@ Resources:
   RdsDatabaseConnectionsAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmName: !Sub "vault-mtg-${Environment}-rds-connections-high"
+      AlarmName: !Sub "vaultmtg-${Environment}-rds-connections-high"
       AlarmDescription: !Sub |
         RDS PostgreSQL active connections have been above ${RdsDatabaseConnectionsThreshold}
         for ${RdsDatabaseConnectionsEvaluationPeriods} consecutive minutes.
@@ -1252,7 +1252,7 @@ Resources:
         - !Ref AlertTopic
       Tags:
         - Key: Project
-          Value: vault-mtg
+          Value: vaultmtg
         - Key: Environment
           Value: !Ref Environment
 
@@ -1359,4 +1359,4 @@ Outputs:
     Description: ARN of the RDS database-connections CloudWatch alarm.
     Value: !GetAtt RdsDatabaseConnectionsAlarm.Arn
     Export:
-      Name: !Sub "vault-mtg-${Environment}-RdsDatabaseConnectionsAlarmArn"
+      Name: !Sub "vaultmtg-${Environment}-RdsDatabaseConnectionsAlarmArn"
